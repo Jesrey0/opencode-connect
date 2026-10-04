@@ -1,0 +1,36 @@
+{
+  "name": "opencode-connect",
+  "version": "0.5.1",
+  "private": true,
+  "description": "Native OpenCode HostPlane and canonical WorkerPlane for ChatGPT operators.",
+  "type": "module",
+  "scripts": {
+    "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/server.ts",
+    "console": "tsx src/console.ts",
+    "console:dist": "node dist/src/console.js",
+    "start": "node dist/src/server.js",
+    "deploy": "node dist/src/deploy.js",
+    "test": "node --import tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/express": "2.0.1",
+    "@modelcontextprotocol/node": "2.1.0",
+    "@modelcontextprotocol/server": "2.2.0",
+    "@opencode/client": "2.0.22",
+    "express": "5.2.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.2.0",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.3",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
