@@ -45,7 +45,7 @@ try {
         try {
           $path = [string]$step.path
           $validGet = $path -match '^/v1/(capabilities|windows|desktop/screenshot|windows/(?:0[xX])?[0-9a-fA-F]{1,16}/(state|screenshot))$'
-          $validPost = $path -match '^/v1/(windows/(?:0[xX])?[0-9a-fA-F]{1,16}/(activate|close)|elements/(find|inspect|focus)|actions/(invoke-located|set-value-located)|input/(key-sequence|move|pointer-click|scroll))$'
+          $validPost = $path -match '^/v1/(windows/(?:0[xX])?[0-9a-fA-F]{1,16}/(activate|close)|elements/(find|inspect|focus)|actions/(invoke-located|set-value-located)|input/(key-sequence|move|pointer-click|scroll|drag))$'
           if (!(($step.method -ceq 'GET' -and $validGet) -or ($step.method -ceq 'POST' -and $validPost))) { throw 'invalid' }
           $message = [Net.Http.HttpRequestMessage]::new([Net.Http.HttpMethod]::new($step.method), $path)
           if ($null -ne $step.body) {
@@ -57,6 +57,22 @@ try {
           if (!$response.IsSuccessStatusCode) {
             $code = 'http'
             $status = [int]$response.StatusCode
+            # Only an exact, bounded absence code from inspect crosses this boundary.
+            # Never export upstream titles, details, exception text or credentials.
+            if ($status -eq 404 -and $path -ceq '/v1/elements/inspect') {
+              $stream = $response.Content.ReadAsStreamAsync($cts.Token).GetAwaiter().GetResult()
+              $memory = [IO.MemoryStream]::new()
+              $buffer = [byte[]]::new(8192)
+              while (($count = $stream.ReadAsync($buffer, 0, $buffer.Length, $cts.Token).GetAwaiter().GetResult()) -gt 0) {
+                if ($memory.Length + $count -gt 262144) { $code = 'too_large'; throw 'size' }
+                $memory.Write($buffer, 0, $count)
+              }
+              try {
+                $problem = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString($memory.ToArray())) -AsHashtable -NoEnumerate -Depth 64
+                if ($problem.code -ceq 'element_not_found') { $code = 'element_not_found' }
+                if ($problem.code -ceq 'locator_not_found') { $code = 'locator_not_found' }
+              } catch { $code = 'http' }
+            }
             throw 'http'
           }
           $isPng = $path.EndsWith('/screenshot', [StringComparison]::Ordinal)

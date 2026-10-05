@@ -25,7 +25,7 @@ test("MCP discovery uses host/command groups and canonical worker names without 
   const fixture = await mcpFixture(nativeFixture(() => { throw new Error("discovery must not access runtime"); }));
   try {
     const { tools } = await fixture.client.listTools();
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["computer.observe", "computer.interact", "computer.screenshot", "status", "opencode.start", "opencode.wait", "opencode.inspect", "opencode.query", "opencode.act", "host.inspect", "host.write", "host.worktree", "command.start", "command.read", "command.control"].sort());
+    assert.deepEqual(tools.map((t) => t.name).sort(), ["computer.observe", "computer.interact", "computer.screenshot", "computer.sequence", "status", "opencode.start", "opencode.wait", "opencode.inspect", "opencode.query", "opencode.act", "host.inspect", "host.write", "host.worktree", "command.start", "command.read", "command.control"].sort());
     for (const name of ["command.read", "host.write", "host.worktree"]) {
       const annotations = tools.find((t) => t.name === name)!.annotations!;
       assert.equal(annotations.readOnlyHint, false); assert.equal(annotations.idempotentHint, false); assert.equal(annotations.destructiveHint, true);

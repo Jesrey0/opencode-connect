@@ -1,6 +1,6 @@
-# Windows Computer Use HostPlane (OpenCode Connect 0.6.0)
+# Windows Computer Use HostPlane (OpenCode Connect 0.7.0)
 
-OpenCode Connect exposes three Windows Computer Use (WCU) v1 tools through the existing MCP transport and authorization boundary. WCU 0.3.0 remains on Windows `127.0.0.1:17842`; the adapter does not change its listener, configuration or authentication. Linux loopback is not used to contact WCU.
+OpenCode Connect exposes four Windows Computer Use (WCU) v1 tools through the existing MCP transport and authorization boundary. WCU 0.4.0 remains on Windows `127.0.0.1:17842`; the adapter does not change its listener, configuration or authentication. Linux loopback is not used to contact WCU.
 
 ## Runtime and credentials
 
@@ -12,7 +12,7 @@ Only the Windows child reads `%LOCALAPPDATA%\WindowsComputerUse\data\token.dpapi
 
 ## Tool contracts
 
-All inputs are strict objects: extra fields are rejected. `handle` is a nonzero hexadecimal WCU handle in the signed 64-bit range, with an optional `0x` prefix. A locator contains at least one of `automationId`, `name`, `controlType`, each a nonblank string of at most 256 UTF-16 units. An optional `ancestor` uses the same criteria and cannot have another ancestor. Criteria are exact and case-sensitive; the adapter preserves text without trimming or case conversion. There is no fuzzy matching, locator cache or wait loop.
+All inputs are strict objects: extra fields are rejected. `handle` is a nonzero hexadecimal WCU handle in the signed 64-bit range, with an optional `0x` prefix. A locator contains at least one of `automationId`, `name`, `controlType`, each a nonblank string of at most 256 UTF-16 units. An optional `ancestor` uses the same criteria and cannot have another ancestor. Criteria are exact and case-sensitive; the adapter preserves text without trimming or case conversion. There is no fuzzy matching or locator cache. Bounded HostPlane waits are available only in [`computer.sequence`](computer-throughput.md).
 
 ### `computer.observe`
 
@@ -44,6 +44,7 @@ Variants, selected by `action`:
 | `{action:"move", x, y}` | `POST /v1/input/move` |
 | `{action:"click", x, y, button:"left"\|"right", count:1\|2}` | `POST /v1/input/pointer-click` |
 | `{action:"scroll", delta, x?, y?}` | `POST /v1/input/scroll` |
+| `{action:"drag", points:[{x,y},...], durationMs?, stepsPerSegment?}` | `POST /v1/input/drag` |
 | `{action:"close", handle}` | `POST /v1/windows/{handle}/close` |
 
 `activate` defaults to `false`; foreground activation is always explicit. For `focus`, `setValue` and `invoke`, `activate=true` prepends window activation, and `readback` defaults to `true`, appending an immediate `POST /v1/elements/inspect` with the same handle and locator. Set `readback=false` to omit inspection. `keySequence` requires `handle` when `activate=true`, then activates before injection. A handle with `activate=false` does not redirect key injection to that window: WCU injects into the current foreground context. Activation returning `isForeground=false` fails visibly and stops subsequent steps.
@@ -53,6 +54,12 @@ The structured result is `{action, result, activation?, state?}`. `result` is WC
 `value` is at most 4096 UTF-16 units. Key sequences contain 1..32 chords; `key` is a numeric Windows virtual-key code 1..254. Optional `modifiers` are up to three unique codes: Shift=16, Ctrl=17, Alt=18. A modifier cannot equal the chord key. Omitted modifiers become an empty array because WCU requires an array. Coordinates are signed 32-bit integers and may be negative on multi-monitor desktops. Scroll `delta` is a nonzero integer in -1200..1200; provide both `x` and `y`, or neither.
 
 Annotations: `readOnlyHint=false`, `destructiveHint=true`, `idempotentHint=false`, `openWorldHint=true`.
+
+Drag points contain 2..128 signed 32-bit coordinate pairs. `durationMs` is an integer in 0..5000. Optional `stepsPerSegment` is positive and must satisfy `1 + (points.length - 1) * stepsPerSegment <= 512`. Omitted fields are passed through as omitted so WCU chooses its defaults. Drag returns `{action:"drag", result:{success:true, metadata:{elapsedMs, emittedInputCount, steps}}}`; WCU timing and counts are preserved. No raw button-down/up action is exposed. Capabilities preserve WCU's `maxDragPoints`, `maxDragDurationMs` and `maxDragSteps` limits when advertised.
+
+### `computer.sequence`
+
+See [Computer Use Throughput](computer-throughput.md) for the 1..32-step batching contract, exact waits, HostPlane telemetry and failure results. Sequence uses the same action executor as `computer.interact`, is sequential, and stops on the first failure without replaying mutations. Annotations: `readOnlyHint=false`, `destructiveHint=true`, `idempotentHint=false`, `openWorldHint=false`.
 
 ### `computer.screenshot`
 
@@ -64,10 +71,10 @@ Annotations: `readOnlyHint=true`, `destructiveHint=false`, `idempotentHint=true`
 
 ## Bridge protocol, concurrency and failure
 
-WSL sends compact UTF-8 NDJSON over stdin: `{id:"wcu-N", steps:[{method:"GET"|"POST", path, body?}]}`. Only adapter-selected paths are accepted in Windows. One tool call contains 1..3 steps. The child processes each request's steps sequentially before reading the next request, so concurrent MCP calls cannot interleave activation, injection and readback. Each request ID correlates with one reply:
+WSL sends compact UTF-8 NDJSON over stdin: `{id:"wcu-N", steps:[{method:"GET"|"POST", path, body?}]}`. Only adapter-selected paths are accepted in Windows. One action composition contains 1..3 HTTP steps. A sequence issues one such transaction per action, or a single observation per wait poll. The child processes each request's steps sequentially before reading the next request, so concurrent MCP calls cannot interleave activation, injection and readback. The shared HostPlane backend also serializes entire sequences, including waits, with its other computer tool calls. Each request ID correlates with one reply:
 
 - Success: `{id, ok:true, results:[...]}`. JSON steps return native JSON; screenshot steps return `{png:base64}` internally.
-- Failure: `{id, ok:false, code, completedSteps, status?}`. Codes are fixed adapter categories; HTTP bodies and exception text are omitted. A failed request stops its remaining steps.
+- Failure: `{id, ok:false, code, completedSteps, status?}`. Codes are fixed adapter categories; HTTP bodies and exception text are omitted. For a 404 from `/v1/elements/inspect` only, the bridge reads a bounded problem response and exports just the exact allowlisted code `element_not_found` or `locator_not_found`, enabling HostPlane absence waits. All other errors remain failures. A failed request stops its remaining steps.
 
 The bridge admits at most 64 pending calls, with 64 KiB request frames. Each Windows transaction has a 10-second cancellation deadline covering all HTTP steps and bounded streaming reads. WSL gives each request 15 seconds, including process startup and queue time. JSON HTTP bodies are capped at 256 KiB; PNG bodies at 1 MiB; stdout frames at 2 MiB. The existing 256 KiB MCP structured-result limit also applies.
 
@@ -77,4 +84,4 @@ Malformed replies, correlation failures, I/O failure, process exit or the WSL de
 
 ## Validation
 
-`test/computer.test.ts` uses fake child streams and fake WCU transport data. It covers lazy persistence, correlation, UTF-8 framing, timeout, restart, safe errors, bounds, schemas/discovery, endpoint mapping, composition, screenshots and HTTP exchange lifetime. Normal `npm test` does not require Windows, WCU, PowerShell or token access. Live Windows desktop/DPAPI integration must be validated separately before deployment; this worktree does not deploy or restart services.
+`test/computer.test.ts` uses fake child streams and fake WCU transport data. It covers lazy persistence, correlation, UTF-8 framing, timeout, restart, safe errors, bounds, schemas/discovery, endpoint mapping, composition, screenshots and HTTP exchange lifetime. It also covers drag passthrough, sequence validation/order/failures, exact wait polling/deadlines, timing and sequence discovery. Normal `npm test` does not require Windows, WCU, PowerShell or token access. Live Windows desktop/DPAPI integration must be validated separately before deployment; this worktree does not deploy or restart services.

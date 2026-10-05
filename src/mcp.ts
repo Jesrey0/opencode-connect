@@ -4,7 +4,7 @@ import * as z from "zod/v4";
 import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
 import { ComputerBackend } from "./computer.js";
-import { computerObserveSchema, computerInteractSchema, computerScreenshotSchema, computerOutputSchemas } from "./computerSchema.js";
+import { computerObserveSchema, computerInteractSchema, computerScreenshotSchema, computerSequenceSchema, computerOutputSchemas } from "./computerSchema.js";
 import { exposedUnion } from "./schema.js";
 import { VERSION } from "./version.js";
 import { safeError, AdmissionError, ConnectorError } from "./bounds.js";
@@ -189,6 +189,17 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     outputSchema: computerOutputSchemas.interact,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
   }, async (input) => structuredResult(await computerBackend.interact(input)));
+
+  registerTool("computer.sequence", {
+    title: "Run Windows Computer Sequence",
+    description: "Run 1..32 explicit actions or exact waitFor conditions sequentially; stop on first failure, never retry mutations. Waits default to 3000 ms (maximum 10000), polling every 100 ms (50..1000). Same activation/readback contracts as computer.interact. Returns indexed results and HostPlane timings; no screenshots, scripts, loops or branches.",
+    inputSchema: computerSequenceSchema,
+    outputSchema: computerOutputSchemas.sequence,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+  }, async (input) => {
+    const result = await computerBackend.sequence(input);
+    return { ...structuredResult(result), ...(result.success ? {} : { isError: true }) };
+  });
 
   registerTool("computer.screenshot", {
     title: "Capture Windows Computer",

@@ -7,10 +7,10 @@ import { Client } from "@modelcontextprotocol/client";
 import type { JsonSchemaType } from "@modelcontextprotocol/server";
 import { InMemoryTransport } from "@modelcontextprotocol/server";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
-import { WindowsComputerBridge, type ComputerStep, type ComputerTransport } from "../src/computerBridge.js";
+import { WindowsComputerBridge, ComputerBridgeError, type ComputerStep, type ComputerTransport } from "../src/computerBridge.js";
 import { WINDOWS_COMPUTER_BRIDGE } from "../src/computerBridgeScript.js";
-import { ComputerBackend } from "../src/computer.js";
-import { computerObserveSchema, computerInteractSchema, locatorSchema } from "../src/computerSchema.js";
+import { ComputerBackend, type ComputerTiming } from "../src/computer.js";
+import { computerObserveSchema, computerInteractSchema, computerSequenceSchema, computerWaitSchema, computerOutputSchemas, locatorSchema } from "../src/computerSchema.js";
 import { createServer } from "../src/mcp.js";
 import { createHttpHandler } from "../src/http.js";
 import { OpenCodeBackend } from "../src/opencode.js";
@@ -238,7 +238,7 @@ test("real MCP discovery publishes all discriminants, fields, annotations and va
   const f = await mcpFixture(new FakeTransport(() => [[window]]));
   try {
     const { tools } = await f.client.listTools();
-    for (const [name, discriminator, variants] of [["computer.observe", "type", ["capabilities", "windows", "state", "find", "inspect"]], ["computer.interact", "action", ["activate", "focus", "setValue", "invoke", "keySequence", "move", "click", "scroll", "close"]]] as const) {
+    for (const [name, discriminator, variants] of [["computer.observe", "type", ["capabilities", "windows", "state", "find", "inspect"]], ["computer.interact", "action", ["activate", "focus", "setValue", "invoke", "keySequence", "move", "click", "scroll", "drag", "close"]]] as const) {
       const tool = tools.find((t) => t.name === name)!;
       assert.deepEqual((tool.inputSchema.properties![discriminator] as { enum: string[] }).enum, [...variants]);
       assert.equal(typeof tool.inputSchema.properties!.handle, "object");
@@ -363,4 +363,262 @@ test("standalone server owns its default backend; a supplied backend outlives in
     assert.equal(transport.closed, false);
   }
   computer.close(); assert.equal(transport.closed, true);
+});
+
+function fakeTiming() {
+  let time = 0;
+  const sleeps: number[] = [];
+  const timing: ComputerTiming = { now: () => time, sleep: async (ms) => { sleeps.push(ms); time += ms; } };
+  return { timing, sleeps, advance: (ms: number) => { time += ms; } };
+}
+const move = { action: "move", x: 1, y: 2 } as const;
+const windowWait = { action: "waitFor", condition: { type: "windowPresent", title: "App", expected: true } } as const;
+const absenceWait = { action: "waitFor", condition: { type: "elementState", handle, locator, predicate: { type: "exists", expected: false } } } as const;
+const drag = { action: "drag", points: [{ x: -10, y: 20 }, { x: 100, y: -50 }], durationMs: 250, stepsPerSegment: 16 } as const;
+const dragInput = { ...drag, points: [...drag.points] };
+const dragResult = { success: true, metadata: { elapsedMs: 252.5, emittedInputCount: 19, steps: 16 } };
+
+test("sequence rejects empty, oversize, code and invalid later steps before any mutation; accepts 32", async () => {
+  const transport = new FakeTransport();
+  const backend = new ComputerBackend(transport);
+  for (const input of [{ steps: [] }, { steps: Array(33).fill(move) }, { steps: [move, { action: "screenshot" }] }, { steps: [move, { action: "keySequence", chords: [{ key: 65 }], activate: true }] }, { steps: [move], continueOnError: true }, { steps: [{ action: "shell", command: "echo x" }] }, { steps: [move, { action: "scroll", delta: 10, x: 1 }] }]) {
+    assert.equal(computerSequenceSchema.safeParse(input).success, false);
+    assert.throws(() => backend.sequence(input as never));
+  }
+  assert.equal(transport.calls.length, 0);
+  const result = await backend.sequence({ steps: Array(32).fill(move) });
+  assert.equal(result.completedSteps, 32); assert.equal(result.stoppedAt, null); assert.equal(result.success, true);
+  assert.equal(transport.calls.length, 32);
+});
+
+test("drag preserves exact body and WCU metadata in interact and sequence, with point/move bounds", async () => {
+  const clock = fakeTiming();
+  const transport = new FakeTransport(() => { clock.advance(260); return [dragResult]; });
+  const backend = new ComputerBackend(transport, clock.timing);
+  assert.deepEqual(await backend.interact(dragInput), { action: "drag", result: dragResult });
+  assert.deepEqual(transport.calls[0], [{ method: "POST", path: "/v1/input/drag", body: { points: dragInput.points, durationMs: 250, stepsPerSegment: 16 } }]);
+  const result = await backend.sequence({ steps: [dragInput] });
+  assert.deepEqual(result.results[0], { index: 0, success: true, result: { action: "drag", result: dragResult }, elapsedMs: 260 });
+  assert.equal(result.totalElapsedMs, 260);
+  const points = Array.from({ length: 128 }, () => ({ x: 0, y: 0 }));
+  assert.equal(computerInteractSchema.safeParse({ action: "drag", points }).success, true);
+  assert.equal(computerInteractSchema.safeParse({ action: "drag", points, stepsPerSegment: 4 }).success, true);
+  assert.equal(computerInteractSchema.safeParse({ action: "drag", points: points.slice(0, 2), stepsPerSegment: 511 }).success, true);
+  for (const input of [{ ...dragInput, points: [] }, { ...dragInput, points: points.slice(0, 1) }, { ...dragInput, points: [...points, points[0]] }, { ...dragInput, durationMs: 5001 }, { ...dragInput, durationMs: -1 }, { ...dragInput, stepsPerSegment: 0 }, { ...dragInput, stepsPerSegment: 512 }, { action: "drag", points, stepsPerSegment: 5 }, { ...dragInput, button: "left" }, { ...dragInput, points: [{ x: 0.1, y: 0 }, { x: 0, y: 0 }] }]) assert.equal(computerInteractSchema.safeParse(input).success, false);
+  transport.respond = () => [{ success: true, metadata: { ...dragResult.metadata, elapsedMs: -1 } }];
+  await assert.rejects(backend.interact(dragInput));
+});
+
+test("sequence reuses every interact composition and timing in exact order", async () => {
+  const clock = fakeTiming();
+  const transport = new FakeTransport((steps) => { clock.advance(7); return steps.map((s) => s.path.endsWith("/activate") ? activation : s.path.endsWith("/close") ? { handle, requestPosted: true, disappeared: false } : s.path.endsWith("/inspect") || s.path.endsWith("/focus") ? element : s.path.endsWith("/drag") ? dragResult : { success: true }); });
+  const backend = new ComputerBackend(transport, clock.timing);
+  const steps = computerSequenceSchema.parse({ steps: [
+    { action: "activate", handle }, { action: "focus", handle, locator, activate: true },
+    { action: "setValue", handle, locator, value: "exact", activate: true }, { action: "invoke", handle, locator, readback: false },
+    { action: "keySequence", chords: [{ key: 65 }], activate: true, handle }, move,
+    { action: "click", x: 0, y: 1, button: "left", count: 1 }, { action: "scroll", delta: 120 }, dragInput, { action: "close", handle },
+  ] }).steps;
+  const individual = [];
+  for (const step of steps) individual.push(await backend.interact(step as never));
+  const expectedCalls = [...transport.calls]; transport.calls = [];
+  const result = await backend.sequence({ steps });
+  assert.deepEqual(transport.calls, expectedCalls);
+  assert.deepEqual(result.results.map((r) => r.success && r.result), individual);
+  assert.deepEqual(result.results.map((r) => r.elapsedMs), Array(10).fill(7));
+  assert.equal(result.totalElapsedMs, 70); assert.equal(result.completedSteps, 10); assert.equal(result.stoppedAt, null);
+  assert.deepEqual(transport.calls[4][1].body, { chords: [{ key: 65, modifiers: [] }] });
+});
+
+test("sequence stops on first uncertain bridge failure without retry and retains acknowledged composition count", async () => {
+  const f = bridgeFixture(); const clock = fakeTiming(); const backend = new ComputerBackend(f.bridge, clock.timing);
+  const call = backend.sequence({ steps: [move, { action: "invoke", handle, locator }, move] });
+  f.processes[0].reply(0, [{ success: true }]);
+  while (f.processes[0].frames.length < 2) await new Promise((resolve) => setImmediate(resolve));
+  clock.advance(12);
+  f.processes[0].stdout.write(JSON.stringify({ id: f.processes[0].frames[1].id, ok: false, code: "http", status: 404, completedSteps: 1 }) + "\n");
+  const result = await call;
+  assert.equal(result.success, false); assert.equal(result.completedSteps, 1); assert.equal(result.stoppedAt, 1);
+  assert.equal(result.results.length, 2);
+  const failed = result.results[1]; assert.equal(failed.success, false);
+  if (!failed.success) { assert.equal(failed.error.code, "http"); assert.equal(failed.error.completedSteps, 1); assert.equal(failed.error.status, 404); }
+  assert.equal(failed.elapsedMs, 12); assert.equal(result.totalElapsedMs, 12);
+  assert.equal(f.processes.length, 1); assert.equal(f.processes[0].frames.length, 2);
+  f.bridge.close();
+});
+
+test("sequence surfaces safe failure for transport loss, invalid output and reported action failure", async () => {
+  for (const respond of [() => { throw new ComputerBridgeError("timeout"); }, () => { throw new Error("PRIVATE-BEARER"); }, () => [{ private: "PRIVATE-BEARER" }], () => [{ success: false }]]) {
+    const transport = new FakeTransport(respond);
+    const result = await new ComputerBackend(transport).sequence({ steps: [move, move] });
+    assert.equal(result.success, false); assert.equal(result.completedSteps, 0); assert.equal(result.stoppedAt, 0);
+    assert.equal(transport.calls.length, 1); assert.equal(JSON.stringify(result).includes("PRIVATE-BEARER"), false);
+  }
+});
+
+test("waitFor schemas require exact targets, typed predicates and bounded timers; waits are sequence-only", () => {
+  for (const input of [windowWait, absenceWait]) assert.equal(computerWaitSchema.safeParse(input).success, true);
+  assert.equal(computerInteractSchema.safeParse(windowWait).success, false);
+  for (const input of [
+    { ...windowWait, timeoutMs: 10001 }, { ...windowWait, timeoutMs: -1 }, { ...windowWait, pollIntervalMs: 49 }, { ...windowWait, pollIntervalMs: 1001 },
+    { ...windowWait, condition: { type: "windowPresent", expected: true } }, { ...windowWait, condition: { ...windowWait.condition, handle } },
+    { ...absenceWait, condition: { ...absenceWait.condition, locator: {} } },
+    { ...absenceWait, condition: { ...absenceWait.condition, predicate: { type: "exists", expected: "false" } } },
+    { ...absenceWait, condition: { ...absenceWait.condition, predicate: { type: "valueEquals", expected: true } } },
+    { ...absenceWait, condition: { ...absenceWait.condition, predicate: { type: "contains", expected: "App" } } },
+    { ...windowWait, condition: { ...windowWait.condition, fuzzy: true } },
+  ]) assert.equal(computerWaitSchema.safeParse(input).success, false);
+});
+
+test("windowPresent polls exact titles and handles, succeeds after polls and respects present=false", async () => {
+  const clock = fakeTiming(); let polls = 0;
+  const transport = new FakeTransport(([step]) => step.method === "GET" ? [[{ ...window, title: ++polls < 3 ? "app" : "App" }]] : [{ success: true }]);
+  const backend = new ComputerBackend(transport, clock.timing);
+  const result = await backend.sequence({ steps: [windowWait, move] });
+  assert.equal(result.completedSteps, 2); assert.equal(result.success, true);
+  assert.deepEqual(result.results[0], { index: 0, success: true, elapsedMs: 200, result: { action: "waitFor", satisfied: true, polls: 3 } });
+  assert.deepEqual(clock.sleeps, [100, 100]);
+  assert.deepEqual(transport.calls.slice(0, 3), Array(3).fill([{ method: "GET", path: "/v1/windows" }]));
+  transport.respond = () => [[window]];
+  for (const condition of [{ type: "windowPresent", handle, expected: true }, { type: "windowPresent", handle: "0X00001234", expected: true }, { type: "windowPresent", title: "Different", expected: false }, { type: "windowPresent", title: "app", expected: false }]) assert.equal((await backend.sequence({ steps: [{ action: "waitFor", condition } as never] })).success, true);
+});
+
+test("waitFor timeout is machine-readable, uses remaining bounded sleep and stops before mutation", async () => {
+  const clock = fakeTiming();
+  const transport = new FakeTransport(() => [[]]);
+  const result = await new ComputerBackend(transport, clock.timing).sequence({ steps: [{ ...windowWait, timeoutMs: 250 }, move] });
+  assert.equal(result.success, false); assert.equal(result.completedSteps, 0); assert.equal(result.stoppedAt, 0);
+  assert.equal(result.totalElapsedMs, 250); assert.equal(result.results[0].elapsedMs, 250);
+  const failed = result.results[0]; if (!failed.success) { assert.equal(failed.error.code, "wait_timeout"); assert.equal(failed.error.polls, 4); }
+  assert.deepEqual(clock.sleeps, [100, 100, 50]); assert.equal(transport.calls.length, 4);
+  const zero = await new ComputerBackend(transport, clock.timing).sequence({ steps: [{ ...windowWait, timeoutMs: 0 }] });
+  assert.equal(zero.success, false); assert.equal(zero.totalElapsedMs, 0);
+
+  let now = 0;
+  const advancingTiming: ComputerTiming = {
+    now: () => now,
+    sleep: async (ms) => { now += ms; },
+  };
+  const immediate = new FakeTransport(async () => { now += 1; return [[window]]; });
+  const satisfiedZero = await new ComputerBackend(immediate, advancingTiming).sequence({
+    steps: [{ ...windowWait, timeoutMs: 0 }],
+  });
+  assert.equal(satisfiedZero.success, true);
+  assert.equal(satisfiedZero.completedSteps, 1);
+  assert.equal(satisfiedZero.results[0].success, true);
+});
+
+test("elementState predicates inspect exact locators; exists=true tolerates absent polls and exists=false satisfies absence only", async () => {
+  for (const predicate of [{ type: "exists", expected: true }, { type: "focused", expected: true }, { type: "enabled", expected: true }, { type: "valueEquals", expected: "hello" }, { type: "nameEquals", expected: "Editor" }, { type: "valueEquals", expected: null }]) {
+    const transport = new FakeTransport(() => [{ ...element, ...(predicate.expected === null ? { value: null } : {}) }]);
+    assert.equal((await new ComputerBackend(transport).sequence({ steps: [{ action: "waitFor", condition: { type: "elementState", handle, locator, predicate } } as never] })).success, true);
+    assert.deepEqual(transport.calls[0], [{ method: "POST", path: "/v1/elements/inspect", body: { handle, locator } }]);
+  }
+  for (const code of ["element_not_found", "locator_not_found"] as const) {
+    const transport = new FakeTransport(() => { throw new ComputerBridgeError(code, 0, 404); });
+    assert.equal((await new ComputerBackend(transport).sequence({ steps: [absenceWait] })).success, true);
+    let polls = 0; const clock = fakeTiming();
+    transport.respond = () => { if (++polls < 3) throw new ComputerBridgeError(code, 0, 404); return [element]; };
+    assert.equal((await new ComputerBackend(transport, clock.timing).sequence({ steps: [{ ...absenceWait, condition: { ...absenceWait.condition, predicate: { type: "exists", expected: true } } }] })).success, true);
+    assert.deepEqual(clock.sleeps, [100, 100]);
+    transport.respond = () => { throw new ComputerBridgeError(code, 0, 404); };
+    const failed = await new ComputerBackend(transport).sequence({ steps: [{ ...absenceWait, condition: { ...absenceWait.condition, predicate: { type: "focused", expected: false } } }] });
+    assert.equal(failed.success, false);
+  }
+  for (const code of ["http", "transport", "timeout"] as const) {
+    const transport = new FakeTransport(() => { throw new ComputerBridgeError(code, 0, 404); });
+    const result = await new ComputerBackend(transport).sequence({ steps: [absenceWait, move] });
+    assert.equal(result.success, false); assert.equal(transport.calls.length, 1);
+  }
+});
+
+test("whole sequences serialize with concurrent desktop actions including during wait sleep", async () => {
+  let release!: () => void; let sleeping!: () => void;
+  const inSleep = new Promise<void>((resolve) => { sleeping = resolve; });
+  let polls = 0;
+  const transport = new FakeTransport(([step]) => step.method === "GET" ? [++polls === 1 ? [] : [window]] : [{ success: true }]);
+  const backend = new ComputerBackend(transport, { now: () => 0, sleep: () => { sleeping(); return new Promise<void>((resolve) => { release = resolve; }); } });
+  const sequence = backend.sequence({ steps: [windowWait, move] });
+  await inSleep;
+  const other = backend.interact({ ...move, x: 99 });
+  assert.equal(transport.calls.length, 1);
+  release(); await sequence; await other;
+  assert.deepEqual(transport.calls.map(([step]) => step.body ?? step.path), ["/v1/windows", "/v1/windows", { x: 1, y: 2 }, { x: 99, y: 2 }]);
+});
+
+test("bridge accepts only fixed absence codes and rejects arbitrary upstream code text", async () => {
+  for (const code of ["element_not_found", "locator_not_found", "PRIVATE-BEARER"]) {
+    const f = bridgeFixture(); const call = f.bridge.request([{ method: "POST", path: "/v1/elements/inspect", body: { handle, locator } }]);
+    f.processes[0].stdout.write(JSON.stringify({ id: f.processes[0].frames[0].id, ok: false, code, status: 404, completedSteps: 0 }) + "\n");
+    await assert.rejects(call, (e) => code === "PRIVATE-BEARER" ? !safeError(e).includes(code) : e instanceof ComputerBridgeError && e.code === code);
+    assert.equal(f.processes[0].killed, code === "PRIVATE-BEARER"); f.bridge.close();
+  }
+  assert.match(WINDOWS_COMPUTER_BRIDGE, /pointer-click\|scroll\|drag/);
+  assert.match(WINDOWS_COMPUTER_BRIDGE, /\$status -eq 404 -and \$path -ceq '\/v1\/elements\/inspect'/);
+});
+
+test("MCP sequence discovery publishes bounded schemas and annotations; validates success and failure results", async () => {
+  const transport = new FakeTransport(() => [dragResult]); const f = await mcpFixture(transport);
+  try {
+    const tool = (await f.client.listTools()).tools.find((t) => t.name === "computer.sequence")!;
+    assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
+    const schema = tool.inputSchema as JsonSchemaType;
+    assert.equal((schema.properties?.steps as JsonSchemaType).minItems, 1); assert.equal((schema.properties?.steps as JsonSchemaType).maxItems, 32);
+    const validate = new AjvJsonSchemaValidator().getValidator(schema);
+    for (const input of [{ steps: [dragInput, windowWait, absenceWait] }, { steps: [{ action: "drag", points: Array(128).fill({ x: 0, y: 0 }) }] }]) assert.equal(validate(input).valid, true);
+    for (const input of [{ steps: [] }, { steps: Array(33).fill(move) }, { steps: [{ ...windowWait, condition: { type: "windowPresent", expected: true } }] }, { steps: [{ ...windowWait, condition: { ...windowWait.condition, handle } }] }, { steps: [{ ...absenceWait, condition: { ...absenceWait.condition, locator: {} } }] }, { steps: [{ action: "keySequence", chords: [{ key: 65 }], activate: true }] }, { steps: [{ action: "scroll", delta: 1, x: 0 }] }, { steps: [{ action: "drag", points: Array(128).fill({ x: 0, y: 0 }), stepsPerSegment: 5 }] }, { steps: [{ ...windowWait, timeoutMs: 10001 }] }, { steps: [move], continueOnError: true }, { steps: [{ action: "screenshot" }] }]) assert.equal(validate(input).valid, false, JSON.stringify(input));
+    const response = await f.client.callTool({ name: "computer.sequence", arguments: { steps: [dragInput] } });
+    assert.notEqual(response.isError, true);
+    const output = new AjvJsonSchemaValidator().getValidator(tool.outputSchema!);
+    assert.equal(output(response.structuredContent).valid, true);
+    assert.equal(computerOutputSchemas.sequence.safeParse(response.structuredContent).success, true);
+    transport.respond = () => { throw new ComputerBridgeError("transport"); };
+    const failure = await f.client.callTool({ name: "computer.sequence", arguments: { steps: [move, move] } });
+    assert.equal(failure.isError, true); assert.equal(output(failure.structuredContent).valid, true);
+    assert.equal((failure.structuredContent as { stoppedAt: number }).stoppedAt, 0);
+  } finally { await f.close(); }
+});
+
+test("WCU 0.4 capability drag limits are preserved without breaking older capability results", async () => {
+  const transport = new FakeTransport(() => [{ apiVersion: "v1", hostVersion: "0.4.0", locatorFields: [], semanticActions: [], inputActions: ["drag"], windowActions: [], limits: { ...Object.fromEntries(["maxLocatorDepth", "maxLocatorNodes", "maxLocatorTextLength", "maxFindResults", "maxKeySequence", "maxVirtualKey", "maxWheelDelta", "maxTextLength", "maxValueLength", "maxTreeDepth", "maxTreeNodes", "maxClickCount"].map((name) => [name, 1])), maxDragPoints: 128, maxDragDurationMs: 5000, maxDragSteps: 512 } }]);
+  const result = await new ComputerBackend(transport).observe({ type: "capabilities" });
+  assert.equal(result.type, "capabilities");
+  if (result.type === "capabilities") assert.equal(result.data.limits.maxDragSteps, 512);
+});
+
+test("wait deadline also bounds a stalled observation without replay or later mutation", async () => {
+  let finish!: (result: unknown[]) => void;
+  const transport = new FakeTransport(() => new Promise<unknown[]>((resolve) => { finish = resolve; }));
+  const result = await new ComputerBackend(transport).sequence({ steps: [{ ...windowWait, timeoutMs: 20 }, move] });
+  assert.equal(result.success, false); assert.equal(result.stoppedAt, 0);
+  const step = result.results[0]; assert.equal(step.success, false);
+  if (!step.success) assert.equal(step.error.code, "wait_timeout");
+  assert.equal(transport.calls.length, 1);
+  finish([[]]); await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(transport.calls.length, 1);
+});
+
+test("backend serialization retains bounded admission and releases queue after failures", async () => {
+  let release!: () => void; let first = true;
+  const transport = new FakeTransport(async () => {
+    if (first) { first = false; await new Promise<void>((resolve) => { release = resolve; }); throw new ComputerBridgeError("transport"); }
+    return [{ success: true }];
+  });
+  const backend = new ComputerBackend(transport);
+  const firstCall = assert.rejects(backend.interact(move), /transport/);
+  const calls = Array.from({ length: 63 }, () => backend.interact(move));
+  await assert.rejects(backend.interact(move), /64 pending/);
+  assert.equal(transport.calls.length, 1);
+  release(); await firstCall; await Promise.all(calls);
+  assert.equal(transport.calls.length, 64);
+  await backend.interact(move); assert.equal(transport.calls.length, 65);
+});
+
+test("wait timeout includes observation time and rejects a match observed after the deadline", async () => {
+  const clock = fakeTiming();
+  const transport = new FakeTransport(() => { clock.advance(101); return [[window]]; });
+  const result = await new ComputerBackend(transport, clock.timing).sequence({ steps: [{ ...windowWait, timeoutMs: 100 }, move] });
+  assert.equal(result.success, false); assert.equal(result.stoppedAt, 0); assert.equal(result.totalElapsedMs, 101);
+  assert.equal(transport.calls.length, 1); assert.deepEqual(clock.sleeps, []);
+  const failed = result.results[0]; if (!failed.success) assert.equal(failed.error.code, "wait_timeout");
 });

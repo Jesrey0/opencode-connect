@@ -7,9 +7,15 @@ import { WINDOWS_COMPUTER_BRIDGE } from "./computerBridgeScript.js";
 export type ComputerStep = { method: "GET" | "POST"; path: string; body?: unknown };
 export interface ComputerTransport { request(steps: ComputerStep[]): Promise<unknown[]>; close(): void }
 export type BridgeSpawn = (executable: string, args: string[]) => ChildProcessWithoutNullStreams;
+export type ComputerBridgeCode = "bridge" | "transport" | "timeout" | "http" | "too_large" | "png" | "invalid_json" | "activation" | "element_not_found" | "locator_not_found";
+export class ComputerBridgeError extends ConnectorError {
+  constructor(readonly code: ComputerBridgeCode, readonly completedSteps?: number, readonly status?: number, message?: string) {
+    super(message ?? `Computer bridge request failed (${code}${status ? `, status ${status}` : ""}, completed steps ${completedSteps})${uncertain}`);
+  }
+}
 const replySchema = z.discriminatedUnion("ok", [
   z.object({ id: z.string().regex(/^wcu-\d+$/), ok: z.literal(true), results: z.array(z.unknown()).min(1).max(3) }).strict(),
-  z.object({ id: z.string().regex(/^wcu-\d+$/), ok: z.literal(false), code: z.enum(["bridge", "transport", "timeout", "http", "too_large", "png", "invalid_json", "activation"]), completedSteps: z.number().int().min(0).max(3), status: z.number().int().min(100).max(599).optional() }).strict(),
+  z.object({ id: z.string().regex(/^wcu-\d+$/), ok: z.literal(false), code: z.enum(["bridge", "transport", "timeout", "http", "too_large", "png", "invalid_json", "activation", "element_not_found", "locator_not_found"]), completedSteps: z.number().int().min(0).max(3), status: z.number().int().min(100).max(599).optional() }).strict(),
 ]);
 type Pending = { resolve: (data: unknown[]) => void; reject: (error: Error) => void; timer: NodeJS.Timeout; count: number };
 const uncertain = "; reconcile observed state before retrying a mutation";
@@ -28,7 +34,7 @@ export class WindowsComputerBridge implements ComputerTransport {
     const args = ["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(WINDOWS_COMPUTER_BRIDGE, "utf16le").toString("base64")];
     let child: ChildProcessWithoutNullStreams;
     try { child = (this.options.spawn ?? ((path, argv) => spawn(path, argv, { stdio: "pipe", shell: false, windowsHide: true })))(executable, args); }
-    catch { throw new ConnectorError(`Computer bridge could not start${uncertain}`); }
+    catch { throw new ComputerBridgeError("bridge", undefined, undefined, `Computer bridge could not start${uncertain}`); }
     this.child = child;
     const decoder = new StringDecoder("utf8");
     let buffered = "";
@@ -54,7 +60,7 @@ export class WindowsComputerBridge implements ComputerTransport {
         this.pending.delete(reply.id);
         clearTimeout(pending.timer);
         if (reply.ok) pending.resolve(reply.results);
-        else pending.reject(new ConnectorError(`Computer bridge request failed (${reply.code}${reply.status ? `, status ${reply.status}` : ""}, completed steps ${reply.completedSteps})${uncertain}`));
+        else pending.reject(new ComputerBridgeError(reply.code, reply.completedSteps, reply.status));
       }
       if (Buffer.byteLength(buffered) > 2_097_152) this.fail(child, "Computer bridge response exceeds limit");
     });
@@ -67,7 +73,7 @@ export class WindowsComputerBridge implements ComputerTransport {
   private fail(child: ChildProcessWithoutNullStreams, reason: string) {
     if (this.child !== child) return;
     this.child = undefined;
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new ConnectorError(reason + uncertain)); }
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new ComputerBridgeError(reason.includes("timed out") ? "timeout" : "bridge", undefined, undefined, reason + uncertain)); }
     this.pending.clear();
     child.kill();
     child.stdin.destroy(); child.stdout.destroy(); child.stderr.destroy();
