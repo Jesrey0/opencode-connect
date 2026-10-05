@@ -3,6 +3,8 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
+import { ComputerBackend } from "./computer.js";
+import { computerObserveSchema, computerInteractSchema, computerScreenshotSchema, computerOutputSchemas } from "./computerSchema.js";
 import { exposedUnion } from "./schema.js";
 import { VERSION } from "./version.js";
 import { safeError, AdmissionError, ConnectorError } from "./bounds.js";
@@ -122,11 +124,14 @@ export function structuredResult(structuredContent: Record<string, unknown>, con
   return result;
 }
 
-export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events): McpServer {
+export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, computer?: ComputerBackend): McpServer {
+  const computerBackend = computer ?? new ComputerBackend();
   const capabilities = { tools: { listChanged: false }, ...(events ? { events: {} } : {}) };
   const server = new McpServer({ name: "opencode-connect", version: VERSION }, {
     capabilities, supportedProtocolVersions: ["2026-07-28"], inputRequired: { legacyShim: false },
   });
+  // A standalone server owns its default backend; HTTP exchanges borrow the shared one.
+  if (!computer) server.server.onclose = () => computerBackend.close();
   if (events) {
     const authenticated = async (extra: ServerContext) => {
       const value = extra.http?.req?.headers.get("x-host-ingress-auth-context");
@@ -168,6 +173,33 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     outputSchema: outputSchemas.status,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async () => structuredResult({ ...await backend.status(), ...(events ? { events: events.snapshot() } : {}) }));
+
+  registerTool("computer.observe", {
+    title: "Observe Windows Computer",
+    description: "Read WCU v1 capabilities, windows, window state, exact semantic matches or element state. Locators are case-sensitive with at most one ancestor; no waits or fuzzy matching.",
+    inputSchema: computerObserveSchema,
+    outputSchema: computerOutputSchemas.observe,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await computerBackend.observe(input)));
+
+  registerTool("computer.interact", {
+    title: "Interact with Windows Computer",
+    description: "Perform one explicit Windows action. Foreground activation requires activate=true (keySequence also requires handle). focus/setValue/invoke default to immediate inspect readback; observed element state does not verify application effects. No automatic retries after uncertain mutations.",
+    inputSchema: computerInteractSchema,
+    outputSchema: computerOutputSchemas.interact,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
+  }, async (input) => structuredResult(await computerBackend.interact(input)));
+
+  registerTool("computer.screenshot", {
+    title: "Capture Windows Computer",
+    description: "Capture desktop, or an explicit window handle, as exactly one PNG image (maximum 1 MiB) with safe metadata. Does not activate a window.",
+    inputSchema: computerScreenshotSchema,
+    outputSchema: computerOutputSchemas.screenshot,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => {
+    const { metadata, image } = await computerBackend.screenshot(input);
+    return structuredResult(metadata, [image]);
+  });
 
   registerTool("host.inspect", {
     title: "Inspect OpenCode Host",
