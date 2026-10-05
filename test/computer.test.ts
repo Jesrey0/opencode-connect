@@ -555,6 +555,8 @@ test("bridge accepts only fixed absence codes and rejects arbitrary upstream cod
   }
   assert.match(WINDOWS_COMPUTER_BRIDGE, /pointer-click\|scroll\|drag/);
   assert.match(WINDOWS_COMPUTER_BRIDGE, /\$status -eq 404 -and \$path -ceq '\/v1\/elements\/inspect'/);
+  assert.match(WINDOWS_COMPUTER_BRIDGE, /\$problem\['code'\] -is \[string\]/);
+  assert.doesNotMatch(WINDOWS_COMPUTER_BRIDGE, /\$problem\.code -ceq '(?:element|locator)_not_found'/);
 });
 
 test("MCP sequence discovery publishes bounded schemas and annotations; validates success and failure results", async () => {

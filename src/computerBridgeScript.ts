@@ -69,8 +69,13 @@ try {
               }
               try {
                 $problem = ConvertFrom-Json -InputObject ([Text.Encoding]::UTF8.GetString($memory.ToArray())) -AsHashtable -NoEnumerate -Depth 64
-                if ($problem.code -ceq 'element_not_found') { $code = 'element_not_found' }
-                if ($problem.code -ceq 'locator_not_found') { $code = 'locator_not_found' }
+                # Only a scalar string code is eligible to cross the bridge.
+                # PowerShell collection comparison can otherwise treat an array
+                # containing an allowed value as a successful scalar match.
+                if ($problem -is [Collections.IDictionary] -and $problem.Contains('code') -and $problem['code'] -is [string]) {
+                  if ($problem['code'] -ceq 'element_not_found') { $code = 'element_not_found' }
+                  if ($problem['code'] -ceq 'locator_not_found') { $code = 'locator_not_found' }
+                }
               } catch { $code = 'http' }
             }
             throw 'http'
