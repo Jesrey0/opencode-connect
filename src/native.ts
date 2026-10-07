@@ -2,7 +2,7 @@ import { OpenCode, type OpenCodeClient } from "@opencode/client";
 import { Service } from "@opencode/client/service";
 import { ConnectorError } from "./bounds.js";
 
-export const OPENCODE_RELEASE = "2.0.22";
+export const OPENCODE_RELEASE = "2.0.24";
 const CATALOG_ATTEMPTS = 40;
 const CATALOG_SETTLE_MS = 200;
 

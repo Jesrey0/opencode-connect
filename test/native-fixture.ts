@@ -14,7 +14,7 @@ export function nativeFixture(handler: (request: NativeRequest) => unknown | Pro
     if (value === undefined) return new Response(null, { status: 204 });
     return Response.json(value);
   } });
-  const connection: Connection = { client, baseUrl: "http://native.invalid", info: { version: "2.0.22", pid: 1, urls: [], paths: { tmp: "/tmp" } } };
+  const connection: Connection = { client, baseUrl: "http://native.invalid", info: { version: "2.0.24", pid: 1, urls: [], paths: { tmp: "/tmp" } } };
   return { client, requests, connection, connect: async () => connection };
 }
 export function session(cwd = "/tmp"): SessionInfo {

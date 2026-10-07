@@ -7,7 +7,7 @@ import { nativeFixture, session, assistant, user } from "./native-fixture.js";
 function snapshot(): ConsoleSnapshot {
   return {
     ready: true,
-    release: "2.0.22",
+    release: "2.0.24",
     pid: 7,
     sessions: [
       { id: "s1", title: "Fix the parser", running: true, outcome: null, agent: "build", model: "openai/a", variant: "low", cwd: "/tmp/a", updatedMs: 5 },
@@ -102,7 +102,7 @@ test("renderFrame is deterministic and includes core native evidence", () => {
   assert.deepEqual(a, b);
   const text = a.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
   assert.ok(text.includes("opencode connect"));
-  assert.ok(text.includes("opencode 2.0.22 · pid 7"));
+  assert.ok(text.includes("opencode 2.0.24 · pid 7"));
   assert.ok(text.includes("Fix the parser"));
   assert.ok(text.includes("running"));
   assert.ok(text.includes("Needs 0xOperator · 1 pending"));
@@ -138,7 +138,7 @@ test("observe projects sessions, pending actions, and usage from the native clie
       return undefined;
     }
     if (request.path === "/api/session/active") return { data: { s: { type: "running" } } };
-    if (request.path === "/api/server/info" || request.path === "/api/info") return { version: "2.0.22", pid: 3, urls: [], paths: { tmp: "/tmp" } };
+    if (request.path === "/api/server/info" || request.path === "/api/info") return { version: "2.0.24", pid: 3, urls: [], paths: { tmp: "/tmp" } };
     if (request.path === "/api/experimental/session/stats") return { data: {
       range: { from: 0, to: 1 }, sessions: 1, subagents: 0, prompts: 2, steps: 4,
       tokens: { input: 1, output: 2, reasoning: 0, cache: { read: 0, write: 0 } },
@@ -151,7 +151,7 @@ test("observe projects sessions, pending actions, and usage from the native clie
   });
   const observed = await observe(native.client);
   assert.equal(observed.ready, true);
-  assert.equal(observed.release, "2.0.22");
+  assert.equal(observed.release, "2.0.24");
   assert.equal(observed.sessions.length, 1);
   assert.equal(observed.sessions[0].running, true);
   assert.equal(observed.sessions[0].model, "openai/a");

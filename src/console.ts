@@ -219,7 +219,7 @@ export class ConsoleObserver {
     return message;
   }
 
-  // 2.0.22 Reasoning.{Started,Delta,Ended} share canonical assistant/ordinal
+  // 2.0.24 Reasoning.{Started,Delta,Ended} share canonical assistant/ordinal
   // identity. Delta is provider reasoning, not a guaranteed safe summary. Do
   // not read/copy delta, text, state, metadata or any other provider payload.
   private applyReasoningEvent(event: Extract<OpenCodeEvent, { type: "session.reasoning.started" | "session.reasoning.delta" | "session.reasoning.ended" }>): boolean {
