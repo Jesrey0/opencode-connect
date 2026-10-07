@@ -48,7 +48,7 @@ export function cancelArgs(input: PrintCancel): string[] {
   return ["cancel", "--printer", args.printer, "--id", args.id, "--json"];
 }
 
-/** Print HostPlane owner. Each method is one bounded bar-print.exe call; no retries. */
+/** Print HostPlane owner. Each method is one bounded print-bridge.exe call; no retries. */
 export class PrintBackend {
   constructor(private readonly bridge: PrintBridge = new PrintBridge()) {}
 

@@ -124,7 +124,7 @@ function printFixture(options: { timeoutMs?: number; maxOutputBytes?: number; ma
 
 function withPrintEnv(env: Record<string, string | undefined>, run: () => void) {
   const saved: Record<string, string | undefined> = {};
-  for (const key of ["LOCALAPPDATA", "APPDATA", "OPENCODE_PRINT_EXE"]) saved[key] = process.env[key];
+  for (const key of ["LOCALAPPDATA", "APPDATA", "PRINT_BRIDGE_EXE"]) saved[key] = process.env[key];
   try {
     for (const [key, value] of Object.entries(env)) {
       if (value === undefined) delete process.env[key];
@@ -170,7 +170,7 @@ test("print schemas validate copies 1..99 plus paper/orientation/color/scale and
     { path: "/tmp/a.pdf", paper: "" }, { path: "/tmp/a.pdf", paper: "x".repeat(129) },
     { path: "/tmp/a.pdf", orientation: "Sideways" }, { path: "/tmp/a.pdf", color: "Mono" }, { path: "/tmp/a.pdf", scale: "Stretch" },
     { path: "/tmp/a.pdf", printer: "" }, { path: "/tmp/a.pdf", filename: "a/b.pdf" }, { path: "/tmp/a.pdf", filename: "a\\b.pdf" },
-    { path: "/tmp/a.pdf", executable: "/evil/bar-print.exe" },
+    { path: "/tmp/a.pdf", executable: "/evil/print-bridge.exe" },
   ]) assert.equal(printSubmitSchema.safeParse(bad).success, false, JSON.stringify(bad));
   assert.equal(printInspectSchema.safeParse({ path: "/tmp/a.pdf", executable: "/evil" }).success, false);
   assert.equal(printCapabilitiesSchema.safeParse({ printer: "Lab", executable: "/evil" }).success, false);
@@ -178,40 +178,40 @@ test("print schemas validate copies 1..99 plus paper/orientation/color/scale and
 });
 
 test("print executable resolves server-side; WSL/Linux without config fails clearly without spawning", async () => {
-  withPrintEnv({ LOCALAPPDATA: join(tmpdir(), "FakeLocalAppData"), APPDATA: undefined, OPENCODE_PRINT_EXE: undefined }, () => {
+  withPrintEnv({ LOCALAPPDATA: join(tmpdir(), "FakeLocalAppData"), APPDATA: undefined, PRINT_BRIDGE_EXE: undefined }, () => {
     if (process.platform === "win32") {
-      assert.equal(defaultPrintExecutable(), join(tmpdir(), "FakeLocalAppData", "BAR", "bar-print.exe"));
-      assert.equal(resolvePrintExecutable(), join(tmpdir(), "FakeLocalAppData", "BAR", "bar-print.exe"));
+      assert.equal(defaultPrintExecutable(), join(tmpdir(), "FakeLocalAppData", "WindowsPrintBridge", "print-bridge.exe"));
+      assert.equal(resolvePrintExecutable(), join(tmpdir(), "FakeLocalAppData", "WindowsPrintBridge", "print-bridge.exe"));
     } else {
       // WSL/Linux may inherit a Windows LOCALAPPDATA; never form a mixed path.
       assert.equal(defaultPrintExecutable(), null);
-      assert.throws(() => resolvePrintExecutable(), /not configured.*OPENCODE_PRINT_EXE/);
+      assert.throws(() => resolvePrintExecutable(), /not configured.*PRINT_BRIDGE_EXE/);
     }
   });
-  withPrintEnv({ LOCALAPPDATA: undefined, APPDATA: undefined, OPENCODE_PRINT_EXE: "/srv/bin/bar-print.exe" }, () => {
+  withPrintEnv({ LOCALAPPDATA: undefined, APPDATA: undefined, PRINT_BRIDGE_EXE: "/srv/bin/print-bridge.exe" }, () => {
     assert.equal(defaultPrintExecutable(), null);
-    assert.equal(resolvePrintExecutable(), "/srv/bin/bar-print.exe");
-    assert.equal(new PrintBridge({ executable: "/srv/explicit/bar-print.exe" }).executablePath(), "/srv/explicit/bar-print.exe");
+    assert.equal(resolvePrintExecutable(), "/srv/bin/print-bridge.exe");
+    assert.equal(new PrintBridge({ executable: "/srv/explicit/print-bridge.exe" }).executablePath(), "/srv/explicit/print-bridge.exe");
   });
   // No LOCALAPPDATA and no override: no bogus Linux-home default is advertised.
-  withPrintEnv({ LOCALAPPDATA: undefined, APPDATA: undefined, OPENCODE_PRINT_EXE: undefined }, () => {
+  withPrintEnv({ LOCALAPPDATA: undefined, APPDATA: undefined, PRINT_BRIDGE_EXE: undefined }, () => {
     assert.equal(defaultPrintExecutable(), null);
-    assert.throws(() => resolvePrintExecutable(), /not configured.*OPENCODE_PRINT_EXE/);
+    assert.throws(() => resolvePrintExecutable(), /not configured.*PRINT_BRIDGE_EXE/);
   });
   // Missing configuration rejects before spawning any child process.
   const spawned: string[] = [];
   const savedLocal = process.env.LOCALAPPDATA;
   const savedApp = process.env.APPDATA;
-  const savedExe = process.env.OPENCODE_PRINT_EXE;
+  const savedExe = process.env.PRINT_BRIDGE_EXE;
   try {
-    delete process.env.LOCALAPPDATA; delete process.env.APPDATA; delete process.env.OPENCODE_PRINT_EXE;
+    delete process.env.LOCALAPPDATA; delete process.env.APPDATA; delete process.env.PRINT_BRIDGE_EXE;
     const bridge = new PrintBridge({ spawn: (executable, args) => { spawned.push(executable); throw new Error("must not spawn without configuration"); } });
-    await assert.rejects(bridge.run(["status", "--json"]), (e) => e instanceof PrintBridgeError && e.code === "not_configured" && /OPENCODE_PRINT_EXE/.test(e.message));
+    await assert.rejects(bridge.run(["status", "--json"]), (e) => e instanceof PrintBridgeError && e.code === "not_configured" && /PRINT_BRIDGE_EXE/.test(e.message));
     assert.equal(spawned.length, 0);
   } finally {
     if (savedLocal === undefined) delete process.env.LOCALAPPDATA; else process.env.LOCALAPPDATA = savedLocal;
     if (savedApp === undefined) delete process.env.APPDATA; else process.env.APPDATA = savedApp;
-    if (savedExe === undefined) delete process.env.OPENCODE_PRINT_EXE; else process.env.OPENCODE_PRINT_EXE = savedExe;
+    if (savedExe === undefined) delete process.env.PRINT_BRIDGE_EXE; else process.env.PRINT_BRIDGE_EXE = savedExe;
   }
 });
 
@@ -236,7 +236,7 @@ test("inspect/submit stream raw file bytes to child stdin without base64 over MC
     const bytes = Buffer.from('$([Console]::WriteLine("X"))\nété😀\0binary\xff', "binary");
     const file = join(dir, "doc.pdf");
     await writeFile(file, bytes);
-    const f = printFixture({ executable: "/srv/bin/bar-print.exe" });
+    const f = printFixture({ executable: "/srv/bin/print-bridge.exe" });
     const backend = new PrintBackend(f.bridge);
     const inspectCall = backend.inspect({ path: file });
     await waitFor(() => f.processes.length > 0, "inspect spawn");
@@ -248,7 +248,7 @@ test("inspect/submit stream raw file bytes to child stdin without base64 over MC
     assert.deepEqual(f.invocations[0].args, ["inspect", "--stdin", "--filename", basename(file), "--json"]);
     assert.deepEqual(f.processes[0].stdinBytes(), bytes);
 
-    const g = printFixture({ executable: "/srv/bin/bar-print.exe" });
+    const g = printFixture({ executable: "/srv/bin/print-bridge.exe" });
     const submitBackend = new PrintBackend(g.bridge);
     const submitCall = submitBackend.submit({ path: file, printer: "Lab", copies: 2, paper: "A4", orientation: "Portrait", color: "Color", scale: "Fit" });
     await waitFor(() => g.processes.length > 0, "submit spawn");
@@ -264,7 +264,7 @@ test("inspect/submit stream raw file bytes to child stdin without base64 over MC
 
 test("print bridge parses stderr structured errors and stays compatible with stdout errors", async () => {
   // Companion contract: structured JSON errors arrive on stderr on nonzero exit.
-  const s = printFixture({ executable: "/srv/bin/bar-print.exe" });
+  const s = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const stderrCall = s.bridge.run(["status", "--json"]);
   await waitFor(() => s.processes.length > 0, "stderr-error spawn");
   s.processes[0].failStderrJson(1, { code: "printer_offline", message: "printer is offline", details: { printer: "Lab" } });
@@ -273,40 +273,40 @@ test("print bridge parses stderr structured errors and stays compatible with std
     && /printer is offline/.test(e.message)
     && JSON.stringify(e.detail).includes("printer_offline"));
 
-  const nested = printFixture({ executable: "/srv/bin/bar-print.exe" });
+  const nested = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const nestedCall = nested.bridge.run(["queue", "--json"]);
   await waitFor(() => nested.processes.length > 0, "nested stderr-error spawn");
   nested.processes[0].failStderrJson(2, { error: { code: "job_not_found", message: "no such job" } });
   await assert.rejects(nestedCall, (e) => e instanceof PrintBridgeError && e.code === "job_not_found" && /no such job/.test((e as Error).message));
 
   // Compatibility: structured errors on stdout keep working.
-  const f = printFixture({ executable: "/srv/bin/bar-print.exe" });
+  const f = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const statusCall = f.bridge.run(["status", "--json"]);
   await waitFor(() => f.processes.length > 0, "stdout-error spawn");
   f.processes[0].failJson(1, { code: "spool_full", message: "spool full" });
   await assert.rejects(statusCall, (e) => e instanceof PrintBridgeError && e.code === "spool_full" && JSON.stringify(e.detail).includes("spool_full"));
 
   // Stderr is authoritative when both streams carry structured errors.
-  const b = printFixture({ executable: "/srv/bin/bar-print.exe" });
+  const b = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const bothCall = b.bridge.run(["status", "--json"]);
   await waitFor(() => b.processes.length > 0, "dual-error spawn");
   b.processes[0].failBothJson(1, { code: "legacy_code", message: "legacy" }, { code: "new_code", message: "current" });
   await assert.rejects(bothCall, (e) => e instanceof PrintBridgeError && e.code === "new_code");
 
   // Non-JSON stdout on failure stays invalid_json; malformed success JSON fails too.
-  const h = printFixture({ executable: "/srv/bin/bar-print.exe" });
+  const h = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const invalid = h.bridge.run(["status", "--json"]);
   await waitFor(() => h.processes.length > 0, "invalid-json spawn");
   h.processes[0].failText(1, "not json");
   await assert.rejects(invalid, (e) => e instanceof PrintBridgeError && e.code === "invalid_json");
 
-  const m = printFixture({ executable: "/srv/bin/bar-print.exe" });
+  const m = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const malformedSuccess = m.bridge.run(["status", "--json"]);
   await waitFor(() => m.processes.length > 0, "malformed-success spawn");
   m.processes[0].succeedText("not json");
   await assert.rejects(malformedSuccess, (e) => e instanceof PrintBridgeError && e.code === "invalid_json");
 
-  const n = printFixture({ executable: "/srv/bin/bar-print.exe" });
+  const n = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const nonObject = n.bridge.run(["status", "--json"]);
   await waitFor(() => n.processes.length > 0, "non-object spawn");
   n.processes[0].succeed([1, 2, 3]);
@@ -314,11 +314,11 @@ test("print bridge parses stderr structured errors and stays compatible with std
 });
 
 test("print bridge bounds output/time and makes a single submit attempt", async () => {
-  const t = printFixture({ timeoutMs: 15, executable: "/srv/bin/bar-print.exe" });
+  const t = printFixture({ timeoutMs: 15, executable: "/srv/bin/print-bridge.exe" });
   await assert.rejects(t.bridge.run(["status", "--json"]), (e) => e instanceof PrintBridgeError && e.code === "timeout");
   assert.equal(t.processes[0].killed, true);
 
-  const o = printFixture({ maxOutputBytes: 8, executable: "/srv/bin/bar-print.exe" });
+  const o = printFixture({ maxOutputBytes: 8, executable: "/srv/bin/print-bridge.exe" });
   const oversized = o.bridge.run(["status", "--json"]);
   await waitFor(() => o.processes.length > 0, "oversized spawn");
   o.processes[0].stdout.write(Buffer.from(JSON.stringify({ large: "x".repeat(100) })));
@@ -329,7 +329,7 @@ test("print bridge bounds output/time and makes a single submit attempt", async 
   try {
     const file = join(dir, "a.pdf");
     await writeFile(file, "data");
-    const once = printFixture({ executable: "/srv/bin/bar-print.exe" });
+    const once = printFixture({ executable: "/srv/bin/print-bridge.exe" });
     const backend = new PrintBackend(once.bridge);
     const call = backend.submit({ path: file });
     await waitFor(() => once.processes.length > 0, "single-attempt spawn");
@@ -347,7 +347,7 @@ test("print file stream is destroyed on early child close without leaking fds", 
     const file = join(dir, "doc.pdf");
     await writeFile(file, Buffer.alloc(1024 * 1024, 7));
     const baseline = await openFdCount();
-    const f = printFixture({ executable: "/srv/bin/bar-print.exe" });
+    const f = printFixture({ executable: "/srv/bin/print-bridge.exe" });
     const backend = new PrintBackend(f.bridge);
     const call = backend.inspect({ path: file });
     await waitFor(() => f.processes.length > 0, "early-close spawn");
@@ -371,7 +371,7 @@ test("print file stream is destroyed on timeout while the source is stalled", as
     const file = join(dir, "doc.pdf");
     await writeFile(file, Buffer.alloc(4 * 1024 * 1024, 9));
     const baseline = await openFdCount();
-    const f = printFixture({ executable: "/srv/bin/bar-print.exe", timeoutMs: 50, stallStdin: true });
+    const f = printFixture({ executable: "/srv/bin/print-bridge.exe", timeoutMs: 50, stallStdin: true });
     const backend = new PrintBackend(f.bridge);
     await assert.rejects(backend.inspect({ path: file }), (e) => e instanceof PrintBridgeError && e.code === "timeout");
     assert.equal(f.processes[0].killed, true);
@@ -382,7 +382,7 @@ test("print file stream is destroyed on timeout while the source is stalled", as
 test("print MCP tools coexist with computer tools without changing computer behavior", async () => {
   const native = nativeFixture(() => { throw new Error("must not access OpenCode"); });
   const transport: ComputerTransport = { request: async () => [[{ handle: "0x1234", processId: 1, title: "App", bounds: { x: 0, y: 0, width: 1, height: 1 }, executablePath: null, processName: "app" }]], close: () => {} };
-  const f = printFixture({ executable: "/srv/bin/bar-print.exe" });
+  const f = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const server = createServer(
     new OpenCodeBackend(native.connect),
     new HostBackend(native.connect),
@@ -434,7 +434,7 @@ test("print MCP tools coexist with computer tools without changing computer beha
 test("print inspect rejects directories and oversized files before spawning", async () => {
   const dir = await mkdtemp(join(tmpdir(), "print-prespawn-"));
   try {
-    const f = printFixture({ executable: "/srv/bin/bar-print.exe" });
+    const f = printFixture({ executable: "/srv/bin/print-bridge.exe" });
     const backend = new PrintBackend(f.bridge);
     await assert.rejects(backend.inspect({ path: dir }), /regular file/);
     const file = join(dir, "big.pdf");
@@ -442,7 +442,7 @@ test("print inspect rejects directories and oversized files before spawning", as
     await assert.rejects(backend.inspect({ path: file, filename: "bad/name" }), /separators|path/);
     const tiny = new PrintBridge({
       maxFileBytes: 4,
-      executable: "/srv/bin/bar-print.exe",
+      executable: "/srv/bin/print-bridge.exe",
       spawn: () => { throw new Error("must not spawn for oversized files"); },
     });
     await assert.rejects(new PrintBackend(tiny).inspect({ path: file }), /exceeds/);

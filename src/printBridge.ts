@@ -21,7 +21,7 @@ export class PrintBridgeError extends ConnectorError {
  *
  * On Windows the LocalAppData default is authoritative. On WSL/Linux there is
  * no deterministic WSL-accessible default, so resolution returns null and the
- * caller must set server-side OPENCODE_PRINT_EXE. Never advertise a bogus
+ * caller must set server-side PRINT_BRIDGE_EXE. Never advertise a bogus
  * Linux-home or mixed Windows/POSIX path as a default.
  */
 export function defaultPrintExecutable(): string | null {
@@ -29,17 +29,17 @@ export function defaultPrintExecutable(): string | null {
   // joining it with POSIX semantics produces an unusable mixed path.
   if (process.platform !== "win32") return null;
   const localAppData = process.env.LOCALAPPDATA;
-  if (localAppData && localAppData.trim()) return join(localAppData, "BAR", "bar-print.exe");
+  if (localAppData && localAppData.trim()) return join(localAppData, "WindowsPrintBridge", "print-bridge.exe");
   return null;
 }
 
 export function resolvePrintExecutable(configured?: string): string {
-  const explicit = configured ?? process.env.OPENCODE_PRINT_EXE;
+  const explicit = configured ?? process.env.PRINT_BRIDGE_EXE;
   if (explicit && explicit.trim()) return explicit;
   const fallback = defaultPrintExecutable();
   if (fallback) return fallback;
   throw new PrintBridgeError("not_configured", undefined,
-    "Print bridge executable is not configured; set server-side OPENCODE_PRINT_EXE to the WSL-accessible bar-print.exe path (tool callers cannot supply an executable path)");
+    "Print bridge executable is not configured; set server-side PRINT_BRIDGE_EXE to the WSL-accessible print-bridge.exe path (tool callers cannot supply an executable path)");
 }
 
 /** Canonicalize a host file path, require a regular file, and enforce the size bound. */
@@ -100,7 +100,7 @@ function parsedMessage(parsed: unknown): string | null {
   return null;
 }
 
-/** Short-lived bar-print.exe runner. One spawn per call; no retries, no persistent child. */
+/** Short-lived print-bridge.exe runner. One spawn per call; no retries, no persistent child. */
 export class PrintBridge {
   constructor(private readonly options: {
     spawn?: PrintSpawn;

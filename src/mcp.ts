@@ -222,7 +222,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.status", {
     title: "Read Printer Status",
-    description: "Read print bridge status via bar-print.exe status. Read-only; separate from computer.*.",
+    description: "Read print bridge status via print-bridge.exe status. Read-only; separate from computer.*.",
     inputSchema: printStatusSchema,
     outputSchema: printOutputSchemas.status,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -230,7 +230,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.capabilities", {
     title: "Read Printer Capabilities",
-    description: "Read printer capabilities via bar-print.exe capabilities. Read-only; separate from computer.*.",
+    description: "Read printer capabilities via print-bridge.exe capabilities. Read-only; separate from computer.*.",
     inputSchema: printCapabilitiesSchema,
     outputSchema: printOutputSchemas.capabilities,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -238,7 +238,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.media", {
     title: "Read Loaded Print Media",
-    description: "Read the human-declared loaded media via bar-print.exe media get. Read-only; separate from computer.*.",
+    description: "Read the human-declared loaded media via print-bridge.exe media get. Read-only; separate from computer.*.",
     inputSchema: printMediaSchema,
     outputSchema: printOutputSchemas.media,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -246,7 +246,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.set_media", {
     title: "Declare Loaded Print Media",
-    description: "Declare the physically loaded media via bar-print.exe media set. This is a human declaration of loaded physical media, not a sensor read; verify the tray before declaring. Separate from computer.*.",
+    description: "Declare the physically loaded media via print-bridge.exe media set. This is a human declaration of loaded physical media, not a sensor read; verify the tray before declaring. Separate from computer.*.",
     inputSchema: printSetMediaSchema,
     outputSchema: printOutputSchemas.set_media,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
@@ -254,7 +254,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.inspect", {
     title: "Inspect Printable File",
-    description: "Inspect a host file via bar-print.exe inspect without printing. The host file path is canonicalized, must be a regular file within the size bound, and raw bytes stream to bridge stdin. Read-only; separate from computer.*.",
+    description: "Inspect a host file via print-bridge.exe inspect without printing. The host file path is canonicalized, must be a regular file within the size bound, and raw bytes stream to bridge stdin. Read-only; separate from computer.*.",
     inputSchema: printInspectSchema,
     outputSchema: printOutputSchemas.inspect,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -262,7 +262,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.submit", {
     title: "Submit Print Job",
-    description: "Submit a host file for printing via bar-print.exe submit. This causes a physical paper side effect: the printer produces pages. The host file path is canonicalized, must be a regular file within the size bound, and raw bytes stream to bridge stdin. Copies/paper/orientation/color/scale are validated. Never retry after uncertain failure; reconcile with print.queue/print.job. Separate from computer.*.",
+    description: "Submit a host file for printing via print-bridge.exe submit. This causes a physical paper side effect: the printer produces pages. The host file path is canonicalized, must be a regular file within the size bound, and raw bytes stream to bridge stdin. Copies/paper/orientation/color/scale are validated. Never retry after uncertain failure; reconcile with print.queue/print.job. Separate from computer.*.",
     inputSchema: printSubmitSchema,
     outputSchema: printOutputSchemas.submit,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
@@ -270,7 +270,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.queue", {
     title: "Read Print Queue",
-    description: "Read the print queue via bar-print.exe queue. Read-only; separate from computer.*.",
+    description: "Read the print queue via print-bridge.exe queue. Read-only; separate from computer.*.",
     inputSchema: printQueueSchema,
     outputSchema: printOutputSchemas.queue,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -278,7 +278,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.job", {
     title: "Read Print Job",
-    description: "Read one print job via bar-print.exe job. Read-only; separate from computer.*.",
+    description: "Read one print job via print-bridge.exe job. Read-only; separate from computer.*.",
     inputSchema: printJobSchema,
     outputSchema: printOutputSchemas.job,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -286,7 +286,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("print.cancel", {
     title: "Cancel Print Job",
-    description: "Cancel one print job via bar-print.exe cancel. This stops a queued job but cannot unprint physical pages already produced. Never retry after uncertain failure; reconcile with print.queue/print.job. Separate from computer.*.",
+    description: "Cancel one print job via print-bridge.exe cancel. This stops a queued job but cannot unprint physical pages already produced. Never retry after uncertain failure; reconcile with print.queue/print.job. Separate from computer.*.",
     inputSchema: printCancelSchema,
     outputSchema: printOutputSchemas.cancel,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },

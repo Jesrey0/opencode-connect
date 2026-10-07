@@ -4,7 +4,7 @@ const printerName = z.string().min(1).max(256).describe("Printer name as shown b
 const paperName = z.string().min(1).max(128).describe("Paper size name, e.g. A4, Letter.");
 const mediaType = z.string().min(1).max(128).describe("Media type declared as loaded, e.g. Plain, Photo.");
 const jobId = z.string().min(1).max(256).describe("Print job ID returned by submit or queue.");
-const hostPath = z.string().min(1).max(4096).describe("Absolute host file path streamed to bar-print.exe stdin.");
+const hostPath = z.string().min(1).max(4096).describe("Absolute host file path streamed to print-bridge.exe stdin.");
 const fileName = z.string().min(1).max(255)
   .refine((s) => !s.includes("/") && !s.includes("\\") && !s.includes("\0"), "filename must not contain path separators")
   .describe("Filename reported to the print bridge, without directories.");
