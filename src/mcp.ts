@@ -4,7 +4,9 @@ import * as z from "zod/v4";
 import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
 import { ComputerBackend } from "./computer.js";
+import { PrintBackend } from "./print.js";
 import { computerObserveSchema, computerInteractSchema, computerScreenshotSchema, computerSequenceSchema, computerOutputSchemas } from "./computerSchema.js";
+import { printCapabilitiesSchema, printCancelSchema, printInspectSchema, printJobSchema, printMediaSchema, printQueueSchema, printSetMediaSchema, printStatusSchema, printSubmitSchema, printOutputSchemas } from "./printSchema.js";
 import { exposedUnion } from "./schema.js";
 import { VERSION } from "./version.js";
 import { safeError, AdmissionError, ConnectorError } from "./bounds.js";
@@ -124,14 +126,20 @@ export function structuredResult(structuredContent: Record<string, unknown>, con
   return result;
 }
 
-export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, computer?: ComputerBackend): McpServer {
+export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, computer?: ComputerBackend, print?: PrintBackend): McpServer {
   const computerBackend = computer ?? new ComputerBackend();
+  const printBackend = print ?? new PrintBackend();
   const capabilities = { tools: { listChanged: false }, ...(events ? { events: {} } : {}) };
   const server = new McpServer({ name: "opencode-connect", version: VERSION }, {
     capabilities, supportedProtocolVersions: ["2026-07-28"], inputRequired: { legacyShim: false },
   });
   // A standalone server owns its default backend; HTTP exchanges borrow the shared one.
   if (!computer) server.server.onclose = () => computerBackend.close();
+  const ownedPrint = !print;
+  if (ownedPrint) {
+    const previous = server.server.onclose;
+    server.server.onclose = () => { try { previous?.(); } finally { printBackend.close(); } };
+  }
   if (events) {
     const authenticated = async (extra: ServerContext) => {
       const value = extra.http?.req?.headers.get("x-host-ingress-auth-context");
@@ -211,6 +219,78 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     const { metadata, image } = await computerBackend.screenshot(input);
     return structuredResult(metadata, [image]);
   });
+
+  registerTool("print.status", {
+    title: "Read Printer Status",
+    description: "Read print bridge status via bar-print.exe status. Read-only; separate from computer.*.",
+    inputSchema: printStatusSchema,
+    outputSchema: printOutputSchemas.status,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.status(input)));
+
+  registerTool("print.capabilities", {
+    title: "Read Printer Capabilities",
+    description: "Read printer capabilities via bar-print.exe capabilities. Read-only; separate from computer.*.",
+    inputSchema: printCapabilitiesSchema,
+    outputSchema: printOutputSchemas.capabilities,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.capabilities(input)));
+
+  registerTool("print.media", {
+    title: "Read Loaded Print Media",
+    description: "Read the human-declared loaded media via bar-print.exe media get. Read-only; separate from computer.*.",
+    inputSchema: printMediaSchema,
+    outputSchema: printOutputSchemas.media,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.media(input)));
+
+  registerTool("print.set_media", {
+    title: "Declare Loaded Print Media",
+    description: "Declare the physically loaded media via bar-print.exe media set. This is a human declaration of loaded physical media, not a sensor read; verify the tray before declaring. Separate from computer.*.",
+    inputSchema: printSetMediaSchema,
+    outputSchema: printOutputSchemas.set_media,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+  }, async (input) => structuredResult(await printBackend.setMedia(input)));
+
+  registerTool("print.inspect", {
+    title: "Inspect Printable File",
+    description: "Inspect a host file via bar-print.exe inspect without printing. The host file path is canonicalized, must be a regular file within the size bound, and raw bytes stream to bridge stdin. Read-only; separate from computer.*.",
+    inputSchema: printInspectSchema,
+    outputSchema: printOutputSchemas.inspect,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.inspect(input)));
+
+  registerTool("print.submit", {
+    title: "Submit Print Job",
+    description: "Submit a host file for printing via bar-print.exe submit. This causes a physical paper side effect: the printer produces pages. The host file path is canonicalized, must be a regular file within the size bound, and raw bytes stream to bridge stdin. Copies/paper/orientation/color/scale are validated. Never retry after uncertain failure; reconcile with print.queue/print.job. Separate from computer.*.",
+    inputSchema: printSubmitSchema,
+    outputSchema: printOutputSchemas.submit,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
+  }, async (input) => structuredResult(await printBackend.submit(input)));
+
+  registerTool("print.queue", {
+    title: "Read Print Queue",
+    description: "Read the print queue via bar-print.exe queue. Read-only; separate from computer.*.",
+    inputSchema: printQueueSchema,
+    outputSchema: printOutputSchemas.queue,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.queue(input)));
+
+  registerTool("print.job", {
+    title: "Read Print Job",
+    description: "Read one print job via bar-print.exe job. Read-only; separate from computer.*.",
+    inputSchema: printJobSchema,
+    outputSchema: printOutputSchemas.job,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.job(input)));
+
+  registerTool("print.cancel", {
+    title: "Cancel Print Job",
+    description: "Cancel one print job via bar-print.exe cancel. This stops a queued job but cannot unprint physical pages already produced. Never retry after uncertain failure; reconcile with print.queue/print.job. Separate from computer.*.",
+    inputSchema: printCancelSchema,
+    outputSchema: printOutputSchemas.cancel,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+  }, async (input) => structuredResult(await printBackend.cancel(input)));
 
   registerTool("host.inspect", {
     title: "Inspect OpenCode Host",
