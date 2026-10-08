@@ -1,6 +1,7 @@
 import { EventErrorCode } from "./eventsErrors.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual, createHash } from "node:crypto";
-import { mkdir, open, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { acquireStoreLock } from "./storeLock.js";
 import { dirname, join } from "node:path";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -105,7 +106,7 @@ async function postResolved(url: URL, body: string, headers: Record<string, stri
 export class Events {
   private store: Store = { subscriptions: {} };
   private path: string;
-  private lockPath: string;
+  private releaseLock?: () => void;
   private timer?: NodeJS.Timeout;
   private busy = false;
   private deliveryScheduled = false;
@@ -117,43 +118,34 @@ export class Events {
   }
   readonly lifecycle = new EventDiagnostics(() => this.time());
   private storageFailed = false;
-  private constructor(path: string, private readonly hooks: EventHooks) { this.path = path; this.lockPath = join(dirname(path), "store.lock"); }
+  private constructor(path: string, private readonly hooks: EventHooks) { this.path = path; }
   private time() { return this.hooks.now?.() ?? now(); }
   static async open(path = join(process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? ".", ".local/state"), "opencode-connect/events/store.json"), hooks: EventHooks = {}) {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const instance = new Events(path, hooks);
-    let lock;
-    try { lock = await open(instance.lockPath, "wx", 0o600); }
-    catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let owner: number | undefined;
-      try { owner = Number((await readFile(instance.lockPath, "utf8")).trim()); } catch { /* stale or unreadable lock */ }
-      if (owner && Number.isSafeInteger(owner)) {
-        try { process.kill(owner, 0); throw new Error("Events store is already owned by another process"); }
-        catch (check) { if (check instanceof Error && check.message === "Events store is already owned by another process") throw check; if ((check as NodeJS.ErrnoException).code !== "ESRCH") throw new Error("Events store lock cannot be verified"); }
-      }
-      await unlink(instance.lockPath);
-      lock = await open(instance.lockPath, "wx", 0o600);
-    }
-    await lock.writeFile(String(process.pid));
-    await lock.close();
+    instance.releaseLock = acquireStoreLock(join(dirname(path), "store.lock.sqlite"));
     try {
-      const raw = await readFile(path, "utf8");
-      if (Buffer.byteLength(raw) > 2 * 1024 * 1024) throw new Error("Events store exceeds bound");
-      instance.store = JSON.parse(raw) as Store;
-    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") { await unlink(instance.lockPath); throw error; } }
-    const time = instance.time();
-    for (const sub of Object.values(instance.store.subscriptions)) {
-      if (live(sub)) sub.state = sub.expiresAt !== null && sub.expiresAt <= time ? "expired" : "paused";
-      if (sub.expiresAt !== null && sub.expiresAt <= time) instance.retire(sub, "expired");
+      try {
+        const raw = await readFile(path, "utf8");
+        if (Buffer.byteLength(raw) > 2 * 1024 * 1024) throw new Error("Events store exceeds bound");
+        instance.store = JSON.parse(raw) as Store;
+      } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+      const time = instance.time();
+      for (const sub of Object.values(instance.store.subscriptions)) {
+        if (live(sub)) sub.state = sub.expiresAt !== null && sub.expiresAt <= time ? "expired" : "paused";
+        if (sub.expiresAt !== null && sub.expiresAt <= time) instance.retire(sub, "expired");
+      }
+      await instance.persist();
+      instance.lifecycle.record("subscriptionsRecovered", { count: Object.keys(instance.store.subscriptions).length });
+      instance.timer = setInterval(() => { void instance.processDeliveries(); }, 1000);
+      instance.timer.unref();
+      return instance;
+    } catch (error) {
+      instance.releaseLock();
+      throw error;
     }
-    await instance.persist();
-    instance.lifecycle.record("subscriptionsRecovered", { count: Object.keys(instance.store.subscriptions).length });
-    instance.timer = setInterval(() => { void instance.processDeliveries(); }, 1000);
-    instance.timer.unref();
-    return instance;
   }
-  async close() { clearInterval(this.timer); await this.stateQueue; await unlink(this.lockPath).catch(() => {}); }
+  async close() { clearInterval(this.timer); await this.stateQueue; this.releaseLock?.(); }
   private async persist() {
     try {
       const bytes = JSON.stringify(this.store);

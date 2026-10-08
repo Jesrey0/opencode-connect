@@ -12,3 +12,7 @@ dist/
 *.key
 *.p12
 *.pfx
+
+.worktrees/
+coverage/
+*.tsbuildinfo

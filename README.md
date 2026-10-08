@@ -594,6 +594,19 @@ loopback `127.0.0.1:8788/mcp`. HOST/PORT come from the process environment;
 there is no user-global dotenv loader. Service authentication stays inside the
 official client/service API. Secrets remain outside the repository.
 
+Events retain their JSON state at
+`${XDG_STATE_HOME:-$HOME/.local/state}/opencode-connect/events/store.json`.
+A dedicated built-in SQLite connection holds an exclusive kernel-managed lock
+at sibling `store.lock.sqlite` for the store's entire lifetime. Ownership is
+released on close, process crash (including SIGKILL), or reboot; it does not
+rely on PID liveness or shutdown cleanup. Startup failures also release ownership.
+Keep this state on a local filesystem with working SQLite file locking, and
+**never delete or replace `store.lock.sqlite` while a connector is running**.
+A genuine second owner fails closed; storage/locking errors are not treated as
+stale locks. The former PID-only `store.lock` is ignored. Stop all old-version
+connector processes before upgrading; deployment activation already stops/restarts
+the managed service. Old and new versions must not share a store concurrently.
+
 Native service lifecycle admission occurs only at connector startup. Ordinary calls use native discovery and fail explicitly when unavailable; they never start, replace or recover the service. Health and MCP errors omit raw upstream bodies. Failed starts preserve a known sessionId and admission stage; promptSubmitted null means delivery is uncertain and requires reconciliation.
 
 Native worktree branch is an existing Git reference, not a new branch name. Omit branch and supply name to use native worktree branch creation; errors retain the canonical SDK error type without raw command/provider output.
