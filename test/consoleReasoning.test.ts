@@ -8,13 +8,13 @@ import { assistant, nativeFixture, user } from "./native-fixture.js";
 
 // Pinned evidence: packages/schema/src/{session-event,session-message}.ts,
 // packages/core/src/session/{message-updater,runner/publish-llm-event}.ts and
-// packages/core/test/session-runner.test.ts at anomalyco/opencode v2.0.22.
+// packages/core/test/session-runner.test.ts at anomalyco/opencode v2.0.24.
 // "restores durable reasoning provider metadata in the next request" and
 // "keeps one durable reasoning part when reasoning closes after text" verify
 // provider text/state round-trip, not a separate guaranteed-safe summary.
 
 const snapshot = (): ConsoleSnapshot => ({
-  ready: true, release: "2.0.22", pid: 1, observedAtMs: 0, usage: null, pending: [],
+  ready: true, release: "2.0.24", pid: 1, observedAtMs: 0, usage: null, pending: [],
   sessions: [{ id: "s", title: "Activity", running: true, outcome: null, agent: "build", model: "openai/a", variant: null, cwd: "/tmp", updatedMs: 0 }],
 });
 type ReasoningEvent = Extract<OpenCodeEvent, { type: "session.reasoning.started" | "session.reasoning.delta" | "session.reasoning.ended" }>;

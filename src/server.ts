@@ -8,6 +8,8 @@ import { bootstrapNative } from "./native.js";
 import { safeError } from "./bounds.js";
 import { Events } from "./events.js";
 import { connectNative } from "./native.js";
+import { ComputerBackend } from "./computer.js";
+import { PrintBackend } from "./print.js";
 import { EventReconciler } from "./eventsReconciliation.js";
 
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -33,7 +35,9 @@ app.get("/health", async (_req: Request, res: Response) => {
 // Local observation only: shared ingress routes only the authenticated /mcp path.
 app.get("/observe", (_req: Request, res: Response) => res.json({ events: events.snapshot() }));
 
-const mcp = createHttpHandler(backend, undefined, events);
+const computer = new ComputerBackend();
+const print = new PrintBackend();
+const mcp = createHttpHandler(backend, undefined, events, computer, print);
 app.all("/mcp", (req: Request, res: Response) => {
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
   return toNodeHandler(mcp)(req, res, req.body);

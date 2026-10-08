@@ -6,7 +6,7 @@ import { emptyState, handleKey, renderFrame, transcriptLines, type ConsoleSnapsh
 import { nativeFixture, assistant, user } from "./native-fixture.js";
 
 const snapshot = (): ConsoleSnapshot => ({
-  ready: true, release: "2.0.22", pid: 1, observedAtMs: 0, usage: null, pending: [],
+  ready: true, release: "2.0.24", pid: 1, observedAtMs: 0, usage: null, pending: [],
   sessions: [{ id: "s", title: "Stream", running: true, outcome: null, agent: "build", model: "openai/a", variant: null, cwd: "/tmp", updatedMs: 0 }],
 });
 let sequence = 0;

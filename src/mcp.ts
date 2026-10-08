@@ -3,6 +3,10 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
+import { ComputerBackend } from "./computer.js";
+import { PrintBackend } from "./print.js";
+import { computerObserveSchema, computerInteractSchema, computerScreenshotSchema, computerSequenceSchema, computerOutputSchemas } from "./computerSchema.js";
+import { printCapabilitiesSchema, printCancelSchema, printInspectSchema, printJobSchema, printMediaSchema, printQueueSchema, printSetMediaSchema, printStatusSchema, printSubmitSchema, printOutputSchemas } from "./printSchema.js";
 import { exposedUnion } from "./schema.js";
 import { VERSION } from "./version.js";
 import { safeError, AdmissionError, ConnectorError } from "./bounds.js";
@@ -122,11 +126,20 @@ export function structuredResult(structuredContent: Record<string, unknown>, con
   return result;
 }
 
-export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events): McpServer {
+export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, computer?: ComputerBackend, print?: PrintBackend): McpServer {
+  const computerBackend = computer ?? new ComputerBackend();
+  const printBackend = print ?? new PrintBackend();
   const capabilities = { tools: { listChanged: false }, ...(events ? { events: {} } : {}) };
   const server = new McpServer({ name: "opencode-connect", version: VERSION }, {
     capabilities, supportedProtocolVersions: ["2026-07-28"], inputRequired: { legacyShim: false },
   });
+  // A standalone server owns its default backend; HTTP exchanges borrow the shared one.
+  if (!computer) server.server.onclose = () => computerBackend.close();
+  const ownedPrint = !print;
+  if (ownedPrint) {
+    const previous = server.server.onclose;
+    server.server.onclose = () => { try { previous?.(); } finally { printBackend.close(); } };
+  }
   if (events) {
     const authenticated = async (extra: ServerContext) => {
       const value = extra.http?.req?.headers.get("x-host-ingress-auth-context");
@@ -168,6 +181,116 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     outputSchema: outputSchemas.status,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async () => structuredResult({ ...await backend.status(), ...(events ? { events: events.snapshot() } : {}) }));
+
+  registerTool("computer.observe", {
+    title: "Observe Windows Computer",
+    description: "Read WCU v1 capabilities, windows, window state, exact semantic matches or element state. Locators are case-sensitive with at most one ancestor; no waits or fuzzy matching.",
+    inputSchema: computerObserveSchema,
+    outputSchema: computerOutputSchemas.observe,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await computerBackend.observe(input)));
+
+  registerTool("computer.interact", {
+    title: "Interact with Windows Computer",
+    description: "Perform one explicit Windows action. Foreground activation requires activate=true (keySequence also requires handle). focus/setValue/invoke default to immediate inspect readback; observed element state does not verify application effects. No automatic retries after uncertain mutations.",
+    inputSchema: computerInteractSchema,
+    outputSchema: computerOutputSchemas.interact,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
+  }, async (input) => structuredResult(await computerBackend.interact(input)));
+
+  registerTool("computer.sequence", {
+    title: "Run Windows Computer Sequence",
+    description: "Run 1..32 explicit actions or exact waitFor conditions sequentially; stop on first failure, never retry mutations. Waits default to 3000 ms (maximum 10000), polling every 100 ms (50..1000). Same activation/readback contracts as computer.interact. Returns indexed results and HostPlane timings; no screenshots, scripts, loops or branches.",
+    inputSchema: computerSequenceSchema,
+    outputSchema: computerOutputSchemas.sequence,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+  }, async (input) => {
+    const result = await computerBackend.sequence(input);
+    return { ...structuredResult(result), ...(result.success ? {} : { isError: true }) };
+  });
+
+  registerTool("computer.screenshot", {
+    title: "Capture Windows Computer",
+    description: "Capture desktop, or an explicit window handle, as exactly one PNG image (maximum 1 MiB) with safe metadata. Does not activate a window.",
+    inputSchema: computerScreenshotSchema,
+    outputSchema: computerOutputSchemas.screenshot,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => {
+    const { metadata, image } = await computerBackend.screenshot(input);
+    return structuredResult(metadata, [image]);
+  });
+
+  registerTool("print.status", {
+    title: "Read Printer Status",
+    description: "Read print bridge status via print-bridge.exe status. Read-only; separate from computer.*.",
+    inputSchema: printStatusSchema,
+    outputSchema: printOutputSchemas.status,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.status(input)));
+
+  registerTool("print.capabilities", {
+    title: "Read Printer Capabilities",
+    description: "Read printer capabilities via print-bridge.exe capabilities. Read-only; separate from computer.*.",
+    inputSchema: printCapabilitiesSchema,
+    outputSchema: printOutputSchemas.capabilities,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.capabilities(input)));
+
+  registerTool("print.media", {
+    title: "Read Loaded Print Media",
+    description: "Read the human-declared loaded media via print-bridge.exe media get. Read-only; separate from computer.*.",
+    inputSchema: printMediaSchema,
+    outputSchema: printOutputSchemas.media,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.media(input)));
+
+  registerTool("print.set_media", {
+    title: "Declare Loaded Print Media",
+    description: "Declare the physically loaded media via print-bridge.exe media set. This is a human declaration of loaded physical media, not a sensor read; verify the tray before declaring. Separate from computer.*.",
+    inputSchema: printSetMediaSchema,
+    outputSchema: printOutputSchemas.set_media,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+  }, async (input) => structuredResult(await printBackend.setMedia(input)));
+
+  registerTool("print.inspect", {
+    title: "Inspect Printable File",
+    description: "Inspect a host file via print-bridge.exe inspect without printing. The host file path is canonicalized, must be a regular file within the size bound, and raw bytes stream to bridge stdin. Read-only; separate from computer.*.",
+    inputSchema: printInspectSchema,
+    outputSchema: printOutputSchemas.inspect,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.inspect(input)));
+
+  registerTool("print.submit", {
+    title: "Submit Print Job",
+    description: "Submit a host file for printing via print-bridge.exe submit. This causes a physical paper side effect: the printer produces pages. The host file path is canonicalized, must be a regular file within the size bound, and raw bytes stream to bridge stdin. Copies/paper/orientation/color/scale are validated. Never retry after uncertain failure; reconcile with print.queue/print.job. Separate from computer.*.",
+    inputSchema: printSubmitSchema,
+    outputSchema: printOutputSchemas.submit,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
+  }, async (input) => structuredResult(await printBackend.submit(input)));
+
+  registerTool("print.queue", {
+    title: "Read Print Queue",
+    description: "Read the print queue via print-bridge.exe queue. Read-only; separate from computer.*.",
+    inputSchema: printQueueSchema,
+    outputSchema: printOutputSchemas.queue,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.queue(input)));
+
+  registerTool("print.job", {
+    title: "Read Print Job",
+    description: "Read one print job via print-bridge.exe job. Read-only; separate from computer.*.",
+    inputSchema: printJobSchema,
+    outputSchema: printOutputSchemas.job,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (input) => structuredResult(await printBackend.job(input)));
+
+  registerTool("print.cancel", {
+    title: "Cancel Print Job",
+    description: "Cancel one print job via print-bridge.exe cancel. This stops a queued job but cannot unprint physical pages already produced. Never retry after uncertain failure; reconcile with print.queue/print.job. Separate from computer.*.",
+    inputSchema: printCancelSchema,
+    outputSchema: printOutputSchemas.cancel,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+  }, async (input) => structuredResult(await printBackend.cancel(input)));
 
   registerTool("host.inspect", {
     title: "Inspect OpenCode Host",

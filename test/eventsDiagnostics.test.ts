@@ -27,7 +27,7 @@ test("existing status tool exposes the same sanitized event snapshot as local ob
   const root = await mkdtemp(join(tmpdir(), "opencode-events-status-"));
   const events = await Events.open(join(root, "events", "store.json"));
   const backend = new OpenCodeBackend();
-  backend.status = async () => ({ ready: true, opencodeRelease: "2.0.22", serverPid: 1, workers: [], pendingActions: [] });
+  backend.status = async () => ({ ready: true, opencodeRelease: "2.0.24", serverPid: 1, workers: [], pendingActions: [] });
   const server = createServer(backend, undefined, events);
   const client = new Client({ name: "diagnostic-test", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair();

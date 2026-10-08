@@ -3,15 +3,17 @@ import { createMcpHandler, ProtocolError, type McpHandlerRequestOptions } from "
 import { createServer } from "./mcp.js";
 import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
+import { ComputerBackend } from "./computer.js";
+import { PrintBackend } from "./print.js";
 import { Events } from "./events.js";
 
 // The SDK owns per-request metadata, version selection and wire validation.
-export function createHttpHandler(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events) {
-  const handler = createMcpHandler(() => createServer(backend, host, events), {
+export function createHttpHandler(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, computer = new ComputerBackend(), print = new PrintBackend()) {
+  const handler = createMcpHandler(() => createServer(backend, host, events, computer, print), {
     legacy: "reject",
     onerror: (error) => console.error("MCP request failed; details omitted", error instanceof ProtocolError ? { code: error.code } : {}),
   });
-  return { ...handler, fetch: async (request: Request, options?: McpHandlerRequestOptions): Promise<Response> => {
+  return { ...handler, close: async () => { try { await handler.close(); } finally { computer.close(); print.close(); } }, fetch: async (request: Request, options?: McpHandlerRequestOptions): Promise<Response> => {
     // The Node adapter passes Express's bounded, parsed body. Leave wire validation
     // to the SDK; this projection observes receipts before transport rejection.
     const body = options?.parsedBody as { method?: unknown; id?: unknown } | undefined;
