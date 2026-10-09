@@ -1,13 +1,15 @@
 {
   "name": "opencode-connect",
-  "version": "0.8.0",
+  "version": "0.8.1",
   "private": true,
   "description": "Native OpenCode HostPlane and canonical WorkerPlane for ChatGPT operators.",
   "type": "module",
   "scripts": {
-    "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "prebuild": "node scripts/verify-native-client.mjs && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "precheck": "node scripts/verify-native-client.mjs",
+    "pretest": "node scripts/verify-native-client.mjs",
     "dev": "tsx src/server.ts",
     "console": "tsx src/console.ts",
     "console:dist": "node dist/src/console.js",

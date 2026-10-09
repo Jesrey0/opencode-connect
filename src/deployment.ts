@@ -120,8 +120,9 @@ async function collectSourceFiles(sourceDir: string): Promise<string[]> {
       // missing fixed file: hashing still proceeds; prepare validates later
     }
   }
-  const srcDir = path.join(sourceDir, "src");
-  const stack: string[] = [srcDir];
+  // Build-time scripts are part of the release source contract, even though
+  // they are not compiled into dist. Hash them to prevent stale-build reuse.
+  const stack: string[] = [path.join(sourceDir, "src"), path.join(sourceDir, "scripts")];
   while (stack.length > 0) {
     const dir = stack.pop()!;
     let entries;
@@ -133,7 +134,7 @@ async function collectSourceFiles(sourceDir: string): Promise<string[]> {
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) stack.push(full);
-      else if (entry.isFile() && entry.name.endsWith(".ts")) {
+      else if (entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".mjs"))) {
         found.push(path.relative(sourceDir, full));
       }
     }
@@ -263,6 +264,12 @@ export async function copySourceTree(sourceDir: string, stageDir: string): Promi
     await fs.copyFile(path.join(sourceDir, name), path.join(stageDir, name));
   }
   await fs.cp(path.join(sourceDir, "src"), path.join(stageDir, "src"), { recursive: true });
+  // Historical/fixture source trees may not have build-time scripts.
+  try {
+    await fs.cp(path.join(sourceDir, "scripts"), path.join(stageDir, "scripts"), { recursive: true });
+  } catch (error: unknown) {
+    if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+  }
 }
 
 export type ExecFn = (cmd: string, args: string[], cwd: string) => Promise<void>;

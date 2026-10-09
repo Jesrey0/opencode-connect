@@ -97,6 +97,27 @@ test("source hash is deterministic and content-derived", async () => {
   }
 });
 
+test("release source hashing and staging include native build scripts", async () => {
+  const src = await fakeSource({
+    "src/a.ts": "export const a = 1;\n",
+    "scripts/verify-native-client.mjs": "console.log('first');\n",
+  });
+  const stage = await tempDir("opencode-deploy-scripts-");
+  try {
+    const first = await hashSourceTree(src);
+    assert.ok(first.files.includes("scripts/verify-native-client.mjs"));
+    await copySourceTree(src, path.join(stage, "copy"));
+    assert.equal(
+      await readFile(path.join(stage, "copy", "scripts", "verify-native-client.mjs"), "utf8"),
+      "console.log('first');\n",
+    );
+    await writeFile(path.join(src, "scripts", "verify-native-client.mjs"), "console.log('changed');\n");
+    assert.notEqual(first.buildId, (await hashSourceTree(src)).buildId);
+  } finally {
+    await Promise.all([rm(src, { recursive: true, force: true }), rm(stage, { recursive: true, force: true })]);
+  }
+});
+
 test("copy carries runtime sources without checkout node_modules/dist", async () => {
   const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
   const stage = await tempDir("opencode-deploy-stage-");
