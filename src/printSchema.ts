@@ -40,14 +40,14 @@ export type PrintCancel = z.infer<typeof printCancelSchema>;
 
 // Bridge --json payloads are external printer state. Accept any JSON object and
 // project it through the 256 KiB MCP structured-result envelope. Non-object
-// payloads are rejected by the backend; structured bridge errors cross as
-// PrintBridgeError detail instead of silent data.
+// payloads are rejected by the backend; errors cross as sanitized
+// PrintBridgeError messages while raw bridge diagnostics stay server-side.
 const bridgeObject = z.object({}).loose();
 export const printOutputSchemas = {
   status: bridgeObject,
   capabilities: bridgeObject,
   media: bridgeObject,
-  set_media: bridgeObject,
+  declare: bridgeObject,
   inspect: bridgeObject,
   submit: bridgeObject,
   queue: bridgeObject,

@@ -59,7 +59,7 @@ Drag points contain 2..128 signed 32-bit coordinate pairs. `durationMs` is an in
 
 ### `computer.sequence`
 
-See [Computer Use Throughput](computer-throughput.md) for the 1..32-step batching contract, exact waits, HostPlane telemetry and failure results. Sequence uses the same action executor as `computer.interact`, is sequential, and stops on the first failure without replaying mutations. Annotations: `readOnlyHint=false`, `destructiveHint=true`, `idempotentHint=false`, `openWorldHint=false`.
+See [Computer Use Throughput](computer-throughput.md) for the 1..32-step batching contract, exact waits, HostPlane telemetry and failure results. Sequence uses the same action executor as `computer.interact`, is sequential, and stops on the first failure without replaying mutations. Annotations: `readOnlyHint=false`, `destructiveHint=true`, `idempotentHint=false`, `openWorldHint=true`.
 
 ### `computer.screenshot`
 

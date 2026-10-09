@@ -89,7 +89,7 @@ Bridge failures include a fixed `code`, a safe `message`, and, when known, `stat
 
 HostPlane uses a monotonic clock. Per-step `elapsedMs` includes action composition/validation or wait observation/sleep time. `totalElapsedMs` starts after input validation and includes backend queue delay and sequence overhead. It excludes MCP admission, transport and final serialization outside the backend. WCU drag `result.result.metadata.elapsedMs` measures Windows gesture execution separately; subtract it from that step's adapter time to estimate bridge/adapter overhead, and measure client round-trip time separately for MCP overhead. No images or base64 are returned in sequences. The existing 256 KiB structured-result ceiling applies; very large element states can exceed it, so bound workflows and use `readback=false` when immediate state is unnecessary. An envelope failure can occur after mutations took effect.
 
-Annotations are `readOnlyHint=false`, `destructiveHint=true`, `idempotentHint=false`, `openWorldHint=false`.
+Annotations are `readOnlyHint=false`, `destructiveHint=true`, `idempotentHint=false`, `openWorldHint=true`.
 
 ## Verification
 

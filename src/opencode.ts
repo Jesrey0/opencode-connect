@@ -73,7 +73,7 @@ export type QueryInput =
   | ({ type: "skill"; cwd?: string; skillId: string } & TextInput)
   | ({ type: "tools"; sessionId: string; messageId: string } & PageInput)
   | ({ type: "tool"; sessionId: string; messageId: string; toolId: string; field: "input" | "content" | "error"; contentIndex?: number } & TextInput)
-  | ({ type: "models"; cwd?: string } & PageInput)
+  | ({ type: "models"; cwd?: string; view?: "compact" | "full" } & PageInput)
   | ({ type: "agents"; cwd?: string; view?: "compact" | "full"; includeHidden?: boolean; includePermissionsSummary?: boolean } & PageInput)
   | ({ type: "agent"; cwd?: string; agentId: string; field?: "system" | "description" | "permissions" | "permissionSummary"; textOffset?: number; textLimit?: number; textFingerprint?: string } & PageInput)
   | { type: "messages"; sessionId: string; cursor?: string; limit?: number; order?: "asc" | "desc" }
@@ -876,23 +876,27 @@ export class OpenCodeBackend {
         }
         if (query.type === "models") {
           const models = await this.stableModels(client, query.cwd);
-          results.push({ index, type: query.type, result: page(models.map((model) => ({
+          const data = models.map((model) => ({
             id: modelKey(model),
+            free: isZeroCostModel(model),
+            enabled: model.enabled,
+            modalities: model.capabilities.input,
+            variants: model.variants.map((variant) => variant.id),
+            ...(query.view === "compact" ? {} : {
             name: model.name,
             providerId: model.providerID,
             family: model.family ?? null,
             canonical: model.canonical ?? null,
             status: model.status,
-            enabled: model.enabled,
-            free: isZeroCostModel(model),
             capabilities: model.capabilities,
             compatibility: model.compatibility ?? null,
             releasedAtMs: model.time.released,
             contextWindow: model.limit.context,
             inputLimit: model.limit.input ?? null,
             outputLimit: model.limit.output,
-            variants: model.variants.map((variant) => variant.id),
-          })), query) });
+            }),
+          }));
+          results.push({ index, type: query.type, result: { view: query.view ?? "full", ...page(data, query) } });
           continue;
         }
         if (query.type === "agents") {

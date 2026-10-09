@@ -563,7 +563,7 @@ test("MCP sequence discovery publishes bounded schemas and annotations; validate
   const transport = new FakeTransport(() => [dragResult]); const f = await mcpFixture(transport);
   try {
     const tool = (await f.client.listTools()).tools.find((t) => t.name === "computer.sequence")!;
-    assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false });
+    assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: true });
     const schema = tool.inputSchema as JsonSchemaType;
     assert.equal((schema.properties?.steps as JsonSchemaType).minItems, 1); assert.equal((schema.properties?.steps as JsonSchemaType).maxItems, 32);
     const validate = new AjvJsonSchemaValidator().getValidator(schema);

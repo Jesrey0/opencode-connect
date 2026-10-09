@@ -65,7 +65,7 @@ export const querySchema = exposedUnion("type", [
   z.object({ type: z.literal("skill"), cwd: z.string().min(1).optional(), skillId: z.string().min(1), ...textShape }).strict(),
   z.object({ type: z.literal("tools"), sessionId: z.string().min(1), messageId: z.string().min(1), ...pageShape }).strict(),
   z.object({ type: z.literal("tool"), sessionId: z.string().min(1), messageId: z.string().min(1), toolId: z.string().min(1), field: z.enum(["input", "content", "error"]), contentIndex: z.number().int().min(0).optional(), ...textShape }).strict(),
-  z.object({ type: z.literal("models"), cwd: z.string().min(1).optional(), ...pageShape }),
+  z.object({ type: z.literal("models"), cwd: z.string().min(1).optional(), view: z.enum(["compact", "full"]).optional().describe("Use compact for model selection (IDs, free eligibility, enabled state, modalities and variants); full adds model specifications. Defaults to full."), ...pageShape }),
   z.object({ type: z.literal("agents"), cwd: z.string().min(1).optional().describe("Select project context; response returns the native resolved location."), view: z.enum(["compact", "full"]).optional().describe("Defaults to compact catalog; full includes instructions and raw permission pages."), includeHidden: z.boolean().optional().describe("Defaults to false; true includes native internal agents."), includePermissionsSummary: z.boolean().optional().describe("Compact ordered-rule summary, excluding session rules, saved approvals and policies."), ...pageShape }).strict(),
   z.object({ type: z.literal("agent"), cwd: z.string().min(1).optional(), agentId: z.string().min(1), field: z.enum(["system", "description", "permissions", "permissionSummary"]).optional(), ...textShape, ...pageShape }).strict(),
   z.object({ type: z.literal("messages"), sessionId: z.string().min(1), cursor: z.string().min(1).optional(), order: z.enum(["asc", "desc"]).optional(), limit: z.number().int().min(1).max(50).optional() }).refine((input) => !input.cursor || !input.order, { message: "native message cursor cannot be combined with order", path: ["order"] }).meta({ not: { required: ["cursor", "order"] } }),
@@ -203,7 +203,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     description: "Run 1..32 explicit actions or exact waitFor conditions sequentially; stop on first failure, never retry mutations. Waits default to 3000 ms (maximum 10000), polling every 100 ms (50..1000). Same activation/readback contracts as computer.interact. Returns indexed results and HostPlane timings; no screenshots, scripts, loops or branches.",
     inputSchema: computerSequenceSchema,
     outputSchema: computerOutputSchemas.sequence,
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
   }, async (input) => {
     const result = await computerBackend.sequence(input);
     return { ...structuredResult(result), ...(result.success ? {} : { isError: true }) };
@@ -244,11 +244,11 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async (input) => structuredResult(await printBackend.media(input)));
 
-  registerTool("print.set_media", {
+  registerTool("print.declare", {
     title: "Declare Loaded Print Media",
     description: "Declare the physically loaded media via print-bridge.exe media set. This is a human declaration of loaded physical media, not a sensor read; verify the tray before declaring. Separate from computer.*.",
     inputSchema: printSetMediaSchema,
-    outputSchema: printOutputSchemas.set_media,
+    outputSchema: printOutputSchemas.declare,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
   }, async (input) => structuredResult(await printBackend.setMedia(input)));
 

@@ -61,7 +61,7 @@ export class PrintBackend {
   status(input: PrintStatus = {}) { printStatusSchema.parse(input); return this.bridge.run(statusArgs()).then((p) => this.parsed(p, "status")); }
   capabilities(input: PrintCapabilities = {}) { return this.bridge.run(capabilitiesArgs(input)).then((p) => this.parsed(p, "capabilities")); }
   media(input: PrintMedia = {}) { return this.bridge.run(mediaGetArgs(input)).then((p) => this.parsed(p, "media")); }
-  setMedia(input: PrintSetMedia) { return this.bridge.run(mediaSetArgs(input)).then((p) => this.parsed(p, "set_media")); }
+  setMedia(input: PrintSetMedia) { return this.bridge.run(mediaSetArgs(input)).then((p) => this.parsed(p, "declare")); }
   queue(input: PrintQueue = {}) { return this.bridge.run(queueArgs(input)).then((p) => this.parsed(p, "queue")); }
   job(input: PrintJob) { return this.bridge.run(jobArgs(input)).then((p) => this.parsed(p, "job")); }
 

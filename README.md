@@ -116,7 +116,7 @@ public routes for Windows desktop control or printing.
 | Family | MCP tools | Contract and prerequisites |
 | --- | --- | --- |
 | Computer Use | `computer.observe`, `computer.interact`, `computer.sequence`, `computer.screenshot` | [Windows Computer Use](docs/computer-use.md) and [bounded sequences](docs/computer-throughput.md). Requires Windows Computer Use and Windows PowerShell in the interactive desktop account. |
-| Printing | `print.status`, `print.capabilities`, `print.media`, `print.set_media`, `print.inspect`, `print.submit`, `print.queue`, `print.job`, `print.cancel` | [Printing HostPlane](docs/printing.md). Requires the separate Windows Print Bridge executable and a functioning Windows printer. |
+| Printing | `print.status`, `print.capabilities`, `print.media`, `print.declare`, `print.inspect`, `print.submit`, `print.queue`, `print.job`, `print.cancel` | [Printing HostPlane](docs/printing.md). Requires the separate Windows Print Bridge executable and a functioning Windows printer. |
 
 Computer interaction and print submission have real desktop/physical side effects.
 Tool discovery does **not** prove that the Windows bridge, a printer, a paper

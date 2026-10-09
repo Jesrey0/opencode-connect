@@ -15,6 +15,34 @@ const agent = (id: string, hidden = false) => ({ id, name: id, mode: "primary", 
 // inspect the transport shape just as an MCP caller does.
 const result = (value: unknown): any => JSON.parse(JSON.stringify(value)).results[0].result;
 
+test("model selection view is compact, retains exact eligibility and variants, and preserves paging mode", async () => {
+  const models = ["a", "b"].map((id) => ({
+    id, providerID: "opencode", name: `Model ${id}`, family: "test", canonical: null,
+    status: "active", enabled: true, capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    time: { released: 123 }, variants: [{ id: "high" }], limit: { context: 100000, input: 90000, output: 10000 },
+    cost: [{ input: id === "a" ? 0 : 1, output: 0, cache: { read: 0, write: 0 } }],
+  }));
+  const fixture = nativeFixture((request) => {
+    if (request.path === "/api/model") return { location, data: models };
+    throw new Error("unexpected " + request.path);
+  });
+  const backend = new OpenCodeBackend(fixture.connect);
+  const query = { type: "models" as const, cwd: location.directory, view: "compact" as const, limit: 1 };
+  const first = result(await backend.query([query]));
+  assert.equal(first.view, "compact");
+  assert.deepEqual(first.data[0], { id: "opencode/a", free: true, enabled: true, modalities: ["text", "image"], variants: ["high"] });
+  assert.equal(first.nextCall.arguments.queries[0].view, "compact");
+  const second = result(await backend.query(first.nextCall.arguments.queries));
+  assert.equal(second.data[0].id, "opencode/b");
+  assert.equal(second.data[0].free, false);
+  assert.equal(second.nextCall, null);
+  const full = result(await backend.query([{ type: "models", cwd: location.directory }]));
+  assert.equal(full.view, "full");
+  assert.equal(full.data[0].name, "Model a");
+  assert.equal(full.data[0].contextWindow, 100000);
+  assert.ok(JSON.stringify(first.data[0]).length < JSON.stringify(full.data[0]).length);
+});
+
 test("effective catalog lists native built-ins/custom agents compactly in canonical location, with explicit hidden/full views", async () => {
   const agents = [agent("build"), agent("plan"), agent("explore"), agent("general"), agent("project-reviewer"), agent("title", true)];
   const fixture = nativeFixture(() => ({ location, data: agents }));

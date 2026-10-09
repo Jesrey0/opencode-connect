@@ -81,21 +81,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function parsedCode(parsed: unknown): string | null {
+  // Bridge stdout/stderr is external input. Codes are identifiers, not free text.
+  const code = (value: unknown) => typeof value === "string" && /^[a-z][a-z0-9_]{0,47}$/.test(value) ? value : null;
   if (isRecord(parsed)) {
-    if (typeof parsed.code === "string" && parsed.code) return parsed.code;
-    if (typeof parsed.error === "string" && parsed.error) return parsed.error;
+    if (typeof parsed.code === "string") return code(parsed.code);
+    if (typeof parsed.error === "string") return code(parsed.error);
     const nested = parsed.error;
-    if (isRecord(nested) && typeof nested.code === "string" && nested.code) return nested.code;
-  }
-  return null;
-}
-
-function parsedMessage(parsed: unknown): string | null {
-  if (isRecord(parsed)) {
-    if (typeof parsed.message === "string" && parsed.message) return parsed.message;
-    if (typeof parsed.error === "string" && parsed.error) return parsed.error;
-    const nested = parsed.error;
-    if (isRecord(nested) && typeof nested.message === "string" && nested.message) return nested.message;
+    if (isRecord(nested)) return code(nested.code);
   }
   return null;
 }
@@ -193,20 +185,18 @@ export class PrintBridge {
           const candidate = isRecord(errResult) ? errResult : isRecord(outResult) ? outResult : undefined;
           if (candidate) {
             const bridgeCode = parsedCode(candidate) ?? "bridge";
-            const bridgeMessage = parsedMessage(candidate);
             reject(new PrintBridgeError(bridgeCode,
               { exitCode: code, error: candidate, stdout: truncateText(outText), stderr: truncateText(errText) },
-              bridgeMessage ? `Print bridge reported ${bridgeCode}: ${truncateText(bridgeMessage)} (exit ${code})`
-                : `Print bridge reported ${bridgeCode} (exit ${code}); reconcile printer state before retrying a mutation`));
+              `Print bridge reported ${bridgeCode} (exit ${code}); reconcile printer state before retrying a mutation`));
             return;
           }
           if (outText !== "") {
             reject(new PrintBridgeError("invalid_json", { exitCode: code, output: truncateText(outText), stderr: truncateText(errText) },
-              `Print bridge returned invalid JSON (exit ${code ?? "unknown"}): ${truncateText(outText || errText || "empty")}; reconcile printer state before retrying a mutation`));
+              `Print bridge returned invalid JSON (exit ${code ?? "unknown"}); reconcile printer state before retrying a mutation`));
             return;
           }
           reject(new PrintBridgeError("bridge", { exitCode: code, stderr: truncateText(errText) },
-            `Print bridge exited ${code ?? "unknown"}: ${truncateText(errText || "no output")}; reconcile printer state before retrying a mutation`));
+            `Print bridge exited ${code ?? "unknown"}; reconcile printer state before retrying a mutation`));
           return;
         }
         // Success still requires a JSON object on stdout.
@@ -215,7 +205,7 @@ export class PrintBridge {
           parsed = outText ? JSON.parse(outText) : undefined;
         } catch {
           reject(new PrintBridgeError("invalid_json", { exitCode: code, output: truncateText(outText), stderr: truncateText(errText) },
-            `Print bridge returned invalid JSON (exit ${code ?? "unknown"}): ${truncateText(outText || errText || "empty")}; reconcile printer state before retrying a mutation`));
+            `Print bridge returned invalid JSON (exit ${code ?? "unknown"}); reconcile printer state before retrying a mutation`));
           return;
         }
         if (!isRecord(parsed)) {

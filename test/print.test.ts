@@ -25,6 +25,7 @@ import {
 import {
   printSubmitSchema, printInspectSchema, printCapabilitiesSchema, printSetMediaSchema,
 } from "../src/printSchema.js";
+import { safeError } from "../src/bounds.js";
 
 async function waitFor(condition: () => boolean, label: string, timeoutMs = 5000): Promise<void> {
   const start = Date.now();
@@ -270,14 +271,22 @@ test("print bridge parses stderr structured errors and stays compatible with std
   s.processes[0].failStderrJson(1, { code: "printer_offline", message: "printer is offline", details: { printer: "Lab" } });
   await assert.rejects(stderrCall, (e) => e instanceof PrintBridgeError
     && e.code === "printer_offline"
-    && /printer is offline/.test(e.message)
+    && !/printer is offline/.test(safeError(e))
     && JSON.stringify(e.detail).includes("printer_offline"));
 
   const nested = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const nestedCall = nested.bridge.run(["queue", "--json"]);
   await waitFor(() => nested.processes.length > 0, "nested stderr-error spawn");
   nested.processes[0].failStderrJson(2, { error: { code: "job_not_found", message: "no such job" } });
-  await assert.rejects(nestedCall, (e) => e instanceof PrintBridgeError && e.code === "job_not_found" && /no such job/.test((e as Error).message));
+  await assert.rejects(nestedCall, (e) => e instanceof PrintBridgeError && e.code === "job_not_found" && !/no such job/.test(safeError(e)));
+
+  const secret = printFixture({ executable: "/srv/bin/print-bridge.exe" });
+  const secretCall = secret.bridge.run(["status", "--json"]);
+  await waitFor(() => secret.processes.length > 0, "untrusted-code spawn");
+  secret.processes[0].failStderrJson(1, { code: "BEARER_SECRET_FROM_CHILD", message: "Authorization: secret value" });
+  await assert.rejects(secretCall, (e) => e instanceof PrintBridgeError && e.code === "bridge"
+    && !/BEARER_SECRET_FROM_CHILD|Authorization: secret value/.test(safeError(e))
+    && JSON.stringify(e.detail).includes("BEARER_SECRET_FROM_CHILD"));
 
   // Compatibility: structured errors on stdout keep working.
   const f = printFixture({ executable: "/srv/bin/print-bridge.exe" });
@@ -298,13 +307,13 @@ test("print bridge parses stderr structured errors and stays compatible with std
   const invalid = h.bridge.run(["status", "--json"]);
   await waitFor(() => h.processes.length > 0, "invalid-json spawn");
   h.processes[0].failText(1, "not json");
-  await assert.rejects(invalid, (e) => e instanceof PrintBridgeError && e.code === "invalid_json");
+  await assert.rejects(invalid, (e) => e instanceof PrintBridgeError && e.code === "invalid_json" && !safeError(e).includes("not json"));
 
   const m = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const malformedSuccess = m.bridge.run(["status", "--json"]);
   await waitFor(() => m.processes.length > 0, "malformed-success spawn");
   m.processes[0].succeedText("not json");
-  await assert.rejects(malformedSuccess, (e) => e instanceof PrintBridgeError && e.code === "invalid_json");
+  await assert.rejects(malformedSuccess, (e) => e instanceof PrintBridgeError && e.code === "invalid_json" && !safeError(e).includes("not json"));
 
   const n = printFixture({ executable: "/srv/bin/print-bridge.exe" });
   const nonObject = n.bridge.run(["status", "--json"]);
@@ -397,10 +406,10 @@ test("print MCP tools coexist with computer tools without changing computer beha
     const { tools } = await client.listTools();
     const names = tools.map((t) => t.name).sort();
     for (const name of ["computer.observe", "computer.interact", "computer.sequence", "computer.screenshot"]) assert.ok(names.includes(name), name);
-    for (const name of ["print.status", "print.capabilities", "print.media", "print.set_media", "print.inspect", "print.submit", "print.queue", "print.job", "print.cancel"]) assert.ok(names.includes(name), name);
+    for (const name of ["print.status", "print.capabilities", "print.media", "print.declare", "print.inspect", "print.submit", "print.queue", "print.job", "print.cancel"]) assert.ok(names.includes(name), name);
     assert.equal(tools.find((t) => t.name === "print.submit")!.annotations!.destructiveHint, true);
     assert.match(tools.find((t) => t.name === "print.submit")!.description!, /physical paper side effect/);
-    assert.match(tools.find((t) => t.name === "print.set_media")!.description!, /human declaration of loaded physical media/);
+    assert.match(tools.find((t) => t.name === "print.declare")!.description!, /human declaration of loaded physical media/);
     assert.equal(tools.find((t) => t.name === "print.status")!.annotations!.readOnlyHint, true);
     assert.deepEqual(tools.find((t) => t.name === "print.cancel")!.annotations, { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false });
 

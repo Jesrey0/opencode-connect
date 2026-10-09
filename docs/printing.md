@@ -31,7 +31,7 @@ print route or manage the Windows printer.
 | `print.status` | `{}` | Read print-bridge status |
 | `print.capabilities` | `{printer?}` | Read discovered printer features; optionally select a named printer |
 | `print.media` | `{}` | Read the current **human-declared** loaded paper/media |
-| `print.set_media` | `{paper, media?}` | Persist a human declaration of loaded paper and media; **does not load paper physically** |
+| `print.declare` | `{paper, media?}` | Persist a human declaration of loaded paper and media; **does not load paper physically** |
 | `print.inspect` | `{path, filename?}` | Validate and inspect an existing host file without printing |
 | `print.submit` | `{path, filename?, printer?, copies?, paper?, orientation?, color?, scale?}` | Submit a real print job with physical paper side effects |
 | `print.queue` | `{printer?}` | Read current queued jobs |
@@ -58,7 +58,7 @@ can occur after a Windows request was acted upon.
 
 1. Confirm the printer and its capabilities. Ask the person at the machine
    what paper is physically loaded; `print.media` is a declaration, **not a sensor**.
-2. Record the physical paper using `print.set_media` when necessary.
+2. Record the physical paper using `print.declare` when necessary.
 3. Prepare a supported local file and use `print.inspect` for non-printing
    validation.
 4. Submit only once with `print.submit`; retain its returned printer and job ID
