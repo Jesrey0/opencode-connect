@@ -3,10 +3,15 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.7.0** projects native OpenCode HostPlane operations,
-Windows computer-use and printing adapters, and the canonical WorkerPlane
+OpenCode Connect **0.8.0** projects native OpenCode HostPlane operations
+and the canonical WorkerPlane
 into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**. Codex Connect remains independently
 owned and deployable.
+
+This adapter exposes only OpenCode-backed HostPlane and WorkerPlane operations.
+Custom host applications are CLI-first and keep their code, process lifecycle,
+and optional future MCP endpoints outside this connector. The standalone
+`windows-print-bridge` project is not part of the OpenCode MCP catalog.
 
 ```text
 ChatGPT / 0x0perator
@@ -97,7 +102,7 @@ Images are optional `read` results with `image: true`, limited to **1 MiB** and
 signature-checked PNG, JPEG, GIF, or WebP. MCP returns one image block plus
 metadata, without duplicate base64 in text or structured data. SVG/HTML and
 oversized images fail. Object results return only MCP `structuredContent` with
-`content: []`; image reads instead carry one image block. All 25 tools publish
+`content: []`; image reads instead carry one image block. All 12 tools publish
 explicit output schemas. Connector errors return structured `error` (and admission
 `recovery` where applicable) with `isError: true`; SDK input errors retain SDK formatting.
 The serialized `{ structuredContent }` projection has a repository-policy
@@ -105,26 +110,6 @@ The serialized `{ structuredContent }` projection has a repository-policy
 Oversized JSON results fail explicitly; narrow the page or detail. OpenAI's
 256 KiB requirement applies to complete outbound **event request bodies**, not
 tool images or this repository's JSON projection policy.
-
-## Windows computer use and printing
-
-The current catalog exposes **25 tools**: 12 core status/HostPlane/WorkerPlane
-tools, four `computer.*` tools, and nine `print.*` tools. They share this
-connector's existing authenticated MCP endpoint; host ingress has no separate
-public routes for Windows desktop control or printing.
-
-| Family | MCP tools | Contract and prerequisites |
-| --- | --- | --- |
-| Computer Use | `computer.observe`, `computer.interact`, `computer.sequence`, `computer.screenshot` | [Windows Computer Use](docs/computer-use.md) and [bounded sequences](docs/computer-throughput.md). Requires Windows Computer Use and Windows PowerShell in the interactive desktop account. |
-| Printing | `print.status`, `print.capabilities`, `print.media`, `print.declare`, `print.inspect`, `print.submit`, `print.queue`, `print.job`, `print.cancel` | [Printing HostPlane](docs/printing.md). Requires the separate Windows Print Bridge executable and a functioning Windows printer. |
-
-Computer interaction and print submission have real desktop/physical side effects.
-Tool discovery does **not** prove that the Windows bridge, a printer, a paper
-tray, or an interactive session is available. The WSL deployment supplies the
-bridge executable path from its **server-side** environment, never from MCP
-tool arguments. Printing is generic HostPlane functionality, not part of BAR
-or any specific application. See the linked documents for readbacks, bounds,
-media declarations, and no-retry handling of uncertain effects.
 
 ## Command retention and cursor contracts
 
