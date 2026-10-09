@@ -578,7 +578,13 @@ legacy/malformed-wire rejection without native access, localhost Host/Origin
 protection, and cancellation without worker interruption. Published `tools/list` schemas expose root
 and nested query object properties/discriminator enums alongside strict variant
 constraints; JSON Schema validation tests verify unsupported combinations and
-bounds independently of the Zod parser. Native session outcomes and exact
+bounds independently of the Zod parser. Published schemas also carry the
+`opencode.start` fresh/resume/fork admission rules and the `opencode.inspect`
+selection-continuation dependencies that the backend already enforced at runtime,
+so those combinations are refused by the contract with the same reason and before
+any native access, instead of failing or being ignored after a round trip. Both
+layers stay in force: the backend guards remain authoritative for non-MCP callers,
+and a parity test asserts the two never drift. Native session outcomes and exact
 assistant error/finish evidence are tested separately, including partial recovery
 failures and latest prompts without an assistant. Retry fixtures verify native
 backoff, next-step clearing, immediate 403 and exhausted transient failures,

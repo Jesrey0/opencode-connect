@@ -234,7 +234,26 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       permissions: permissionsSchema.optional().describe("Canonical ordered session rules for fresh work. Omission preserves native policy. Session rules follow agent rules; broad allow can override agent restrictions."),
       variant: z.string().min(1).optional().describe("Fresh only: catalog-validated model variant persisted before the first prompt; resume/fork inherit and reject overrides."),
       ...attachmentShape,
-    }).strict(),
+    }).strict()
+      // Publish the fresh/resume/fork admission rules the backend already enforces, so
+      // discovery describes the contract and rejected combinations fail before any native
+      // access. These mirror the guards in OpenCodeBackend.start; both layers must agree.
+      .refine((input) => !input.sessionId || !input.forkFromSessionId, { message: "sessionId and forkFromSessionId are mutually exclusive", path: ["forkFromSessionId"] })
+      .refine((input) => !input.beforeMessageId || !!input.forkFromSessionId, { message: "beforeMessageId requires forkFromSessionId", path: ["beforeMessageId"] })
+      .refine((input) => !!input.sessionId || !!input.forkFromSessionId || !!input.cwd, { message: "fresh opencode.start requires an explicit cwd", path: ["cwd"] })
+      .refine((input) => !input.cwd || (!input.sessionId && !input.forkFromSessionId), { message: "resume and fork inherit cwd and reject cwd overrides", path: ["cwd"] })
+      .refine((input) => !input.permissions || (!input.sessionId && !input.forkFromSessionId), { message: "permissions are only valid for fresh sessions", path: ["permissions"] })
+      .refine((input) => input.variant === undefined || (!input.sessionId && !input.forkFromSessionId), { message: "resume and fork inherit canonical variant and reject overrides", path: ["variant"] })
+      .meta({
+        not: { required: ["sessionId", "forkFromSessionId"] },
+        dependentRequired: { beforeMessageId: ["forkFromSessionId"] },
+        anyOf: [{ required: ["cwd"] }, { required: ["sessionId"] }, { required: ["forkFromSessionId"] }],
+        allOf: [
+          { not: { anyOf: [{ required: ["sessionId", "cwd"] }, { required: ["forkFromSessionId", "cwd"] }] } },
+          { not: { anyOf: [{ required: ["sessionId", "permissions"] }, { required: ["forkFromSessionId", "permissions"] }] } },
+          { not: { anyOf: [{ required: ["sessionId", "variant"] }, { required: ["forkFromSessionId", "variant"] }] } },
+        ],
+      }),
     outputSchema: outputSchemas.start,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
   }, async (input) => structuredResult(await backend.start(input)));
@@ -261,7 +280,13 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       candidateAssistantMessageId: z.string().min(1).optional(),
       selectionFingerprint: z.string().min(1).optional().describe("Required with selectionCursor; session changes invalidate continuation."),
       ...textShape,
-    }).strict(),
+    }).strict()
+      // These continuation arguments only mean something together. Publish the
+      // dependencies the backend enforces in latestResult so an incomplete
+      // recovery call is rejected by the contract instead of being ignored.
+      .refine((input) => !input.selectionCursor || !!input.messageId, { message: "selectionCursor requires the original user messageId", path: ["messageId"] })
+      .refine((input) => !input.candidateAssistantMessageId || !!input.selectionCursor, { message: "candidate requires selectionCursor", path: ["candidateAssistantMessageId"] })
+      .meta({ dependentRequired: { selectionCursor: ["messageId"], candidateAssistantMessageId: ["selectionCursor"] } }),
     outputSchema: outputSchemas.inspect,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async (input) => structuredResult(await backend.inspect(input)));

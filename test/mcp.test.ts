@@ -120,6 +120,18 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       ["opencode.act", { action: "switchAgent", sessionId: "s", agent: "build" }, [
         { action: "switchAgent", sessionId: "s", agents: [{ name: "build" }] }, { action: "interrupt", sessionId: "s", text: "x" }, { action: "steer", sessionId: "s", instruction: "x", agent: "build" },
       ]],
+      ["opencode.start", { task: "task", cwd: "/tmp", model: "openai/a" }, [
+        { task: "task", model: "openai/a", sessionId: "s", forkFromSessionId: "f" },
+        { task: "task", model: "openai/a", cwd: "/tmp", beforeMessageId: "m" },
+        { task: "task", model: "openai/a" },
+        { task: "task", model: "openai/a", sessionId: "s", cwd: "/tmp" },
+        { task: "task", model: "openai/a", sessionId: "s", permissions: [{ action: "read", resource: "*", effect: "allow" }] },
+        { task: "task", model: "openai/a", sessionId: "s", variant: "high" },
+      ]],
+      ["opencode.inspect", { sessionId: "s", messageId: "u", detail: "result" }, [
+        { sessionId: "s", detail: "result", selectionCursor: "c" },
+        { sessionId: "s", detail: "result", candidateAssistantMessageId: "a" },
+      ]],
     ];
     for (const [name, valid, invalid] of cases) {
       const validate = provider.getValidator(schemas.get(name)! as JsonSchemaType);
@@ -133,6 +145,54 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       }
     }
     assert.equal(nativeCalls, 0);
+  } finally { await fixture.close(); }
+});
+
+test("published start/inspect contracts self-describe the exact admission and continuation guards the backend enforces", async () => {
+  const native = nativeFixture((request) => {
+    if (request.path === "/api/session/s") return { data: session() };
+    if (request.path === "/api/session/active") return { data: {} };
+    throw new Error(`guarded input must not reach native ${request.path}`);
+  });
+  const fixture = await mcpFixture(native);
+  const backend = new OpenCodeBackend(native.connect);
+  try {
+    const { tools } = await fixture.client.listTools();
+    const schemas = new Map(tools.map((tool) => [tool.name, tool.inputSchema]));
+    const rules = [{ action: "read", resource: "*", effect: "allow" }];
+    const guarded: [string, Record<string, unknown>, (input: never) => Promise<unknown>, string][] = [
+      ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", forkFromSessionId: "f" }, (i) => backend.start(i), "sessionId and forkFromSessionId are mutually exclusive"],
+      ["opencode.start", { task: "t", model: "openai/a", cwd: "/tmp", beforeMessageId: "m" }, (i) => backend.start(i), "beforeMessageId requires forkFromSessionId"],
+      ["opencode.start", { task: "t", model: "openai/a" }, (i) => backend.start(i), "fresh opencode.start requires an explicit cwd"],
+      ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", cwd: "/tmp" }, (i) => backend.start(i), "resume and fork inherit cwd and reject cwd overrides"],
+      ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", permissions: rules }, (i) => backend.start(i), "permissions are only valid for fresh sessions"],
+      ["opencode.start", { task: "t", model: "openai/a", forkFromSessionId: "f", variant: "high" }, (i) => backend.start(i), "resume and fork inherit canonical variant and reject overrides"],
+      ["opencode.inspect", { sessionId: "s", detail: "result", selectionCursor: "c" }, (i) => backend.inspect(i), "selectionCursor requires the original user messageId"],
+      ["opencode.inspect", { sessionId: "s", detail: "result", candidateAssistantMessageId: "a" }, (i) => backend.inspect(i), "candidate requires selectionCursor"],
+    ];
+    for (const [name, args, call, expected] of guarded) {
+      const label = `${name} ${JSON.stringify(args)}`;
+      // Discovery publishes the rule, so the combination is not merely rejected later.
+      assert.equal(new AjvJsonSchemaValidator().getValidator(schemas.get(name)! as JsonSchemaType)(args).valid, false, label);
+      const before = native.requests.length;
+      const response = await fixture.client.callTool({ name, arguments: args });
+      assert.equal(response.isError, true, label);
+      assert.equal(native.requests.length, before, `${label}: rejected before native access`);
+      // The contract states the same reason the backend guard uses, for non-MCP callers.
+      assert.ok(JSON.stringify(response.content).includes(expected), `${label}: contract reports "${expected}"`);
+      await assert.rejects(call(args as never), (error: Error) => error.message === expected, `${label}: backend keeps its own guard`);
+    }
+    // Every combination the connector itself emits for recovery stays accepted.
+    for (const args of [
+      { task: "t", model: "openai/a", cwd: "/tmp", permissions: rules, variant: "high" },
+      { task: "t", model: "openai/a", sessionId: "s" },
+      { task: "t", model: "openai/a", forkFromSessionId: "f", beforeMessageId: "m" },
+    ]) assert.equal(new AjvJsonSchemaValidator().getValidator(schemas.get("opencode.start")! as JsonSchemaType)(args).valid, true, JSON.stringify(args));
+    for (const args of [
+      { sessionId: "s" },
+      { sessionId: "s", messageId: "u", detail: "result" },
+      { sessionId: "s", messageId: "u", detail: "result", selectionCursor: "c", selectionFingerprint: "f", candidateAssistantMessageId: "a" },
+    ]) assert.equal(new AjvJsonSchemaValidator().getValidator(schemas.get("opencode.inspect")! as JsonSchemaType)(args).valid, true, JSON.stringify(args));
   } finally { await fixture.close(); }
 });
 
