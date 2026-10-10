@@ -14,6 +14,7 @@ import {
   type SessionInboxInfo,
 } from "@opencode/client";
 import { connectNative, OPENCODE_RELEASE, type Connect } from "./native.js";
+import { CODEX_DIRECT_RPC_ID, CODEX_PROMPT_LIMIT, CODEX_TIMEOUT_LIMIT_MS, CODEX_TIMEOUT_MS, codexCancel, codexJob, codexJobId, codexMutation, codexNextCall, codexStart, codexStartIdentity } from "./codex.js";
 import { page, textPage, type PageInput, integer, fingerprint, checkFingerprint, safeError, AdmissionError, CatalogError, TEXT_LIMIT, MESSAGE_PREVIEW_LIMIT, COMPACTION_PREVIEW_LIMIT, MESSAGE_TOOL_PREVIEW_LIMIT } from "./bounds.js";
 import { nextCall, pageNextCall, queryNextCall } from "./continuation.js";
 import { compactAgent, contextualPage, permissionSummary } from "./catalog.js";
@@ -84,6 +85,7 @@ export type QueryInput =
   | ({ type: "skills"; cwd?: string } & PageInput)
   | ({ type: "providers"; cwd?: string } & PageInput)
   | { type: "usage" }
+  | { type: "codexJob"; jobId: string }
   | { type: "sessions"; cursor?: string; limit?: number; cwd?: string; searchTerm?: string }
   | { type: "session"; sessionId: string };
 
@@ -106,7 +108,9 @@ export type ActInput =
   | { action: "switchAgent"; sessionId: string; agent: string }
   | { action: "setPermissions"; sessionId: string; permissions: PermissionRule[] }
   | { action: "removeSavedApproval"; sessionId: string; approvalId: string }
-  | { action: "synthetic"; sessionId: string; text: string; description?: string; delivery?: "steer" | "queue"; resume?: boolean };
+  | { action: "synthetic"; sessionId: string; text: string; description?: string; delivery?: "steer" | "queue"; resume?: boolean }
+  | { action: "codexStart"; cwd: string; prompt: string; timeoutMs?: number }
+  | { action: "codexCancel"; jobId: string };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -930,6 +934,10 @@ export class OpenCodeBackend {
           results.push({ index, type: query.type, result: await client.session.stats() });
           continue;
         }
+        if (query.type === "codexJob") {
+          results.push({ index, type: query.type, result: await codexJob(client, codexJobId(query.jobId), CODEX_TIMEOUT_MS) });
+          continue;
+        }
         if (query.type === "sessions") {
           const [response, active] = await Promise.all([
             client.session.list({ limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: "desc" as const }), directory: query.cwd, search: query.searchTerm }),
@@ -1014,6 +1022,21 @@ export class OpenCodeBackend {
 
   async act(input: ActInput) {
     const { client } = await this.connect();
+    // Operator-direct Codex dispatch owns no native session identity, so it is handled
+    // before the mandatory session lookup every session-scoped action performs. Direct
+    // Codex answers only with its own canonical job id, status and plugin result; the
+    // connector never mints a session or message identity for it.
+    if (input.action === "codexStart") {
+      await assertDirectory(input.cwd);
+      if (Buffer.byteLength(input.prompt) > CODEX_PROMPT_LIMIT) throw new Error("codex task prompt exceeds 64 KiB");
+      const timeoutMs = integer(input.timeoutMs, CODEX_TIMEOUT_MS, CODEX_TIMEOUT_LIMIT_MS, 1, "timeoutMs");
+      const admitted = codexStartIdentity(await codexStart(client, { cwd: input.cwd, prompt: input.prompt }, timeoutMs));
+      return { action: input.action, cwd: input.cwd, ...(await codexMutation(client, admitted.jobId, admitted.status, timeoutMs)), timeoutMs, rpcDefinition: CODEX_DIRECT_RPC_ID, verifyNextCall: codexNextCall(admitted.jobId) };
+    }
+    if (input.action === "codexCancel") {
+      const status = await codexCancel(client, codexJobId(input.jobId), CODEX_TIMEOUT_MS);
+      return { action: input.action, ...(await codexMutation(client, input.jobId, status, CODEX_TIMEOUT_MS)), rpcDefinition: CODEX_DIRECT_RPC_ID, verifyNextCall: codexNextCall(input.jobId) };
+    }
     const session = await client.session.get({ sessionID: input.sessionId });
     if (input.action === "cancelInbox" || input.action === "updateInbox") {
       const before = await client.session.inbox.list({ sessionID: session.id });

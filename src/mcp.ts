@@ -72,6 +72,7 @@ export const querySchema = exposedUnion("type", [
   z.object({ type: z.literal("skills"), cwd: z.string().min(1).optional(), ...pageShape }),
   z.object({ type: z.literal("providers"), cwd: z.string().min(1).optional(), ...pageShape }),
   z.object({ type: z.literal("usage") }),
+  z.object({ type: z.literal("codexJob").describe("Read one canonical codex-direct Codex job by its plugin jobId. This is plugin job state, not an OpenCode session, and it never proves assistant success on its own."), jobId: z.string().min(1) }).strict(),
   z.object({
     type: z.literal("sessions"),
     cursor: z.string().min(1).optional(),
@@ -114,6 +115,8 @@ export const actSchema = exposedUnion("action", [
   z.object({ action: z.literal("setPermissions"), sessionId: z.string().min(1), permissions: permissionsSchema }),
   z.object({ action: z.literal("removeSavedApproval").describe("Remove one project saved approval by exact ID with absent-target readback; never retry uncertain removal."), sessionId: z.string().min(1), approvalId: z.string().min(1) }),
   z.object({ action: z.literal("synthetic"), sessionId: z.string().min(1), text: z.string().min(1).max(12000), description: z.string().max(2000).optional(), delivery: z.enum(["steer", "queue"]).optional(), resume: z.boolean().optional() }),
+  z.object({ action: z.literal("codexStart").describe("Dispatch Codex directly through the native codex-direct plugin RPC definition. This creates no OpenCode session and asks no other model; answer with the returned canonical jobId, current status and plugin result."), cwd: z.string().min(1).describe("Absolute path to an existing directory for the Codex run; the connector rejects relative or missing paths before dispatch."), prompt: z.string().min(1).max(65536).describe("Self-contained Codex task prompt, up to 64 KiB."), timeoutMs: z.number().int().min(1).max(90000).optional().describe("Bound on this admission call only (1..90000 ms, default 45000). It never cancels the job, and an exceeded bound leaves admission uncertain, so never retry automatically.") }).strict(),
+  z.object({ action: z.literal("codexCancel").describe("Request cancellation of one canonical codex-direct Codex job. The returned status is native plugin state; a failed or timed-out call does not prove cancellation, so reconcile with query codexJob instead of retrying."), jobId: z.string().min(1).describe("Canonical job id returned by codexStart.") }).strict(),
 ]);
 
 export function structuredResult(structuredContent: Record<string, unknown>, content: ContentBlock[] = []) {
@@ -293,7 +296,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("opencode.query", {
     title: "Query OpenCode State",
-    description: "Batch read native catalogs, ordered permissions, sessions, messages, inbox and tool evidence. Agents default to compact effective catalog with hidden entries excluded. Message pages return 512-unit previews with canonical IDs and bounded tool counts; recover full text via type:message. Session tokens are cumulative totals, not context occupancy. Continue using fingerprints/native cursors; selected text may contain secrets.",
+    description: "Batch read native catalogs, ordered permissions, sessions, messages, inbox and tool evidence. Agents default to compact effective catalog with hidden entries excluded. Message pages return 512-unit previews with canonical IDs and bounded tool counts; recover full text via type:message. Session tokens are cumulative totals, not context occupancy. codexJob reads canonical codex-direct plugin jobs by jobId; it is plugin state, not a worker session. Continue using fingerprints/native cursors; selected text may contain secrets.",
     inputSchema: z.object({
       queries: z.array(querySchema).min(1).max(10),
     }).strict(),
@@ -303,7 +306,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("opencode.act", {
     title: "Act on OpenCode State",
-    description: "Mutate a native session or admit prompt/inbox/command/skill work. Read back configuration; void admissions have no invented message ID. Compaction admission is not completion: inbox absence never proves it; verify the exact native compaction message using the returned inbox ID. Never automatically retry uncertain mutations.",
+    description: "Mutate a native session or admit prompt/inbox/command/skill work, or dispatch Codex directly through the codex-direct plugin RPC. Read back configuration; void admissions have no invented message ID. Compaction admission is not completion: inbox absence never proves it; verify the exact native compaction message using the returned inbox ID. codexStart/codexCancel carry no session identity and answer only with the plugin's canonical jobId, status and result; an uncertain Codex admission or cancellation must be reconciled with query codexJob, never retried automatically. Never automatically retry uncertain mutations.",
     inputSchema: actSchema,
     outputSchema: outputSchemas.act,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },

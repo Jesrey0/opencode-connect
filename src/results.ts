@@ -68,5 +68,7 @@ export const outputSchemas = {
     z.object({ action: z.literal("respondForm"), sessionId: id, formId: id, accepted: z.literal(true) }).strict(),
     z.object({ action: z.literal("cancelForm"), sessionId: id, formId: id, cancelled: z.literal(true) }).strict(),
     z.object({ action: z.literal("delete"), sessionId: id, deleted: z.literal(true) }).strict(),
+    z.object({ action: z.literal("codexStart"), jobId: id, cwd: id, status: id, result: nativeObject.nullable(), error: nativeObject.nullable(), verified: z.boolean(), readbackError: z.string().nullable(), timeoutMs: count, rpcDefinition: z.literal("codex-direct"), verifyNextCall: nextCall }).strict(),
+    z.object({ action: z.literal("codexCancel"), jobId: id, status: id, result: nativeObject.nullable(), error: nativeObject.nullable(), verified: z.boolean(), readbackError: z.string().nullable(), rpcDefinition: z.literal("codex-direct"), verifyNextCall: nextCall }).strict(),
   ]),
 };
