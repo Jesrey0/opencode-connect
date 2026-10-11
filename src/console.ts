@@ -130,9 +130,19 @@ export async function observe(client: OpenCodeClient, readCodex = () => observeC
     };
   }
   sessions.push(...codex.sessions);
-  sessions.sort((a, b) => Number(b.running) - Number(a.running) || (b.updatedMs ?? 0) - (a.updatedMs ?? 0));
+  sessions.sort((a, b) => (b.updatedMs ?? -Infinity) - (a.updatedMs ?? -Infinity));
+  const ordered = sessions.filter((entry) => entry.running);
+  const opencodeRecent = sessions.filter((entry) => !entry.running && entry.runtime === "opencode");
+  const codexRecent = sessions.filter((entry) => !entry.running && entry.runtime === "codex");
+  // Fair presentation after running rows: missing native timestamps must not
+  // bury a runtime below the viewport. Stable sorting keeps equal/unknown times
+  // in inventory order; interleaving changes no session evidence or identity.
+  for (let index = 0; index < Math.max(opencodeRecent.length, codexRecent.length); index++) {
+    if (opencodeRecent[index]) ordered.push(opencodeRecent[index]);
+    if (codexRecent[index]) ordered.push(codexRecent[index]);
+  }
   pending.push(...codex.pending);
-  return { ready: true, release: info.version, pid: info.pid, sessions, pending, usage, codexVisibility: codex.visibility, observedAtMs: Date.now() };
+  return { ready: true, release: info.version, pid: info.pid, sessions: ordered, pending, usage, codexVisibility: codex.visibility, observedAtMs: Date.now() };
 }
 
 export function messageToEntry(message: SessionMessageInfo): TranscriptEntry | null {

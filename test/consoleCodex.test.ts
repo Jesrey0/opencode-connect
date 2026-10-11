@@ -20,6 +20,63 @@ function fixture(rpc: (request: NativeRequest) => unknown) {
 const unavailable = () => Response.json({ _tag: "RpcError", type: "codex-sessions.unsupported", message: "PRIVATE backend body" }, { status: 400 });
 const plain = (lines: string[]) => lines.map(stripVTControlCharacters).join("\n");
 
+test("completed Codex stays visible and selectable beside a large recent OpenCode inventory, after running rows", async () => {
+  const recent = Array.from({ length: 24 }, (_, index) => ({
+    ...session(), id: `oc-${index}`, time: { created: 1, updated: 10_000 + index, idle: 2 },
+  }));
+  for (const active of [false, true]) {
+    const native = nativeFixture(request => {
+      if (request.path === "/api/info") return { version: "2.0.24", pid: 3, urls: [], paths: { tmp: "/tmp" } };
+      if (request.path === "/api/session") return { data: recent, cursor: { next: null } };
+      if (request.path === "/api/session/active") return { data: active ? { "oc-0": {} } : {} };
+      if (request.path.endsWith("/permissions") || request.path.endsWith("/forms")) return { data: [] };
+      if (request.path.endsWith("/list")) return { output: { sessions: [], nextCursor: null } };
+      if (request.path.endsWith("/status")) return { output: { sessions: [
+        { ...supervised("completed-worker"), status: "completed", outcome: "completed" },
+        ...(active ? [supervised("live-worker")] : []),
+      ] } };
+      return undefined;
+    });
+    const snapshot = await observe(native.client);
+    const running = active ? ["oc-0", "live-worker"] : [];
+    assert.deepEqual(visibleSessions(snapshot, true).map(entry => entry.id), running);
+    assert.deepEqual(snapshot.sessions.slice(0, running.length).map(entry => entry.id), running);
+    assert.deepEqual(snapshot.sessions.slice(running.length, running.length + 2).map(entry => entry.id), ["oc-23", "completed-worker"]);
+    assert.deepEqual(snapshot.sessions.filter(entry => entry.runtime === "opencode" && !entry.running).map(entry => entry.updatedMs),
+      recent.filter(entry => !active || entry.id !== "oc-0").map(entry => entry.time.updated).reverse());
+    const completed = snapshot.sessions.find(entry => entry.id === "completed-worker")!;
+    assert.equal(completed.updatedMs, null);
+    assert.equal(sessionStatus(completed), "completed");
+    for (const [width, height] of [[80, 24], [100, 30]]) {
+      const state = emptyState();
+      const frame = renderFrame(snapshot, null, state, width, height);
+      assert.equal(frame.length, height);
+      for (const line of frame) assert.equal(displayWidth(line), width);
+      // Match a session row, not the Codex visibility/quota heading.
+      assert.match(plain(frame), /codex\s+completed\s+Codex task/);
+      for (let index = 0; index < running.length + 1; index++) handleKey(state, snapshot, { kind: "down" });
+      assert.match(plain(renderFrame(snapshot, null, state, width, height)), /> codex\s+completed\s+Codex task/);
+      handleKey(state, snapshot, { kind: "enter" });
+      assert.deepEqual(state.view, { kind: "session", runtime: "codex", sessionId: "completed-worker" });
+    }
+  }
+});
+
+test("fair recent ordering preserves trusted timestamps and stable unknown Codex inventory order", async () => {
+  const native = fixture(request => request.path.endsWith("/list")
+    ? { output: { sessions: [
+      { sessionId: "unknown-first", cwd: "/history", capabilities },
+      { sessionId: "older", cwd: "/history", updatedAt: "2026-10-10T12:00:00Z", capabilities },
+      { sessionId: "newer", cwd: "/history", updatedAt: "2026-10-11T12:00:00Z", capabilities },
+      { sessionId: "unknown-last", cwd: "/history", updatedAt: "invalid", capabilities },
+    ], nextCursor: null } }
+    : { output: { sessions: [] } });
+  const snapshot = await observe(native.client);
+  assert.deepEqual(snapshot.sessions.map(entry => entry.id), ["s", "newer", "older", "unknown-first", "unknown-last"]);
+  assert.deepEqual(snapshot.sessions.filter(entry => entry.runtime === "codex").map(entry => entry.updatedMs),
+    [Date.parse("2026-10-11T12:00:00Z"), Date.parse("2026-10-10T12:00:00Z"), null, null]);
+});
+
 test("console includes Codex history and active worker omitted by native listing", async () => {
   const native = fixture(request => request.path.endsWith("/list")
     ? { output: { sessions: [{ sessionId: "history", cwd: "/history", title: "History", updatedAt: "invalid", capabilities }], nextCursor: "older" } }
