@@ -148,6 +148,42 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
   } finally { await fixture.close(); }
 });
 
+test("Codex start rejects OpenCode-only fields at MCP admission while OpenCode title reaches the backend", async () => {
+  const starts: Parameters<OpenCodeBackend["start"]>[0][] = [];
+  class AdmissionBackend extends OpenCodeBackend {
+    override async start(input: Parameters<OpenCodeBackend["start"]>[0]): Promise<never> {
+      starts.push(input);
+      throw new Error("test backend admission reached");
+    }
+  }
+  const native = nativeFixture(() => { throw new Error("schema test must not access runtime"); });
+  const fixture = await mcpFixture(native, new AdmissionBackend(native.connect));
+  try {
+    const { tools } = await fixture.client.listTools();
+    const schema = tools.find(tool => tool.name === "opencode.start")!.inputSchema;
+    const validate = new AjvJsonSchemaValidator().getValidator(schema as JsonSchemaType);
+    assert.match((schema.properties!.title as { description: string }).description, /OpenCode-only/);
+    const codex = { runtime: "codex", cwd: "/tmp", task: "test" };
+    assert.equal(validate(codex).valid, true);
+    for (const [field, value] of Object.entries({ model: "openai/a", agent: "build", variant: "high", permissions: [], forkFromSessionId: "s", beforeMessageId: "m", title: "x", files: [], agents: [], skills: [] })) {
+      const args = { ...codex, [field]: value };
+      assert.equal(validate(args).valid, false, field);
+      const response = await fixture.client.callTool({ name: "opencode.start", arguments: args });
+      assert.equal(response.isError, true, field);
+      assert.ok(JSON.stringify(response.content).includes(`${field} is OpenCode-only and is not supported by Codex start`), field);
+      assert.equal(starts.length, 0, "rejected without backend invocation");
+    }
+    for (const runtime of [undefined, "opencode"]) {
+      const args = { ...(runtime ? { runtime } : {}), cwd: "/tmp", task: "test", model: "openai/a", title: "x" };
+      assert.equal(validate(args).valid, true);
+      await fixture.client.callTool({ name: "opencode.start", arguments: args });
+      assert.deepEqual(starts.at(-1), args, "OpenCode title is passed through unchanged");
+    }
+    assert.equal(starts.length, 2);
+    assert.equal(native.requests.length, 0);
+  } finally { await fixture.close(); }
+});
+
 test("published start/inspect contracts self-describe the exact admission and continuation guards the backend enforces", async () => {
   const native = nativeFixture((request) => {
     if (request.path === "/api/session/s") return { data: session() };

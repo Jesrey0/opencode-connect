@@ -129,7 +129,7 @@ test("Codex list and supervised failures remain independent and replay is never 
   }
 });
 
-test("Codex reads and failures are reused across event refreshes until the slow fallback", async () => {
+test("Codex history failures use the long cache while status and transcript recover on the fallback", async () => {
   let now = 0;
   let failed = true;
   const native = fixture(request => {
@@ -154,13 +154,63 @@ test("Codex reads and failures are reused across event refreshes until the slow 
   failed = false;
   now = 5000;
   await observer.refresh();
-  assert.equal(native.requests.filter(request => request.path.includes("/rpc/")).length, 6);
+  assert.equal(native.requests.filter(request => request.path.includes("/rpc/")).length, 5);
   assert.equal(state.transcriptError, null);
   assert.equal(state.transcript?.[0].text, "Recovered");
   assert.equal(observer.snapshot!.sessions[0].runtime, "codex");
+  assert.match(observer.snapshot!.codexVisibility, /history unavailable/);
   now = 5750;
   await observer.refresh();
-  assert.equal(native.requests.filter(request => request.path.includes("/rpc/")).length, 6);
+  assert.equal(native.requests.filter(request => request.path.includes("/rpc/")).length, 5);
+  now = 300_000;
+  await observer.refresh();
+  assert.equal(native.requests.filter(request => request.path.endsWith("/list")).length, 2);
+  assert.doesNotMatch(observer.snapshot!.codexVisibility, /unavailable/);
+});
+
+test("history lists every five minutes while supervised execution and approvals stay live", async () => {
+  let now = 0;
+  const native = fixture(request => {
+    if (request.path.endsWith("/list")) return { output: { sessions: [{ sessionId: "worker", cwd: "/history", title: "History title", capabilities }], nextCursor: null } };
+    return { output: { sessions: [{ ...supervised(), title: null,
+      status: now >= 10_000 ? "completed" : "inProgress",
+      outcome: now >= 10_000 ? "completed" : "unknown",
+      pendingActions: now === 5000 ? [{ requestId: "approval", sessionId: "worker", action: "Run command", resources: [], options: [], details: { locations: [], truncatedFields: [] } }] : [],
+    }] } };
+  });
+  const reads = consoleReads(native.client, () => now);
+  for (now = 0; now < 300_000; now += 5000) {
+    const snapshot = await reads.snapshot();
+    const worker = snapshot.sessions.find(entry => entry.runtime === "codex")!;
+    assert.equal(worker.title, "History title");
+    assert.equal(sessionStatus(worker), now >= 10_000 ? "completed" : "running");
+    assert.equal(snapshot.pending.length, now === 5000 ? 1 : 0);
+  }
+  assert.equal(native.requests.filter(request => request.path.endsWith("/list")).length, 1);
+  assert.equal(native.requests.filter(request => request.path.endsWith("/status")).length, 60);
+  await reads.snapshot();
+  assert.equal(native.requests.filter(request => request.path.endsWith("/list")).length, 2);
+});
+
+test("dashboard r immediately refreshes cached history and supervised status", async () => {
+  let now = 0;
+  let failed = true;
+  const native = fixture(request => {
+    if (request.path.endsWith("/list")) return failed ? unavailable() : { output: { sessions: [{ sessionId: "new", cwd: "/new", capabilities }], nextCursor: null } };
+    return { output: { sessions: failed ? [] : [supervised()] } };
+  });
+  const observer = new ConsoleObserver(emptyState(), consoleReads(native.client, () => now), () => {});
+  await observer.refresh();
+  failed = false;
+  now = 750;
+  assert.equal(observer.applyKeys([{ kind: "char", value: "r" }]), true);
+  await observer.refresh();
+  assert.deepEqual(observer.snapshot!.sessions.filter(entry => entry.runtime === "codex").map(entry => entry.id), ["worker", "new"]);
+  assert.equal(native.requests.filter(request => request.path.endsWith("/list")).length, 2);
+  assert.equal(native.requests.filter(request => request.path.endsWith("/status")).length, 2);
+  now = 1500;
+  await observer.refresh();
+  assert.equal(native.requests.filter(request => request.path.endsWith("/list")).length, 2);
 });
 
 test("overlapping Codex inventories deduplicate native IDs and pending actions stay runtime-local", async () => {

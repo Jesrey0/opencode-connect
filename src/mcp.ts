@@ -13,6 +13,7 @@ import { outputSchemas } from "./results.js";
 import { CODEX_MODES } from "./codex.js";
 
 const runtimeSchema = z.enum(["opencode", "codex"]).optional().describe("Session runtime; omission selects OpenCode. Codex uses native ACP session IDs and advertises its narrower capabilities.");
+const codexUnsupportedStartFields = ["model", "agent", "variant", "permissions", "forkFromSessionId", "beforeMessageId", "title", "files", "agents", "skills"] as const;
 
 const pageShape = { offset: z.number().int().min(0).optional().meta({ default: 0 }), limit: z.number().int().min(1).max(50).optional().describe("Page size: integer 1..50; defaults to 25.").meta({ default: 25 }), fingerprint: z.string().min(1).optional() };
 const textShape = { textOffset: z.number().int().min(0).optional().describe("UTF-16 text offset; nonzero continuation requires textFingerprint.").meta({ default: 0 }), textLimit: z.number().int().min(1).max(12000).optional().meta({ default: 12000 }), textFingerprint: z.string().min(1).optional() };
@@ -236,7 +237,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       forkFromSessionId: z.string().min(1).optional().describe("Persisted session to fork into a new workstream."),
       beforeMessageId: z.string().min(1).optional().describe("Optional fork boundary; requires forkFromSessionId."),
       agent: z.string().min(1).optional().describe("Executing canonical agent ID; fresh defaults to build. Catalog effective agents and ordered rules first. Resume/fork inherit and reject conflicts."),
-      title: z.string().min(1).optional().describe("Optional title for a fresh session."),
+      title: z.string().min(1).optional().describe("OpenCode-only optional title for a fresh session; Codex rejects this field."),
       permissions: permissionsSchema.optional().describe("Canonical ordered session rules for fresh work. Omission preserves native policy. Session rules follow agent rules; broad allow can override agent restrictions."),
       variant: z.string().min(1).optional().describe("Fresh only: catalog-validated model variant persisted before the first prompt; resume/fork inherit and reject overrides."),
       ...attachmentShape,
@@ -244,6 +245,12 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       // Publish the fresh/resume/fork admission rules the backend already enforces, so
       // discovery describes the contract and rejected combinations fail before any native
       // access. These mirror the guards in OpenCodeBackend.start; both layers must agree.
+      .superRefine((input, context) => {
+        if (input.runtime !== "codex") return;
+        for (const field of codexUnsupportedStartFields) {
+          if (input[field] !== undefined) context.addIssue({ code: "custom", message: `${field} is OpenCode-only and is not supported by Codex start`, path: [field] });
+        }
+      })
       .refine((input) => input.mode === undefined || input.runtime === "codex", { message: "mode is only valid for Codex", path: ["mode"] })
       .refine((input) => input.runtime === "codex" || !!input.model, { message: "OpenCode start requires an explicit model", path: ["model"] })
       .refine((input) => !input.sessionId || !input.forkFromSessionId, { message: "sessionId and forkFromSessionId are mutually exclusive", path: ["forkFromSessionId"] })
@@ -257,7 +264,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
         dependentRequired: { beforeMessageId: ["forkFromSessionId"] },
         anyOf: [{ required: ["cwd"] }, { required: ["sessionId"] }, { required: ["forkFromSessionId"] }],
         allOf: [
-          { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: {}, else: { required: ["model"], not: { required: ["mode"] } } },
+          { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: codexUnsupportedStartFields.map(field => ({ required: [field] })) } }, else: { required: ["model"], not: { required: ["mode"] } } },
           { not: { anyOf: [{ required: ["sessionId", "cwd"] }, { required: ["forkFromSessionId", "cwd"] }] } },
           { not: { anyOf: [{ required: ["sessionId", "permissions"] }, { required: ["forkFromSessionId", "permissions"] }] } },
           { not: { anyOf: [{ required: ["sessionId", "variant"] }, { required: ["forkFromSessionId", "variant"] }] } },

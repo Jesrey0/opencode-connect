@@ -27,6 +27,7 @@ const REFRESH_THROTTLE_MS = 750;
 const REDRAW_THROTTLE_MS = 50;
 const RECONNECT_MS = 1000;
 const REFRESH_FALLBACK_MS = 5000;
+const CODEX_HISTORY_REFRESH_MS = 5 * 60 * 1000;
 const RECENT_LIMIT = 25;
 const TRANSCRIPT_LIMIT = 25;
 // One payload-free admission order for both overlays. Never evict an unflushed
@@ -41,10 +42,10 @@ type LiveMessage = {
 
 type CodexInventory = { sessions: ConsoleSession[]; pending: ConsolePending[]; visibility: string };
 
-export async function observeCodex(client: OpenCodeClient): Promise<CodexInventory> {
+export async function observeCodex(client: OpenCodeClient, readHistory = () => codexQuery(client, { type: "sessions" }, AbortSignal.timeout(3000))): Promise<CodexInventory> {
   const signal = AbortSignal.timeout(3000);
   const [history, supervised] = await Promise.allSettled([
-    codexQuery(client, { type: "sessions" }, signal),
+    readHistory(),
     codexStatus(client, signal),
   ]);
   const sessions = new Map<string, ConsoleSession>();
@@ -202,23 +203,34 @@ export async function fetchRuntimeTranscript(client: OpenCodeClient, runtime: Ru
 }
 
 export type ConsoleReads = {
-  snapshot: () => Promise<ConsoleSnapshot>;
+  snapshot: (refreshHistory?: boolean) => Promise<ConsoleSnapshot>;
   transcript: (sessionId: string, includePrompt: boolean, runtime: Runtime) => Promise<TranscriptEntry[]>;
 };
 
 // OpenCode events may refresh the dashboard frequently. Codex has no event API:
-// reuse both successful and failed reads until the existing slow fallback is due.
+// Supervised status follows the fallback cadence; expensive history listing
+// reuses both successful and failed reads for longer, unless manually refreshed.
 export function consoleReads(client: OpenCodeClient, now = Date.now): ConsoleReads {
+  let history: { readAt: number; result: ReturnType<typeof codexQuery> } | undefined;
   let inventory: { readAt: number; result: Promise<CodexInventory> } | undefined;
   let transcript: { sessionId: string; readAt: number; result: Promise<TranscriptEntry[]> } | undefined;
+  const readHistory = () => {
+    if (!history || now() - history.readAt >= CODEX_HISTORY_REFRESH_MS) {
+      history = { readAt: now(), result: codexQuery(client, { type: "sessions" }, AbortSignal.timeout(3000)) };
+    }
+    return history.result;
+  };
   const readCodex = () => {
     if (!inventory || now() - inventory.readAt >= REFRESH_FALLBACK_MS) {
-      inventory = { readAt: now(), result: observeCodex(client) };
+      inventory = { readAt: now(), result: observeCodex(client, readHistory) };
     }
     return inventory.result;
   };
   return {
-    snapshot: () => observe(client, readCodex),
+    snapshot: (refreshHistory = false) => {
+      if (refreshHistory) { history = undefined; inventory = undefined; }
+      return observe(client, readCodex);
+    },
     transcript: (sessionId, includePrompt, runtime) => {
       if (runtime === "opencode") return fetchTranscript(client, sessionId, includePrompt);
       if (!transcript || transcript.sessionId !== sessionId || now() - transcript.readAt >= REFRESH_FALLBACK_MS) {
@@ -236,6 +248,7 @@ export class ConsoleObserver {
   error: string | null = null;
   private refreshing: Promise<void> | undefined;
   private refreshQueued = false;
+  private refreshHistory = false;
   private transcriptView: ConsoleState["view"] | undefined;
   private transcriptBase: TranscriptEntry[] | null = null;
   private messageOrder = new Set<string>();
@@ -378,7 +391,9 @@ export class ConsoleObserver {
 
   private async readOnce(): Promise<void> {
     try {
-      const snapshot = await this.reads.snapshot();
+      const refreshHistory = this.refreshHistory;
+      this.refreshHistory = false;
+      const snapshot = await this.reads.snapshot(refreshHistory);
       if (this.state.quit) return;
       this.snapshot = snapshot;
       this.error = null;
@@ -474,12 +489,19 @@ export class ConsoleObserver {
     const view = this.state.view;
     const following = this.state.follow;
     let changed = false;
-    for (const key of keys) changed = handleKey(this.state, this.snapshot, key) || changed;
+    let manualRefresh = false;
+    for (const key of keys) {
+      if (this.state.view.kind === "dashboard" && key.kind === "char" && key.value.toLowerCase() === "r") {
+        this.refreshHistory = true;
+        manualRefresh = true;
+      }
+      changed = handleKey(this.state, this.snapshot, key) || changed;
+    }
     this.syncTranscriptView();
     if (!following && this.state.follow && this.state.view === view && this.liveMessages.size > 0) this.publishTranscript();
     if (changed && !this.state.quit) this.redraw();
-    return changed && this.state.view.kind === "session" &&
-      (this.state.view !== view || (!following && this.state.follow));
+    return manualRefresh || (changed && this.state.view.kind === "session" &&
+      (this.state.view !== view || (!following && this.state.follow)));
   }
 }
 

@@ -91,6 +91,45 @@ function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, p
   return { open: async () => ({ target: app, close: async () => {} }), persisted, calls, modeStateFor, permissionRequests }
 }
 
+test("cancelled list RPC closes ACP and releases the metadata lock even when the peer ignores cancellation", { timeout: 5000 }, async () => {
+  const app = new AgentApp({ name: "slow-catalog-test" })
+  let listed, release, closes = 0, calls = 0
+  const ready = new Promise(resolve => { listed = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  app.onRequest("initialize", ({ params }) => ({ protocolVersion: params.protocolVersion, agentCapabilities: { sessionCapabilities: { list: {} } } }))
+  app.onRequest("session/list", async () => {
+    if (++calls === 1) { listed(); await gate }
+    return { sessions: [], nextCursor: null }
+  })
+  const harness = await createHarness({ internals: { direct: { open: async () => ({ target: app, close: async () => { closes++ } }) } } })
+  const controller = new AbortController()
+  try {
+    const listing = harness.rpcCall(SESSION_RPC_ID, "list", {}, { signal: controller.signal })
+    const rejected = assert.rejects(listing)
+    await ready
+    await assert.rejects(harness.rpcCall(SESSION_RPC_ID, "list", {}), error => error.type === "codex-sessions.busy")
+    controller.abort()
+    await rejected
+    assert.equal(closes, 1)
+    assert.deepEqual((await harness.rpcCall(SESSION_RPC_ID, "list", {})).sessions, [])
+    assert.equal(closes, 2)
+  } finally { controller.abort(); release(); await harness.dispose() }
+})
+
+test("already aborted list skips connection and does not retain the metadata lock", async () => {
+  let connections = 0
+  const sessions = createCodexSessions({ connect: async () => {
+    connections++
+    return { initialized: { agentCapabilities: { sessionCapabilities: { list: {} } } }, request: async () => ({ sessions: [] }), close: async () => {} }
+  } })
+  try {
+    await assert.rejects(sessions.list({}, { signal: AbortSignal.abort() }), { name: "AbortError" })
+    assert.equal(connections, 0)
+    assert.deepEqual((await sessions.list({})).sessions, [])
+    assert.equal(connections, 1)
+  } finally { await sessions.dispose() }
+})
+
 test("a fresh session selects the default agent mode and reapplies it before every prompt", async () => {
   const native = backend(), sessions = createCodexSessions(native)
   const admitted = await sessions.start({ cwd, task: "first" })

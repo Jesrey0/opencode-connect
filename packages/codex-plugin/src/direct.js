@@ -271,18 +271,18 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     if (disposed) throw fail("unavailable", "Codex session adapter is closed")
     return connect({ open, cwd, onUpdate, signal, onPermission })
   }
-  async function control(operation, onUpdate) {
+  async function control(operation, onUpdate, callerSignal) {
     if (controlBusy) throw fail("busy", "A Codex metadata read is already in progress")
     controlBusy = true
     const finish = trackOperation()
-    const signal = AbortSignal.any([AbortSignal.timeout(30_000), lifecycle.signal])
+    const signal = AbortSignal.any([AbortSignal.timeout(30_000), lifecycle.signal, ...(callerSignal ? [callerSignal] : [])])
     let conn
-    try { conn = await connection(undefined, onUpdate, signal); return await operation(conn, signal) }
+    try { signal.throwIfAborted(); conn = await connection(undefined, onUpdate, signal); return await operation(conn, signal) }
     finally { try { await conn?.close() } finally { controlBusy = false; finish() } }
   }
-  async function catalog(conn, input = {}) {
+  async function catalog(conn, input = {}, signal) {
     if (!conn.initialized.agentCapabilities?.sessionCapabilities?.list) throw fail("unsupported", "Codex does not advertise session listing")
-    const result = await conn.request("session/list", { ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) })
+    const result = await conn.request("session/list", { ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }, signal)
     return { sessions: result.sessions.map(s => ({ sessionId: identity(s.sessionId), cwd: s.cwd, title: s.title ?? null, updatedAt: s.updatedAt ?? null, runtime: "codex", capabilities: CAPABILITIES })), nextCursor: result.nextCursor ?? null }
   }
   async function locate(conn, sessionId) {
@@ -639,7 +639,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     }
   }
   return { start, inspect, wait, interrupt, messages, delete: remove, permissions, respondPermission, usage,
-    list: input => control(conn => catalog(conn, input)),
+    list: (input, context = {}) => control((conn, signal) => catalog(conn, input, signal), undefined, context.signal),
     status: () => ({ sessions: [...records.values()].map(r => ({ ...view(r), output: "" })), capabilities: CAPABILITIES, pendingActions: [...records.values()].flatMap(pendingActions) }), dispose }
 }
 
