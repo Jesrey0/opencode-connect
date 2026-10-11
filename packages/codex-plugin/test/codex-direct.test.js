@@ -1,14 +1,14 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 import { AgentApp, RequestError } from "@agentclientprotocol/sdk"
-import { createCodexSessions, SESSION_RPC_ID } from "../src/direct.js"
+import { CodexSessionsRpc, createCodexSessions, SessionError, SESSION_RPC_ID } from "../src/direct.js"
 import { createHarness } from "./harness.js"
 import { createFakeCodexAgent } from "./fake-acp.js"
 
 const cwd = process.cwd()
 const ALL_MODES = ["read-only", "workspace-write", "agent", "agent-full-access"]
 
-function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, permissions, toolCall, permissionSessionId } = {}) {
+function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, permissions, toolCall, permissionSessionId, deleteNoop = false } = {}) {
   const persisted = new Map(), calls = [], cancels = new Map(), modeState = new Map(), permissionRequests = []
   let sequence = 0
   const app = new AgentApp({ name: "persistent-codex-test" })
@@ -40,7 +40,7 @@ function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, p
     return {}
   })
   app.onNotification("session/cancel", ({ params }) => { cancels.get(params.sessionId)?.() })
-  app.onRequest("session/delete", ({ params }) => { persisted.delete(params.sessionId); return {} })
+  app.onRequest("session/delete", ({ params }) => { if (!deleteNoop) persisted.delete(params.sessionId); return {} })
   app.onRequest("session/prompt", async ({ params, client, signal }) => {
     const s = persisted.get(params.sessionId), text = params.prompt[0].text
     // Every turn runs under whatever mode is currently selected.
@@ -485,7 +485,169 @@ test("restart recovers history but does not fabricate execution completion", asy
   assert.equal((await after.wait(resumed)).output, "persisted")
   await after.delete(admitted)
   assert.equal(native.persisted.size, 0)
+  assert.deepEqual(after.status().sessions, [])
   await after.dispose()
+})
+
+test("a real ACP deletion acknowledgment without native absence retains cached evidence", async () => {
+  const native = backend({ deleteNoop: true }), sessions = createCodexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "keep evidence" })
+    const { wakeReason: _wakeReason, ...completed } = await sessions.wait(admitted)
+    await assert.rejects(sessions.delete(admitted), error => {
+      assert.equal(error.code, "codex-sessions.delete_unverified")
+      assert.equal(error.data.reason, "session_present")
+      assert.equal(error.data.deleteAcknowledged, true)
+      assert.equal(error.data.mutationUncertain, true)
+      return true
+    })
+    assert.deepEqual(await sessions.inspect(admitted), completed)
+    // Failed verification releases the deletion lock; it does not erase the
+    // selected mode or block subsequent explicitly authorized continuation.
+    const continued = await sessions.start({ sessionId: admitted.sessionId, task: "continue" })
+    assert.equal((await sessions.wait(continued)).status, "completed")
+  } finally { await sessions.dispose() }
+})
+
+test("deletion refuses locally active execution with its structured error", async () => {
+  const native = backend(), sessions = createCodexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "hang" })
+    await assert.rejects(sessions.delete(admitted), error => error.code === "codex-sessions.delete_active")
+    assert.equal(native.persisted.has(admitted.sessionId), true)
+    assert.equal((await sessions.inspect(admitted)).status, "inProgress")
+    await sessions.interrupt(admitted)
+  } finally { await sessions.dispose() }
+})
+
+test("deletion refuses pending approval without cancelling or answering it", async () => {
+  const native = backend({ permissions: [{ optionId: "allow", name: "Allow", kind: "allow_once" }] })
+  const sessions = createCodexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "approval" })
+    const waiting = await sessions.wait(admitted)
+    assert.equal(waiting.pendingActions.length, 1)
+    await assert.rejects(sessions.delete(admitted), error => error.code === "codex-sessions.delete_pending_approval")
+    assert.deepEqual((await sessions.permissions(admitted)).pendingActions, waiting.pendingActions)
+    assert.equal(native.persisted.has(admitted.sessionId), true)
+  } finally { await sessions.dispose() }
+})
+
+test("delete RPC declares every safety error", () => {
+  for (const code of ["delete_active", "delete_pending_approval", "delete_unverified"])
+    assert.ok(CodexSessionsRpc.methods.delete.errors[`codex-sessions.${code}`])
+})
+
+for (const scenario of ["absent", "present", "list_unsupported", "delete_unsupported", "list_failure", "delete_failure", "delete_unknown_session", "cursor_cycle", "scan_limit", "malformed_listing"]) {
+  test(`deletion verifies the bounded native catalog: ${scenario}`, async () => {
+    const calls = []
+    const sessions = createCodexSessions({ connect: async () => ({
+      initialized: { agentCapabilities: { sessionCapabilities: {
+        ...(scenario === "list_unsupported" ? {} : { list: {} }),
+        ...(scenario === "delete_unsupported" ? {} : { delete: {} }),
+      } } },
+      close: async () => {},
+      request: async (method, params) => {
+        calls.push({ method, params })
+        if (method === "session/delete") {
+          if (scenario === "delete_failure") throw new Error("SECRET delete body")
+          if (scenario === "delete_unknown_session") throw new SessionError("unknown_session", "SECRET delete rejection")
+          return {}
+        }
+        assert.equal(method, "session/list")
+        assert.equal(params.cwd, undefined)
+        if (calls.length === 1) return { sessions: [{ sessionId: "target", cwd }] }
+        if (scenario === "list_failure") throw new Error("SECRET catalog body")
+        if (scenario === "malformed_listing") return { sessions: null }
+        if (scenario === "present") return { sessions: [{ sessionId: "target", cwd }] }
+        if (scenario === "cursor_cycle") return { sessions: [], nextCursor: "same" }
+        if (scenario === "scan_limit") return { sessions: [], nextCursor: `page-${calls.length}` }
+        // Absence must be established on the last page, not the first empty one.
+        return params.cursor ? { sessions: [] } : { sessions: [{ sessionId: "other", cwd }], nextCursor: "last" }
+      },
+    }) })
+    try {
+      if (scenario === "absent") {
+        assert.deepEqual(await sessions.delete({ sessionId: "target" }), { sessionId: "target", deleted: true })
+        assert.deepEqual(calls.map(c => c.method), ["session/list", "session/delete", "session/list", "session/list"])
+      } else if (["delete_unsupported", "list_unsupported"].includes(scenario)) {
+        await assert.rejects(sessions.delete({ sessionId: "target" }), error => error.code === "codex-sessions.unsupported")
+        assert.equal(calls.length, 0)
+      } else {
+        await assert.rejects(sessions.delete({ sessionId: "target" }), error => {
+          assert.equal(error.code, "codex-sessions.delete_unverified")
+          assert.equal(error.data.mutationAttempted, true)
+          assert.equal(error.data.mutationUncertain, true)
+          assert.equal(error.data.deleteAcknowledged, !["delete_failure", "delete_unknown_session"].includes(scenario))
+          assert.equal(error.data.absenceVerified, false)
+          assert.equal(`${error.message}${JSON.stringify(error.data)}`.includes("SECRET"), false)
+          return true
+        })
+        if (scenario === "scan_limit") assert.equal(calls.length, 34)
+        if (scenario === "cursor_cycle") assert.equal(calls.length, 4)
+      }
+    } finally { await sessions.dispose() }
+  })
+}
+
+for (const scenario of ["absent", "transport_failure", "typed_list_rejection", "cursor_cycle", "scan_limit", "malformed_listing"]) {
+  test(`delete preflight distinguishes complete absence from uncertainty: ${scenario}`, async () => {
+    const calls = []
+    const sessions = createCodexSessions({ connect: async () => ({
+      initialized: { agentCapabilities: { sessionCapabilities: { list: {}, delete: {} } } },
+      close: async () => {},
+      request: async (method, params) => {
+        calls.push({ method, params })
+        assert.equal(method, "session/list")
+        if (scenario === "transport_failure") throw new Error("SECRET transport body: unknown_session")
+        if (scenario === "typed_list_rejection") throw new SessionError("unknown_session", "SECRET list rejection")
+        if (scenario === "malformed_listing") return { sessions: null }
+        if (scenario === "cursor_cycle") return { sessions: [], nextCursor: "cycle" }
+        if (scenario === "scan_limit") return { sessions: [], nextCursor: `page-${calls.length}` }
+        return params.cursor ? { sessions: [] } : { sessions: [], nextCursor: "last" }
+      },
+    }) })
+    try {
+      await assert.rejects(sessions.delete({ sessionId: "target" }), error => {
+        assert.equal(error.code, scenario === "absent" ? "codex-sessions.unknown_session" : "codex-sessions.delete_unverified")
+        if (scenario === "absent") assert.equal(error.data.catalogComplete, true)
+        if (scenario !== "absent") {
+          assert.equal(error.data.mutationAttempted, false)
+          assert.equal(error.data.mutationUncertain, false)
+          assert.equal(error.data.reason, "preflight_failed")
+        }
+        assert.equal(`${error.message}${JSON.stringify(error.data)}`.includes("SECRET"), false)
+        return true
+      })
+      assert.equal(calls.some(c => c.method === "session/delete"), false)
+      if (scenario === "absent") assert.equal(calls.length, 2)
+    } finally { await sessions.dispose() }
+  })
+}
+
+test("the deletion lock covers native absence verification", async () => {
+  let submitted = false
+  let verifying, release
+  const ready = new Promise(resolve => { verifying = resolve })
+  const gate = new Promise(resolve => { release = resolve })
+  const sessions = createCodexSessions({ connect: async () => ({
+    initialized: { agentCapabilities: { sessionCapabilities: { list: {}, delete: {} } } },
+    close: async () => {},
+    request: async method => {
+      if (method === "session/delete") { submitted = true; return {} }
+      if (!submitted) return { sessions: [{ sessionId: "target", cwd }] }
+      if (method === "session/list") { verifying(); await gate; return { sessions: [] } }
+      return {}
+    },
+  }) })
+  try {
+    const deleting = sessions.delete({ sessionId: "target" })
+    await ready
+    await assert.rejects(sessions.delete({ sessionId: "target" }), error => error.code === "codex-sessions.delete_active")
+    await assert.rejects(sessions.start({ sessionId: "target", task: "race", mode: "read-only" }), error => error.code === "codex-sessions.busy")
+    release()
+    assert.equal((await deleting).deleted, true)
+  } finally { release(); await sessions.dispose() }
 })
 
 test("interruption preserves a session and refuses concurrent continuation", async () => {

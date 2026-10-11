@@ -1,6 +1,6 @@
 import * as z from "zod/v4";
 import type { OpenCodeClient } from "@opencode/client";
-import { AdmissionError, ConnectorError, page, textPage, type PageInput } from "./bounds.js";
+import { AdmissionError, ConnectorError, SessionDeleteError, page, textPage, type PageInput } from "./bounds.js";
 import { pageNextCall } from "./continuation.js";
 import { CodexSessionsDefinition } from "./codexRpc.js";
 
@@ -26,8 +26,20 @@ async function call(client: OpenCodeClient, method: string, input: object, signa
     const bound = AbortSignal.timeout(45_000);
     return record(await (client.rpc(CodexSessionsDefinition) as any)[method](input, { signal: signal ? AbortSignal.any([bound, signal]) : bound }));
   } catch (error: any) {
-    if (error instanceof ConnectorError) throw error;
+    if (error instanceof ConnectorError && method !== "delete") throw error;
     const type = errorType(error);
+    if (method === "delete") {
+      const blocked: Record<string, [string, string]> = {
+        "codex-sessions.delete_active": ["DELETE_SESSION_ACTIVE", "locally supervised Codex execution or admission is active"],
+        "codex-sessions.delete_pending_approval": ["DELETE_PENDING_APPROVAL", "Codex session has pending permission requests"],
+        "codex-sessions.unsupported": ["DELETE_UNSUPPORTED", "Codex does not support the required native delete/list capability"],
+        "codex-sessions.busy": ["DELETE_BUSY", "Codex adapter is busy"],
+      };
+      if (type && blocked[type]) throw new SessionDeleteError(...blocked[type]);
+      if (type === "codex-sessions.unknown_session" && error.data?.catalogComplete === true) throw new SessionDeleteError("DELETE_NOT_FOUND", "native Codex session was not found before deletion");
+      if (type === "codex-sessions.delete_unverified" && error.data?.mutationAttempted === false) throw new SessionDeleteError("DELETE_PREFLIGHT_FAILED", "Codex session existence could not be established before deletion");
+      throw new SessionDeleteError(type === "codex-sessions.delete_unverified" ? "DELETE_UNVERIFIED" : "DELETE_FAILED", "Codex deletion has no verified absence", true);
+    }
     if (method === "start" && type === "codex-sessions.admission_failed" && typeof error.data?.sessionId === "string") {
       throw new AdmissionError("Codex session exists; reconcile admission before retrying", { sessionId: id(error.data.sessionId), stage: "codexPromptAdmission", promptSubmitted: error.data.promptSubmitted === false ? false : null });
     }
@@ -113,14 +125,14 @@ export async function codexAct(client: OpenCodeClient, input: { action: string; 
   if (!["interrupt", "delete", "respondPermission"].includes(action)) throw new ConnectorError("Codex session action " + action + " is unsupported");
   if (action === "respondPermission" && (!input.optionId || !input.requestId || input.decision !== undefined || input.message !== undefined)) throw new ConnectorError("Codex permission replies require an exact native optionId and requestId");
   const value = await call(client, action, { sessionId, ...(action === "respondPermission" ? { requestId: input.requestId, optionId: input.optionId } : {}) });
+  if (action === "delete") {
+    if (value.sessionId !== sessionId || value.deleted !== true) throw new SessionDeleteError("DELETE_UNVERIFIED", "Codex deletion identity or absence was not confirmed", true);
+    return { action: "delete" as const, runtime: "codex" as const, sessionId, deleted: true as const };
+  }
   if (id(value.sessionId) !== sessionId) throw new ConnectorError("Codex answered for a different native session");
   if (action === "respondPermission") {
     if (value.accepted !== true || value.requestId !== input.requestId || value.optionId !== input.optionId) throw new ConnectorError("Codex permission response was not confirmed; reconcile the request");
     return { action: "respondPermission" as const, runtime: "codex" as const, sessionId, requestId: id(value.requestId), optionId: id(value.optionId), accepted: true as const };
-  }
-  if (action === "delete") {
-    if (value.deleted !== true) throw new ConnectorError("Codex deletion was not confirmed");
-    return { action: "delete" as const, runtime: "codex" as const, sessionId, deleted: true as const };
   }
   if (typeof value.interrupted !== "boolean") throw new ConnectorError("Codex interruption was not confirmed");
   return { action: "interrupt" as const, runtime: "codex" as const, sessionId, interrupted: value.interrupted };
@@ -144,7 +156,13 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
     if (input.limit !== undefined || input.order !== undefined || input.searchTerm !== undefined) throw new ConnectorError("Codex session listing uses native page size and ordering; search is unsupported");
     const value = await call(client, "list", { ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) });
     if (!Array.isArray(value.sessions)) throw new ConnectorError("Codex session inventory is unavailable");
-    return { sessions: value.sessions.map(raw => { const s = record(raw); return { sessionId: id(s.sessionId), cwd: id(s.cwd), title: typeof s.title === "string" ? s.title.slice(0, 512) : null, runtime: "codex", capabilities: capabilities(s.capabilities), updatedAt: typeof s.updatedAt === "string" ? s.updatedAt.slice(0, 64) : null }; }), cursor: { next: value.nextCursor === null ? null : id(value.nextCursor) } };
+    return { runtime: "codex", sessions: value.sessions.map(raw => {
+      const s = record(raw);
+      // ACP list metadata has no execution/outcome or archive evidence. Its optional
+      // RFC3339 update time can be normalized, never substituted with read time.
+      const updated = typeof s.updatedAt === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(s.updatedAt) ? Date.parse(s.updatedAt) : NaN;
+      return { sessionId: id(s.sessionId), cwd: id(s.cwd), title: typeof s.title === "string" ? s.title.slice(0, 512) : null, runtime: "codex", capabilities: capabilities(s.capabilities), status: null, executionOutcome: null, outcome: "unknown", outcomeBasis: "unavailable", createdAtMs: null, updatedAtMs: Number.isFinite(updated) ? updated : null, idleAtMs: null, archivedAtMs: null };
+    }), cursor: { next: value.nextCursor === null ? null : id(value.nextCursor) } };
   }
   if (input.type === "runtime") return { runtime: "codex", capabilities: capabilities((await call(client, "status", {})).capabilities) };
   if (input.type === "session") return (await codexInspect(client, { sessionId: id(input.sessionId) })).session;

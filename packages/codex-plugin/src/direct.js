@@ -291,7 +291,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
       const listing = await catalog(conn, { cursor })
       const found = listing.sessions.find(s => s.sessionId === sessionId)
       if (found) return found
-      if (!listing.nextCursor) throw fail("unknown_session", "Native Codex session was not found")
+      if (!listing.nextCursor) throw fail("unknown_session", "Native Codex session was not found", { sessionId, catalogComplete: true })
       if (listing.nextCursor === cursor) break
       cursor = listing.nextCursor
     }
@@ -571,15 +571,54 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
   }
   async function remove({ sessionId }) {
     identity(sessionId)
-    if (locks.has(sessionId)) throw fail("busy", "Interrupt execution before deleting the session")
+    const record = records.get(sessionId)
+    // These are authoritative only for locally supervised work. ACP's native
+    // catalog has no execution/approval state; absence of local evidence does
+    // not establish that another client has no live writer.
+    if (record?.pending.size) throw fail("delete_pending_approval", "Resolve pending approvals before deleting the session", { sessionId })
+    if (record?.status === "inProgress" || locks.has(sessionId)) throw fail("delete_active", "Interrupt execution before deleting the session", { sessionId })
     locks.add(sessionId)
+    let mutationAttempted = false, deleteAcknowledged = false, absenceVerified = false
+    const unverified = reason => fail("delete_unverified", "Codex session deletion could not be verified; reconcile native state before retrying", {
+      sessionId, mutationAttempted, mutationUncertain: mutationAttempted, deleteAcknowledged, absenceVerified, reason,
+    })
     try {
       await control(async conn => {
         if (!conn.initialized.agentCapabilities?.sessionCapabilities?.delete) throw fail("unsupported", "Codex does not advertise session deletion")
+        // Refuse before mutation if the native catalog cannot verify its result.
+        if (!conn.initialized.agentCapabilities?.sessionCapabilities?.list) throw fail("unsupported", "Codex does not advertise session listing required for deletion verification")
+        try {
+          await locate(conn, sessionId)
+        } catch (error) {
+          // Only a complete native catalog scan establishes pre-mutation
+          // absence. Delete-request errors below never take this path.
+          if (error instanceof SessionError && error.code === "codex-sessions.unknown_session" && error.data?.catalogComplete === true) throw error
+          throw unverified("preflight_failed")
+        }
+        mutationAttempted = true
         await conn.request("session/delete", { sessionId })
+        deleteAcknowledged = true
+        try {
+          await locate(conn, sessionId)
+        } catch (error) {
+          // Only exhaustion of a complete native catalog proves absence. A
+          // request failure, repeated cursor or scan limit is not that proof.
+          if (error instanceof SessionError && error.code === "codex-sessions.unknown_session" && error.data?.catalogComplete === true) {
+            absenceVerified = true
+            return
+          }
+          throw unverified("verification_failed")
+        }
+        throw unverified("session_present")
       })
       records.delete(sessionId)
       return { sessionId, deleted: true }
+    } catch (error) {
+      if (error instanceof SessionError && error.code === "codex-sessions.delete_unverified") throw error
+      // Even a rejected request may have mutated native state. Never forward
+      // transport/provider bodies, or discard cached evidence on uncertainty.
+      if (mutationAttempted) throw unverified(deleteAcknowledged ? "verification_failed" : "delete_failed")
+      throw error
     } finally { locks.delete(sessionId) }
   }
   async function dispose() {
@@ -606,7 +645,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
 
 const id = Schema.String
 const mode = Schema.Literals(CODEX_SESSION_MODES.map(m => m.id))
-const errors = Object.fromEntries(["invalid_input", "busy", "unsupported", "unknown_session", "unknown_request", "unknown_option", "unreviewable_request", "mode_required", "unavailable", "admission_failed", "internal"].map(code => [`codex-sessions.${code}`, { type: "object", additionalProperties: true }]))
+const errors = Object.fromEntries(["invalid_input", "busy", "unsupported", "unknown_session", "unknown_request", "unknown_option", "unreviewable_request", "mode_required", "unavailable", "admission_failed", "delete_active", "delete_pending_approval", "delete_unverified", "internal"].map(code => [`codex-sessions.${code}`, { type: "object", additionalProperties: true }]))
 const method = input => ({ input, output: { type: "object", additionalProperties: true }, errors })
 export const CodexSessionsRpc = Rpc.define({ id: SESSION_RPC_ID, methods: {
   start: method(Schema.Struct({ task: id, cwd: Schema.optionalKey(id), sessionId: Schema.optionalKey(id), mode: Schema.optionalKey(mode) })),

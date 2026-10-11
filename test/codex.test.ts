@@ -60,6 +60,38 @@ test("restart history remains unknown and unsupported capabilities never reach O
   assert.match((unsupported.results[0] as any).error, /search is unsupported/);
   assert.equal(f.requests.length, 1);
 });
+test("Codex inventory normalizes only native metadata and refuses unsupported filters", async () => {
+  const f = fixture(() => ({ output: { sessions: [{ sessionId: "native-thread", cwd: "/tmp", title: "smoke audit priority", updatedAt: "2026-10-11T12:00:00Z", capabilities }, { sessionId: "other", cwd: "/tmp", updatedAt: "invalid", capabilities }], nextCursor: "native-cursor" } }));
+  const backend = new OpenCodeBackend(f.connect);
+  const inventory = (await backend.query([{ runtime: "codex", type: "sessions", cwd: "/tmp", cursor: "previous" }])).results[0].result as any;
+  assert.equal(inventory.runtime, "codex"); assert.equal(inventory.cursor.next, "native-cursor");
+  const s = inventory.sessions[0];
+  assert.equal(s.runtime, "codex"); assert.equal(s.updatedAtMs, Date.parse("2026-10-11T12:00:00Z"));
+  assert.equal(s.status, null); assert.equal(s.executionOutcome, null); assert.equal(s.outcome, "unknown"); assert.equal(s.outcomeBasis, "unavailable");
+  for (const field of ["createdAtMs", "archivedAtMs", "idleAtMs"]) assert.equal(s[field], null);
+  assert.equal("updatedAt" in s, false); assert.equal("importance" in s, false);
+  assert.equal(inventory.sessions[1].updatedAtMs, null);
+  assert.deepEqual(f.requests[0].body, { input: { cwd: "/tmp", cursor: "previous" } });
+  for (const filter of [{ limit: 1 }, { searchTerm: "test" }, { offset: 0 }, { fingerprint: "x" }, { order: "asc" }]) {
+    const result = await backend.query([{ runtime: "codex", type: "sessions", ...filter } as any]);
+    assert.ok((result.results[0] as any).error);
+  }
+  assert.equal(f.requests.length, 1);
+});
+test("Codex delete RPC refusals are safe and uncertain acknowledgments never imply success", async () => {
+  for (const [type, code, uncertain] of [["delete_active", "DELETE_SESSION_ACTIVE", false], ["delete_pending_approval", "DELETE_PENDING_APPROVAL", false], ["unsupported", "DELETE_UNSUPPORTED", false], ["busy", "DELETE_BUSY", false], ["unknown_session", "DELETE_NOT_FOUND", false], ["delete_unverified", "DELETE_UNVERIFIED", true], ["internal", "DELETE_FAILED", true]] as const) {
+    const f = fixture(() => Response.json({ _tag: "RpcError", type: `codex-sessions.${type}`, ...(type === "unknown_session" ? { data: { catalogComplete: true } } : {}), message: "SECRET body" }, { status: 400 }));
+    await assert.rejects(new OpenCodeBackend(f.connect).act({ action: "delete", runtime: "codex", sessionId: "native-thread" }), (e: any) => e.code === code && e.mutationMayHaveOccurred === uncertain && !e.message.includes("SECRET"));
+  }
+  const unreadable = fixture(() => Response.json({ _tag: "RpcError", type: "codex-sessions.delete_unverified", data: { mutationAttempted: false }, message: "SECRET preflight body" }, { status: 400 }));
+  await assert.rejects(new OpenCodeBackend(unreadable.connect).act({ action: "delete", runtime: "codex", sessionId: "native-thread" }), (e: any) => e.code === "DELETE_PREFLIGHT_FAILED" && !e.mutationMayHaveOccurred && !e.message.includes("SECRET"));
+  const ambiguous = fixture(() => Response.json({ _tag: "RpcError", type: "codex-sessions.unknown_session", message: "SECRET rejection" }, { status: 400 }));
+  await assert.rejects(new OpenCodeBackend(ambiguous.connect).act({ action: "delete", runtime: "codex", sessionId: "native-thread" }), (e: any) => e.code === "DELETE_FAILED" && e.mutationMayHaveOccurred && !e.message.includes("SECRET"));
+  for (const value of [{ sessionId: "other", deleted: true }, { sessionId: "native-thread", deleted: false }, null]) {
+    const f = fixture(() => ({ output: value }));
+    await assert.rejects(new OpenCodeBackend(f.connect).act({ action: "delete", runtime: "codex", sessionId: "native-thread" }), (e: any) => ["DELETE_UNVERIFIED", "DELETE_FAILED"].includes(e.code) && e.mutationMayHaveOccurred);
+  }
+});
 test("native errors stay bounded and mismatched sessions fail visibly", async () => {
   const hostile = fixture(() => new Response(JSON.stringify({ _tag: "RpcError", type: "codex-sessions.unknown_session", message: "SECRET provider body" }), { status: 400, headers: { "content-type": "application/json" } }));
   await assert.rejects(new OpenCodeBackend(hostile.connect).inspect({ runtime: "codex", sessionId: "native-thread" }), (e: Error) => { assert.match(e.message, /unknown_session/); assert.equal(e.message.includes("SECRET"), false); return true; });

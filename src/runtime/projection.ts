@@ -76,6 +76,7 @@ export function currentRetry(messages: SessionMessageInfo[]) {
 export function projectSession(session: SessionInfo, active: Record<string, unknown>, evidence?: Pick<OutcomeEvidence, "outcome">) {
   return {
     sessionId: session.id,
+    runtime: "opencode" as const,
     parentSessionId: session.parentID ?? null,
     forkedFromSessionId: session.fork?.sessionID ?? null,
     cwd: session.location.directory,
@@ -92,6 +93,7 @@ export function projectSession(session: SessionInfo, active: Record<string, unkn
     createdAtMs: session.time.created,
     updatedAtMs: session.time.updated,
     idleAtMs: session.time.idle ?? null,
+    archivedAtMs: session.time.archived ?? null,
     cost: session.cost,
     tokens: session.tokens,
     usageBasis: "cumulativeSessionTotals" as const,

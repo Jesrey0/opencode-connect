@@ -335,6 +335,18 @@ approvals, native Codex sessions and history, and sanitized runtime inventory. C
 `offset`, `limit`, `fingerprint`; native session/message pages use opaque
 native cursors instead. Agent details include description, system,
 steps, paged permissions, mode, hidden status and model, excluding `request`.
+Session inventories explicitly identify `runtime` on the page and each record.
+OpenCode `status` derives from native active state and execution outcome;
+`executionOutcome` preserves native `succeeded|failed|interrupted`, not assistant
+result success. Inventory `outcome` is `unknown`, with `outcomeBasis: "unavailable"`:
+no assistant-result evidence is read by listing. `createdAtMs`, `updatedAtMs`,
+`idleAtMs`, and `archivedAtMs` preserve native timestamps when available.
+Codex ACP listing is metadata-only: `status`/`executionOutcome` are `null`, outcome
+is unknown, and only its optional RFC3339 update time becomes `updatedAtMs`;
+other timestamps are `null` (unavailable, not proof of no archive).
+Codex retains native cursor/page size/ordering and accepts only `cwd` and `cursor`;
+`limit`, search and offset/fingerprint filters are rejected, never ignored.
+Titles are displayed, not classified. No archive action is implemented.
 Select `field: permissions` for independent rule pages. Full system/description recovery uses `type: agent`, `agentId`, selected `field` and
 text pagination. `type: message` likewise recovers full user/assistant text by
 canonical ID. `field: summary|recent` pages the exact native compaction summary
@@ -506,6 +518,35 @@ resolution to OpenCode; read back its resolved `modelVariant`. `setPermissions` 
 canonical rules and checks persisted readback. `synthetic` accepts text,
 description, native delivery (`steer`/`queue`), and optional resume, returning the
 real inbox identity; it is not a user prompt and is not passed to `wait` as one.
+
+Delete one exact native session with
+`opencode.act { "action": "delete", "runtime": "opencode"|"codex", "sessionId": "…" }`.
+**Breaking contract:** delete no longer defaults to OpenCode; explicit runtime is
+required by MCP validation and the facade. Codex inventory `updatedAt` is replaced
+by `updatedAtMs`; there are no compatibility aliases.
+OpenCode preflight refuses native active execution, pending permission requests,
+forms or inbox work, and fails closed when that state cannot be read. Codex refuses
+locally supervised execution/admission and pending approvals; ACP listing does
+not expose authoritative external execution state. These checks are not an atomic
+cross-client exclusion guarantee. Resolve/interrupt work explicitly and reconcile
+before deletion; inventory alone is not delete authorization.
+`deleted: true` requires OpenCode typed not-found readback or Codex absence from a
+complete bounded native catalog scan. Codex without native delete/list support
+refuses before mutation. Partial scans, remaining records or failed readback are
+not success. Never automatically retry uncertain deletion.
+`DELETE_NOT_FOUND` is a pre-mutation refusal only: OpenCode's typed
+`SessionNotFoundError` from `session.get`, or Codex's `unknown_session` after a
+complete bounded native catalog scan before submitting delete. A failed/partial
+scan is `DELETE_PREFLIGHT_FAILED`, not not-found. ACP delete-request failures,
+including not-found-like rejections after submission, remain uncertain; no
+transport failure is inferred to mean absence.
+Known application failures return MCP `isError` and safe `errorCode`, `reason`,
+`mutationMayHaveOccurred`: `DELETE_RUNTIME_REQUIRED`, `DELETE_NOT_FOUND`, `DELETE_SESSION_ACTIVE`,
+`DELETE_PENDING_APPROVAL`, `DELETE_PENDING_FORM`, `DELETE_PENDING_INBOX`,
+`DELETE_PREFLIGHT_FAILED`, `DELETE_UNSUPPORTED`, `DELETE_BUSY`, `DELETE_FAILED`,
+or `DELETE_UNVERIFIED`. Schema rejection occurs before application execution;
+platform/tool permission or transport rejection outside this service cannot be
+observed or diagnosed by the connector. Native error bodies are omitted.
 
 `cancelInbox`/`updateInbox` require a pending `inboxId` in the targeted session
 and reconcile native pending inventory after mutation. `removeSavedApproval`

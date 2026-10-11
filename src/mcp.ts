@@ -5,7 +5,7 @@ import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
 import { exposedUnion } from "./schema.js";
 import { VERSION } from "./version.js";
-import { safeError, AdmissionError, ConnectorError } from "./bounds.js";
+import { safeError, AdmissionError, ConnectorError, SessionDeleteError } from "./bounds.js";
 import { ProtocolErrorCode, ProtocolError } from "@modelcontextprotocol/server";
 import { Events, EVENT_NAME, eventArgumentsSchema } from "./events.js";
 import type { ServerContext, ContentBlock } from "@modelcontextprotocol/server";
@@ -109,7 +109,7 @@ export const actSchema = exposedUnion("action", [
     answer: z.record(z.string(), formValueSchema),
   }),
   z.object({ runtime: runtimeSchema, action: z.literal("cancelForm"), sessionId: z.string().min(1), formId: z.string().min(1) }),
-  z.object({ runtime: runtimeSchema, action: z.literal("delete"), sessionId: z.string().min(1) }),
+  z.object({ runtime: z.enum(["opencode", "codex"]).describe("Required for destructive deletion; no default runtime."), action: z.literal("delete"), sessionId: z.string().min(1) }).strict(),
   z.object({ runtime: runtimeSchema, action: z.literal("revertStage").describe("Stage native session revert for a canonical message; this does not restore files until commit."), sessionId: z.string().min(1), messageId: z.string().min(1), files: z.boolean().optional().describe("Pass the native file-revert option; omitted preserves OpenCode default.") }).strict(),
   z.object({ runtime: runtimeSchema, action: z.literal("revertClear").describe("Clear a staged native session revert without committing it."), sessionId: z.string().min(1) }).strict(),
   z.object({ runtime: runtimeSchema, action: z.literal("revertCommit").describe("Commit the currently staged native session revert."), sessionId: z.string().min(1) }).strict(),
@@ -162,7 +162,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   const register = server.registerTool.bind(server);
   const registerTool = ((name: string, config: unknown, callback: (...args: unknown[]) => Promise<unknown>) => register(name, config as never, (async (...args: unknown[]) => {
     try { return await callback(...args); }
-    catch (error) { return { ...structuredResult({ error: safeError(error), ...(error instanceof AdmissionError ? { recovery: error.recovery } : {}) }), isError: true }; }
+    catch (error) { return { ...structuredResult({ error: safeError(error), ...(error instanceof AdmissionError ? { recovery: error.recovery } : {}), ...(error instanceof SessionDeleteError ? { errorCode: error.code, reason: error.reason, mutationMayHaveOccurred: error.mutationMayHaveOccurred } : {}) }), isError: true }; }
   }) as never)) as typeof server.registerTool;
 
   registerTool("status", {

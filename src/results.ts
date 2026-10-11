@@ -74,6 +74,6 @@ export const outputSchemas = {
     z.object({ action: z.literal("respondPermission"), runtime: z.literal("codex").optional(), sessionId: id, requestId: id, optionId: id.optional(), accepted: z.literal(true) }).strict(),
     z.object({ action: z.literal("respondForm"), sessionId: id, formId: id, accepted: z.literal(true) }).strict(),
     z.object({ action: z.literal("cancelForm"), sessionId: id, formId: id, cancelled: z.literal(true) }).strict(),
-    z.object({ action: z.literal("delete"), runtime: z.literal("codex").optional(), sessionId: id, deleted: z.literal(true) }).strict(),
+    z.object({ action: z.literal("delete"), runtime: z.enum(["opencode", "codex"]), sessionId: id, deleted: z.literal(true) }).strict(),
   ]),
 };

@@ -183,7 +183,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
       client.session.list({ limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: "desc" as const }), directory: query.cwd, search: query.searchTerm }),
       client.session.active(),
     ]);
-    return { sessions: response.data.map((session) => projectSession(session, active)), cursor: response.cursor };
+    return { runtime: "opencode", sessions: response.data.map((session) => ({ ...projectSession(session, active), outcomeBasis: "unavailable" })), cursor: response.cursor };
   }
   if (query.type === "agent") {
     const response = await readAgent(client, query.agentId, query.cwd);

@@ -8,7 +8,7 @@ import {
 } from "@opencode/client";
 import { connectNative, type Connect } from "./native.js";
 import { codexStart, codexInspect, codexWait, codexAct, codexQuery, codexStatus, type Runtime, type CodexMode } from "./codex.js";
-import { safeError, AdmissionError, CatalogError, MESSAGE_PREVIEW_LIMIT } from "./bounds.js";
+import { safeError, AdmissionError, CatalogError, SessionDeleteError, MESSAGE_PREVIEW_LIMIT } from "./bounds.js";
 import { nextCall, queryNextCall } from "./continuation.js";
 import { resolveNativeQuery, type QueryCatalogs, type NativeQueryInput } from "./runtime/query.js";
 import { latestResult, resultEvidence, type ResultSelectionInput } from "./runtime/result.js";
@@ -71,7 +71,7 @@ export type ActInput = (
   | { action: "respondPermission"; sessionId: string; requestId: string; decision?: "once" | "always" | "reject"; message?: string; optionId?: string }
   | { action: "respondForm"; sessionId: string; formId: string; answer: Record<string, string | number | boolean | string[]> }
   | { action: "cancelForm"; sessionId: string; formId: string }
-  | { action: "delete"; sessionId: string }
+  | { action: "delete"; runtime: Runtime; sessionId: string }
   | { action: "revertStage"; sessionId: string; messageId: string; files?: boolean }
   | { action: "revertClear"; sessionId: string }
   | { action: "revertCommit"; sessionId: string }
@@ -555,10 +555,15 @@ export class OpenCodeBackend {
   async act(input: ActInput & { runtime?: "opencode" }): Promise<Awaited<ReturnType<OpenCodeBackend["actNative"]>>>;
   async act(input: ActInput): Promise<Awaited<ReturnType<typeof codexAct>> | Awaited<ReturnType<OpenCodeBackend["actNative"]>>>;
   async act(input: ActInput) {
+    if (input.action === "delete" && input.runtime !== "opencode" && input.runtime !== "codex") throw new SessionDeleteError("DELETE_RUNTIME_REQUIRED", "explicit opencode or codex runtime is required");
     if (input.runtime !== "codex") return this.actNative(input);
     return codexAct((await this.connect()).client, input);
   }
   private async actNative(input: ActInput) {
+    if (input.action === "delete") {
+      await this.deleteNative(input.sessionId);
+      return { action: "delete" as const, runtime: "opencode" as const, sessionId: input.sessionId, deleted: true as const };
+    }
     const { client } = await this.connect();
     const session = await client.session.get({ sessionID: input.sessionId });
     if (input.action === "cancelInbox" || input.action === "updateInbox") {
@@ -668,8 +673,42 @@ export class OpenCodeBackend {
       await client.session.form.cancel({ sessionID: input.sessionId, formID: input.formId });
       return { action: input.action, sessionId: input.sessionId, formId: input.formId, cancelled: true };
     }
-    await client.session.remove({ sessionID: input.sessionId });
-    return { action: input.action, sessionId: input.sessionId, deleted: true };
+    throw new Error("unsupported native session action");
+  }
+
+  private async deleteNative(sessionId: string) {
+    let client: OpenCodeClient;
+    try {
+      client = (await this.connect()).client;
+      const session = await client.session.get({ sessionID: sessionId }).catch(error => {
+        if (error && typeof error === "object" && "_tag" in error && error._tag === "SessionNotFoundError") throw new SessionDeleteError("DELETE_NOT_FOUND", "native session was not found before deletion");
+        throw error;
+      });
+      if (session.id !== sessionId) throw new SessionDeleteError("DELETE_PREFLIGHT_FAILED", "native session identity could not be established");
+      const [active, permissions, forms, inbox] = await Promise.all([
+        client.session.active(), client.permission.list({ sessionID: sessionId }),
+        client.session.form.list({ sessionID: sessionId }), client.session.inbox.list({ sessionID: sessionId }),
+      ]);
+      if (!active || typeof active !== "object" || Array.isArray(active) || !Array.isArray(permissions) || !Array.isArray(forms) || !Array.isArray(inbox)) throw new SessionDeleteError("DELETE_PREFLIGHT_FAILED", "native session safety state is unusable");
+      if (active[sessionId]) throw new SessionDeleteError("DELETE_SESSION_ACTIVE", "native session execution is active");
+      if (permissions.length) throw new SessionDeleteError("DELETE_PENDING_APPROVAL", "native session has pending permission requests");
+      if (forms.length) throw new SessionDeleteError("DELETE_PENDING_FORM", "native session has pending forms");
+      if (inbox.length) throw new SessionDeleteError("DELETE_PENDING_INBOX", "native session has pending inbox work");
+    } catch (error) {
+      if (error instanceof SessionDeleteError) throw error;
+      throw new SessionDeleteError("DELETE_PREFLIGHT_FAILED", "native session safety state could not be established");
+    }
+    try { await client.session.remove({ sessionID: sessionId }); }
+    catch (error) {
+      if (error && typeof error === "object" && "_tag" in error && error._tag === "SessionBusyError") throw new SessionDeleteError("DELETE_SESSION_ACTIVE", "native runtime refused busy session deletion");
+      throw new SessionDeleteError("DELETE_FAILED", "native deletion failed without confirmed absence", true);
+    }
+    try { await client.session.get({ sessionID: sessionId }); }
+    catch (error) {
+      if (error && typeof error === "object" && "_tag" in error && error._tag === "SessionNotFoundError") return;
+      throw new SessionDeleteError("DELETE_UNVERIFIED", "native absence readback failed", true);
+    }
+    throw new SessionDeleteError("DELETE_UNVERIFIED", "native session remains visible after deletion", true);
   }
 }
 

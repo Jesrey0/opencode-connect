@@ -13,6 +13,12 @@ export const MESSAGE_PREVIEW_LIMIT = 512;
 export const COMPACTION_PREVIEW_LIMIT = 128;
 export const MESSAGE_TOOL_PREVIEW_LIMIT = 10;
 export class ConnectorError extends Error {}
+// Only connector-authored reasons are exposed; native exception bodies stay private.
+export class SessionDeleteError extends ConnectorError {
+  constructor(readonly code: string, readonly reason: string, readonly mutationMayHaveOccurred = false) {
+    super(`Session delete: ${reason}${mutationMayHaveOccurred ? "; reconcile native inventory; do not retry automatically" : ""}`);
+  }
+}
 export class CatalogError extends ConnectorError {
   readonly code = "AGENT_NOT_FOUND";
   constructor(readonly agentId: string) { super(`AGENT_NOT_FOUND: ${agentId}`); }
