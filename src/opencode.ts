@@ -14,7 +14,7 @@ import {
   type SessionInboxInfo,
 } from "@opencode/client";
 import { connectNative, OPENCODE_RELEASE, type Connect } from "./native.js";
-import { CODEX_DIRECT_RPC_ID, CODEX_PROMPT_LIMIT, CODEX_TIMEOUT_LIMIT_MS, CODEX_TIMEOUT_MS, codexCancel, codexJob, codexJobId, codexMutation, codexNextCall, codexStart, codexStartIdentity } from "./codex.js";
+import { codexStart, codexInspect, codexWait, codexAct, codexQuery, codexStatus, type Runtime } from "./codex.js";
 import { page, textPage, type PageInput, integer, fingerprint, checkFingerprint, safeError, AdmissionError, CatalogError, TEXT_LIMIT, MESSAGE_PREVIEW_LIMIT, COMPACTION_PREVIEW_LIMIT, MESSAGE_TOOL_PREVIEW_LIMIT } from "./bounds.js";
 import { nextCall, pageNextCall, queryNextCall } from "./continuation.js";
 import { compactAgent, contextualPage, permissionSummary } from "./catalog.js";
@@ -42,8 +42,9 @@ async function readAgent(client: Client, agentId: string, cwd?: string) {
 }
 
 export type StartInput = {
+  runtime?: Runtime;
   task: string;
-  model: string;
+  model?: string;
   cwd?: string;
   sessionId?: string;
   forkFromSessionId?: string;
@@ -57,6 +58,7 @@ export type PromptAttachments = Pick<SessionPromptInput, "files" | "agents" | "s
 type TextInput = { textOffset?: number; textLimit?: number; textFingerprint?: string };
 
 export type InspectInput = {
+  runtime?: Runtime;
   sessionId: string;
   messageId?: string;
   detail?: "semantic" | "result";
@@ -68,7 +70,7 @@ export type InspectInput = {
   textFingerprint?: string;
 };
 
-export type QueryInput =
+export type QueryInput = (
   | ({ type: "sessionDiff"; sessionId: string; from?: string; to?: string; context?: number; file?: string } & PageInput & TextInput)
   | ({ type: "inbox"; sessionId: string; inboxId?: string } & PageInput & TextInput)
   | ({ type: "skill"; cwd?: string; skillId: string } & TextInput)
@@ -77,7 +79,7 @@ export type QueryInput =
   | ({ type: "models"; cwd?: string; view?: "compact" | "full" } & PageInput)
   | ({ type: "agents"; cwd?: string; view?: "compact" | "full"; includeHidden?: boolean; includePermissionsSummary?: boolean } & PageInput)
   | ({ type: "agent"; cwd?: string; agentId: string; field?: "system" | "description" | "permissions" | "permissionSummary"; textOffset?: number; textLimit?: number; textFingerprint?: string } & PageInput)
-  | { type: "messages"; sessionId: string; cursor?: string; limit?: number; order?: "asc" | "desc" }
+  | ({ type: "messages"; sessionId: string; cursor?: string; order?: "asc" | "desc" } & PageInput)
   | { type: "message"; sessionId: string; messageId: string; field?: "summary" | "recent"; textOffset?: number; textLimit?: number; textFingerprint?: string }
   | ({ type: "permissions"; sessionId: string; section?: "rules" | "pending" | "summary" } & PageInput)
   | ({ type: "savedApprovals"; sessionId: string } & PageInput)
@@ -85,11 +87,10 @@ export type QueryInput =
   | ({ type: "skills"; cwd?: string } & PageInput)
   | ({ type: "providers"; cwd?: string } & PageInput)
   | { type: "usage" }
-  | { type: "codexJob"; jobId: string }
   | { type: "sessions"; cursor?: string; limit?: number; cwd?: string; searchTerm?: string }
-  | { type: "session"; sessionId: string };
+  | { type: "session"; sessionId: string }) & { runtime?: Runtime };
 
-export type ActInput =
+export type ActInput = (
   | ({ action: "steer"; sessionId: string; instruction: string } & PromptAttachments)
   | { action: "cancelInbox"; sessionId: string; inboxId: string }
   | { action: "updateInbox"; sessionId: string; inboxId: string; delivery: "steer" | "queue" }
@@ -109,8 +110,7 @@ export type ActInput =
   | { action: "setPermissions"; sessionId: string; permissions: PermissionRule[] }
   | { action: "removeSavedApproval"; sessionId: string; approvalId: string }
   | { action: "synthetic"; sessionId: string; text: string; description?: string; delivery?: "steer" | "queue"; resume?: boolean }
-  | { action: "codexStart"; cwd: string; prompt: string; timeoutMs?: number }
-  | { action: "codexCancel"; jobId: string };
+  ) & { runtime?: Runtime };
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -572,7 +572,15 @@ export class OpenCodeBackend {
     }
   }
 
-  async status() {
+  async status(runtime: "codex"): Promise<{ ready: true; opencodeRelease: string; serverPid: number; workers: Awaited<ReturnType<typeof codexStatus>>; pendingActions: never[] }>;
+  async status(runtime?: "opencode"): Promise<Awaited<ReturnType<OpenCodeBackend["statusNative"]>>>;
+  async status(runtime?: Runtime): Promise<Awaited<ReturnType<OpenCodeBackend["statusNative"]>> | { ready: true; opencodeRelease: string; serverPid: number; workers: Awaited<ReturnType<typeof codexStatus>>; pendingActions: never[] }>;
+  async status(runtime: Runtime = "opencode") {
+    if (runtime !== "codex") return this.statusNative();
+    const { client, info } = await this.connect();
+    return { ready: true as const, opencodeRelease: info.version, serverPid: info.pid, workers: await codexStatus(client), pendingActions: [] as never[] };
+  }
+  private async statusNative() {
     const { client, info } = await this.connect();
     const [active, recent] = await Promise.all([
       client.session.active(),
@@ -614,9 +622,21 @@ export class OpenCodeBackend {
     };
   }
 
+  async start(input: StartInput & { runtime: "codex" }): Promise<Awaited<ReturnType<typeof codexStart>>>;
+  async start(input: StartInput & { runtime?: "opencode" }): Promise<Awaited<ReturnType<OpenCodeBackend["startNative"]>>>;
+  async start(input: StartInput): Promise<Awaited<ReturnType<typeof codexStart>> | Awaited<ReturnType<OpenCodeBackend["startNative"]>>>;
   async start(input: StartInput) {
+    if (input.runtime === "codex") {
+      for (const field of ["model", "agent", "variant", "permissions", "forkFromSessionId", "beforeMessageId", "title", "files", "agents", "skills"] as const) if (input[field] !== undefined) throw new Error(`Codex start field ${field} is unsupported`);
+      if (input.cwd) await assertDirectory(input.cwd);
+      const { client } = await this.connect();
+      return codexStart(client, { task: input.task, ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.sessionId ? { sessionId: input.sessionId } : {}) });
+    }
+    return this.startNative(input);
+  }
+  private async startNative(input: StartInput) {
     if (!input.task.trim()) throw new Error("task must not be empty");
-    if (!input.model.trim()) throw new Error("opencode.start requires an explicit model");
+    if (!input.model?.trim()) throw new Error("opencode.start requires an explicit model");
     if (input.sessionId && input.forkFromSessionId) throw new Error("sessionId and forkFromSessionId are mutually exclusive");
     if (input.beforeMessageId && !input.forkFromSessionId) throw new Error("beforeMessageId requires forkFromSessionId");
     if (!input.sessionId && !input.forkFromSessionId && !input.cwd) throw new Error("fresh opencode.start requires an explicit cwd");
@@ -738,7 +758,14 @@ export class OpenCodeBackend {
     };
   }
 
+  async inspect(input: InspectInput & { runtime: "codex" }): Promise<Awaited<ReturnType<typeof codexInspect>>>;
+  async inspect(input: InspectInput & { runtime?: "opencode" }): Promise<Awaited<ReturnType<OpenCodeBackend["inspectNative"]>>>;
+  async inspect(input: InspectInput): Promise<Awaited<ReturnType<typeof codexInspect>> | Awaited<ReturnType<OpenCodeBackend["inspectNative"]>>>;
   async inspect(input: InspectInput) {
+    if (input.runtime !== "codex") return this.inspectNative(input);
+    return codexInspect((await this.connect()).client, input);
+  }
+  private async inspectNative(input: InspectInput) {
     const { client } = await this.connect();
     const session = await client.session.get({ sessionID: input.sessionId });
     const active = await client.session.active();
@@ -754,7 +781,15 @@ export class OpenCodeBackend {
     return this.inspectSemantic(client, session, active, input.messageId);
   }
 
-  async wait(sessionId: string, messageId: string, signal?: AbortSignal) {
+  async wait(sessionId: string, messageId: string | undefined, signal: AbortSignal | undefined, runtime: "codex"): Promise<Awaited<ReturnType<typeof codexWait>>>;
+  async wait(sessionId: string, messageId: string, signal?: AbortSignal, runtime?: "opencode"): Promise<Awaited<ReturnType<OpenCodeBackend["waitNative"]>>>;
+  async wait(sessionId: string, messageId?: string, signal?: AbortSignal, runtime?: Runtime): Promise<Awaited<ReturnType<typeof codexWait>> | Awaited<ReturnType<OpenCodeBackend["waitNative"]>>>;
+  async wait(sessionId: string, messageId?: string, signal?: AbortSignal, runtime: Runtime = "opencode") {
+    if (runtime === "codex") return codexWait((await this.connect()).client, sessionId, messageId, signal, Math.min(this.waitTimeoutMs, 40_000));
+    if (!messageId) throw new Error("OpenCode wait requires a canonical user messageId");
+    return this.waitNative(sessionId, messageId, signal);
+  }
+  private async waitNative(sessionId: string, messageId: string, signal?: AbortSignal) {
     signal?.throwIfAborted();
     const { client } = await this.connect();
     signal?.throwIfAborted();
@@ -821,6 +856,10 @@ export class OpenCodeBackend {
     for (let index = 0; index < queries.length; index += 1) {
       const query = queries[index];
       try {
+        if (query.runtime === "codex") {
+          results.push({ index, type: query.type, result: await codexQuery(client, query) });
+          continue;
+        }
         if (query.type === "skill") {
           const skills = (await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined)).data;
           const skill = skills.find((entry) => entry.id === query.skillId);
@@ -934,10 +973,6 @@ export class OpenCodeBackend {
           results.push({ index, type: query.type, result: await client.session.stats() });
           continue;
         }
-        if (query.type === "codexJob") {
-          results.push({ index, type: query.type, result: await codexJob(client, codexJobId(query.jobId), CODEX_TIMEOUT_MS) });
-          continue;
-        }
         if (query.type === "sessions") {
           const [response, active] = await Promise.all([
             client.session.list({ limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: "desc" as const }), directory: query.cwd, search: query.searchTerm }),
@@ -1020,23 +1055,15 @@ export class OpenCodeBackend {
       ? { ...entry, result: { ...entry.result, nextCall: queryNextCall(queries[entry.index], entry.result) } } : entry) };
   }
 
+  async act(input: ActInput & { runtime: "codex" }): Promise<Awaited<ReturnType<typeof codexAct>>>;
+  async act(input: ActInput & { runtime?: "opencode" }): Promise<Awaited<ReturnType<OpenCodeBackend["actNative"]>>>;
+  async act(input: ActInput): Promise<Awaited<ReturnType<typeof codexAct>> | Awaited<ReturnType<OpenCodeBackend["actNative"]>>>;
   async act(input: ActInput) {
+    if (input.runtime !== "codex") return this.actNative(input);
+    return codexAct((await this.connect()).client, input.action, input.sessionId);
+  }
+  private async actNative(input: ActInput) {
     const { client } = await this.connect();
-    // Operator-direct Codex dispatch owns no native session identity, so it is handled
-    // before the mandatory session lookup every session-scoped action performs. Direct
-    // Codex answers only with its own canonical job id, status and plugin result; the
-    // connector never mints a session or message identity for it.
-    if (input.action === "codexStart") {
-      await assertDirectory(input.cwd);
-      if (Buffer.byteLength(input.prompt) > CODEX_PROMPT_LIMIT) throw new Error("codex task prompt exceeds 64 KiB");
-      const timeoutMs = integer(input.timeoutMs, CODEX_TIMEOUT_MS, CODEX_TIMEOUT_LIMIT_MS, 1, "timeoutMs");
-      const admitted = codexStartIdentity(await codexStart(client, { cwd: input.cwd, prompt: input.prompt }, timeoutMs));
-      return { action: input.action, cwd: input.cwd, ...(await codexMutation(client, admitted.jobId, admitted.status, timeoutMs)), timeoutMs, rpcDefinition: CODEX_DIRECT_RPC_ID, verifyNextCall: codexNextCall(admitted.jobId) };
-    }
-    if (input.action === "codexCancel") {
-      const status = await codexCancel(client, codexJobId(input.jobId), CODEX_TIMEOUT_MS);
-      return { action: input.action, ...(await codexMutation(client, input.jobId, status, CODEX_TIMEOUT_MS)), rpcDefinition: CODEX_DIRECT_RPC_ID, verifyNextCall: codexNextCall(input.jobId) };
-    }
     const session = await client.session.get({ sessionID: input.sessionId });
     if (input.action === "cancelInbox" || input.action === "updateInbox") {
       const before = await client.session.inbox.list({ sessionID: session.id });

@@ -91,7 +91,7 @@ test("result selection and full-text continuations are independent reusable cano
   const backend = new OpenCodeBackend(native.connect);
   const initial = await latestResult(native.client, { sessionId: "s", messageId: "target", textLimit: 1000 }, true);
   assert.equal(initial.nextCall?.tool, "opencode.inspect");
-  const selected = await backend.inspect(initial.nextCall!.arguments as Parameters<typeof backend.inspect>[0]);
+  const selected = await backend.inspect({ ...initial.nextCall!.arguments, runtime: "opencode" } as Parameters<typeof backend.inspect>[0] & { runtime: "opencode" });
   assert.ok("result" in selected);
   assert.equal(selected.result.selectionComplete, true);
   assert.equal(selected.result.outcome, "completed");

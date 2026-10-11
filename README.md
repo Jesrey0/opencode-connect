@@ -3,10 +3,9 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.8.0** projects native OpenCode HostPlane operations
+OpenCode Connect **0.9.0** projects native OpenCode HostPlane operations
 and the canonical WorkerPlane
-into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**. Codex Connect remains independently
-owned and deployable.
+into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**.
 
 This adapter exposes only OpenCode-backed HostPlane and WorkerPlane operations.
 Custom host applications are CLI-first and keep their code, process lifecycle,
@@ -28,14 +27,13 @@ it. The operator owns backend deployment, account binding/OAuth, and Git publica
 Documentation and Git publication do not activate a backend release; check deployed
 build identity, service readiness, and ChatGPT tool discovery independently.
 
-OpenCode owns sessions, message IDs, inbox admission, agents, permissions, and
-the model catalog. There are no connector worker/command registries, local run
-IDs, sidecars, or compatibility aliases, and the connector implements no plugin of
-its own. The one plugin RPC it calls is the separately implemented native
-`codex-direct` definition described under Direct Codex dispatch; that plugin owns
-its own job ids, and a direct Codex job is never a worker identity. A workstream
-stays on its selected substrate. Worker identity is `sessionId` + canonical
-**user** `messageId`; synthetic admission instead returns an **inboxId**.
+OpenCode owns its sessions, messages, inbox, agents, permissions and model catalog.
+Codex owns its native ACP sessions, execution, history and sandbox. The existing
+session tools select the backend with `runtime` (`opencode` by default, or `codex`).
+Codex calls use the separately maintained `codex-sessions` plugin RPC directly;
+no intermediary OpenCode model turn or OpenCode transcript is created. Native
+identities remain qualified by their runtime. OpenCode prompt admission returns
+a canonical user `messageId`; Codex admission returns `messageId: null`.
 
 ## HostPlane
 
@@ -172,9 +170,8 @@ at 5 s. Shell timeout defaults to 120 s and caps at 24 hours.
 
 `status`, `opencode.start`, `opencode.wait`, `opencode.inspect`,
 `opencode.query`, and `opencode.act` retain OpenCode's native worker identities.
-The `codexStart`/`codexCancel` actions and the `codexJob` query are the documented
-exception: they carry the `codex-direct` plugin's own job identity and create no
-native session.
+Set `runtime: "codex"` to operate native Codex sessions through the same tools.
+Codex has its own session IDs and a narrower capability contract, described below.
 Events wake bounded waits; persisted session/message state remains authoritative.
 Stale/unrelated terminal hints cannot force completion; timeout reconciles canonical
 state even when the terminal event was missed. SDK request cancellation or HTTP
@@ -315,7 +312,7 @@ their canonical user message identity, not a synthetic admission identity.
 `query` supports models, agents, one agent, skills, providers, usage, native session
 pages, one session, native message pages, one message, session diffs, inbox,
 tool inventories, one tool, permissions, project saved
-approvals, one canonical direct Codex job, and sanitized runtime inventory. Catalog/inventory pages use
+approvals, native Codex sessions and history, and sanitized runtime inventory. Catalog/inventory pages use
 `offset`, `limit`, `fingerprint`; native session/message pages use opaque
 native cursors instead. Agent details include description, system,
 steps, paged permissions, mode, hidden status and model, excluding `request`.
@@ -517,44 +514,47 @@ Native **session commands** differ from HostPlane shell/PTY commands. No univers
 raw RPC or credential/configuration action is exposed. Never automatically retry
 uncertain admission or mutation; reconcile native state first.
 
-### Direct Codex dispatch
+### Codex sessions
 
-`act codexStart`, `act codexCancel`, and `query codexJob` reach the separately
-implemented native plugin definition `codex-direct` through the pinned client's own
-`rpc` API. They let an operator dispatch Codex directly instead of routing the task
-through an OpenCode worker: no native session is created, no model is asked to
-delegate, and no MCP tool or server was added for it. These are variants of the
-existing `opencode.act` and `opencode.query` contracts.
+Use `opencode.start` with `runtime: "codex"`, `task`, and an existing absolute
+`cwd`. Admission returns the actual native Codex `sessionId` after session setup
+and read-only mode enforcement. ACP prompt execution continues asynchronously;
+`messageId` is null because ACP does not return a canonical user prompt ID at
+admission. Retain the runtime and session ID together. Never retry uncertain
+admission automatically; a known session ID remains available for reconciliation.
 
-`codexStart` requires an absolute path to an existing directory, a self-contained
-task prompt of at most 64 KiB, and dispatches `start({ cwd, prompt })`. The plugin's
-answer is its own canonical `jobId` and `status`; the connector then reads that job
-back through `inspect({ jobId })` and returns `jobId`, the current `status`, the
-plugin `result`, and `verified` with a bounded `readbackError`. `verified: false`
-means the job exists by its admission identity but its record could not be read:
-reconcile it with `query codexJob` instead of dispatching again. `verifyNextCall` is
-the exact `codexJob` read. These Codex actions are handled before the mandatory
-session lookup every session-scoped action performs, and they never read, create or
-invent a session, message or worker identity.
+`opencode.inspect` and `opencode.wait` accept the same runtime and session ID.
+They observe the current session turn, not an exact historical prompt. Omit
+`messageId`; `capabilities.exactPromptWait` is false. Results retain the native
+assistant ID when available, bounded text pagination and explicit truncation.
+Wait is bounded to 40 seconds. A terminal result distinguishes native prompt
+completion from objective success. After adapter restart or cache eviction,
+native conversation history is recoverable, but execution termination evidence
+is unavailable: outcome stays unknown and wait returns `executionUnavailable`.
 
-`timeoutMs` (1–90000, default 45000) bounds the connector's admission call only. It
-never cancels the Codex job; an exceeded bound leaves admission uncertain with no job
-id to reconcile, so it must not be retried automatically. `codexCancel` requests
-cancellation of a canonical `jobId` and reports the plugin's own status, read back
-the same way; a failed or timed-out cancellation does not prove the job stopped.
+Continue an idle session with `opencode.start runtime: "codex" sessionId task`.
+Continuation inherits cwd and reapplies read-only mode. Interrupt with
+`opencode.act action: "interrupt"`; this preserves the conversation. Execution
+capacity remains reserved until the ACP process is reaped. Delete an idle native
+session with `action: "delete"`. The plugin has two execution slots, one bounded
+metadata connection, and a 64-entry expiring supervision cache. Cache eviction
+never deletes native Codex sessions.
 
-`query codexJob` is the only read path and returns `{ jobId, status, result, error }`
-for one plugin job. `error` keeps a bounded type with `messageOmitted: true`;
-plugin messages, prompts, paths, and provider state never cross the boundary, and an
-unusable payload fails visibly instead of being repaired. Plugin status is native
-state: `queued` or `running` is not evidence of success, and `result` is Codex
-output, not an OpenCode assistant message, so it carries no session identity, usage
-basis, or permission rules. Like other selected native payloads, `result` can contain
-secrets and can reach the 256 KiB structured ceiling. This is direct host authority
-independent of worker permissions, and it is unavailable while the plugin is absent
-at the selected location; `query runtime` lists installed plugins and their RPC
-feature. An `rpc.method_not_found` failure is a bounded plugin-state error, not a
-reason to install or substitute anything.
+`query sessions/session/messages/message`, `query runtime`, and
+`query permissions section: "summary"` accept `runtime: "codex"`. Native history
+replay supplies canonical user and assistant IDs. Message inventories page a
+bounded history snapshot with offsets and fingerprints; full text recovery uses
+native message IDs. `historyComplete: false` and `outputTruncated` disclose
+retention limits. Missing exact messages fail without selecting another result.
+Session inventories use the ACP native cursor. `status runtime: "codex"` reports
+locally supervised sessions; native inventories use `query sessions`.
+
+Codex inherits its own configured model and runs read-only. Permission requests
+are denied; ACP filesystem and terminal client access remain disabled. Model,
+agent and permission selection, fork, attachments, active steering, inbox,
+compaction and MCP Events are not exposed for Codex. Unsupported operations fail
+explicitly instead of reaching OpenCode or fabricating IDs. Ordinary native
+OpenCode operations retain their existing behavior.
 
 ## Permissions and authority
 
