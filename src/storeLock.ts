@@ -4,8 +4,6 @@ import { DatabaseSync } from "node:sqlite";
 // JSON store's entire lifetime. There is no PID identity to reuse and no stale
 // ownership to reclaim after a crash/reboot. Never unlink this file: every owner
 // must contend on the same inode. This requires local filesystem SQLite locking.
-// The old PID-only store.lock is deliberately ignored; stop the old service
-// before upgrading (as the normal deployment activation does).
 export function acquireStoreLock(path: string): () => void {
   const database = new DatabaseSync(path);
   try {

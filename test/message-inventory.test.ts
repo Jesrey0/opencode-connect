@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { OpenCodeBackend, projectMessage } from "../src/opencode.js";
+import { OpenCodeBackend } from "../src/opencode.js";
+import { projectMessage } from "../src/runtime/projection.js";
 import { MESSAGE_PREVIEW_LIMIT, COMPACTION_PREVIEW_LIMIT, MESSAGE_TOOL_PREVIEW_LIMIT, TEXT_LIMIT } from "../src/bounds.js";
 import { structuredResult } from "../src/mcp.js";
 import { nativeFixture, session, user, assistant } from "./native-fixture.js";

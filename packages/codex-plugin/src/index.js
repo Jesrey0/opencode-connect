@@ -25,10 +25,6 @@ import { SessionError, installCodexSessionsRpc } from "./direct.js"
 import { authorizeCodexSubagent } from "./permissions.js"
 import { readCodexUsage } from "./usage.js"
 
-export { CODEX_AGENT_NAME, CODEX_DEFAULT_MODE, CODEX_READ_ONLY_MODE, CODEX_SESSION_MODES, DEFAULT_TIMEOUT_MS } from "./codex.js"
-export { CodexSessionsRpc, SESSION_RPC_ID } from "./direct.js"
-export { DEFAULT_USAGE_TIMEOUT_MS, MAX_USAGE_TIMEOUT_MS, UsageUnavailableError, projectUsage, readCodexUsage } from "./usage.js"
-
 export const Input = Schema.Struct({
   agent: Schema.String.annotate({ description: "The agent to delegate to. Any native OpenCode agent, or `codex`." }),
   description: Schema.String.annotate({ description: "A short 3-5 word label for the task, displayed to the user" }),

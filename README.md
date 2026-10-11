@@ -42,13 +42,17 @@ a canonical user `messageId`; Codex admission returns `messageId: null`.
 
 ## Repository guide
 
-The Codex plugin and connector now share one npm-workspace repository, with two distinct runtime owners.
+The Codex plugin and connector share one npm-workspace repository, with two distinct runtime owners.
 - Root (src/): MCP endpoint, OpenCode runtime, HostPlane, events, deployment.
 - packages/codex-plugin/: native OpenCode plugin, Codex ACP sessions and quota reader.
 - AGENTS.md: first-stop map for coding agents.
 - docs/architecture.md: package boundaries, test commands and coordinated deployment.
 
 From the root, use npm run check:all and npm run test:all; the production release must be separately prepared and activated. OpenCode global configuration changes are not automatic.
+Supported releases require the complete plugin workspace. Configure native local
+loading with the immutable release's `packages/codex-plugin/src` directory;
+package-root directory loading is not supported. See [release lifecycle](docs/release-cutover.md)
+for coordinated acceptance, rollback, and standalone-checkout retirement.
 
 ## HostPlane
 
@@ -694,9 +698,8 @@ rely on PID liveness or shutdown cleanup. Startup failures also release ownershi
 Keep this state on a local filesystem with working SQLite file locking, and
 **never delete or replace `store.lock.sqlite` while a connector is running**.
 A genuine second owner fails closed; storage/locking errors are not treated as
-stale locks. The former PID-only `store.lock` is ignored. Stop all old-version
-connector processes before upgrading; deployment activation already stops/restarts
-the managed service. Old and new versions must not share a store concurrently.
+stale locks. Connector processes must not share a store concurrently;
+deployment activation stops/restarts the managed service.
 
 Native service lifecycle admission occurs only at connector startup. Ordinary calls use native discovery and fail explicitly when unavailable; they never start, replace or recover the service. Health and MCP errors omit raw upstream bodies. Failed starts preserve a known sessionId and admission stage; promptSubmitted null means delivery is uncertain and requires reconciliation.
 

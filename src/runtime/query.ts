@@ -53,7 +53,7 @@ type TextInput = { textOffset?: number; textLimit?: number; textFingerprint?: st
 
 /**
  * The native query contract. Declared here because this module is what exhausts
- * it; the backend re-exports it unchanged.
+ * it; the facade composes it with runtime routing.
  */
 export type NativeQueryInput = (
   | ({ type: "sessionDiff"; sessionId: string; from?: string; to?: string; context?: number; file?: string } & PageInput & TextInput)

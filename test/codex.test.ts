@@ -6,10 +6,12 @@ import { createServer } from "../src/mcp.js";
 import { OpenCodeBackend } from "../src/opencode.js";
 import { HostBackend } from "../src/host.js";
 import { outputSchemas } from "../src/results.js";
-import { CodexSessionsDefinition } from "../src/codex.js";
+import { CodexSessionsDefinition } from "../src/codexRpc.js";
 // Native plugin sources and their injection harness are intentionally JavaScript.
 // @ts-expect-error no declaration file for the native JS workspace
-import { CodexSessionsRpc, projectUsage } from "opencode-codex-subagent";
+import { CodexSessionsRpc } from "../packages/codex-plugin/src/direct.js";
+// @ts-expect-error no declaration file for the native JS workspace
+import { projectUsage } from "../packages/codex-plugin/src/usage.js";
 // @ts-expect-error JS plugin test harness
 import { createHarness } from "../packages/codex-plugin/test/harness.js";
 import { nativeFixture, type NativeRequest } from "./native-fixture.js";

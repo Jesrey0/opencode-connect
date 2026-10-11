@@ -8,7 +8,6 @@
     ".": "./src/index.js"
   },
   "files": [
-    "index.js",
     "src",
     "README.md"
   ],

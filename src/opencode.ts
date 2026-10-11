@@ -6,7 +6,7 @@ import {
   type PermissionRule,
   type SessionPromptInput,
 } from "@opencode/client";
-import { connectNative, OPENCODE_RELEASE, type Connect } from "./native.js";
+import { connectNative, type Connect } from "./native.js";
 import { codexStart, codexInspect, codexWait, codexAct, codexQuery, codexStatus, type Runtime, type CodexMode } from "./codex.js";
 import { safeError, AdmissionError, CatalogError, MESSAGE_PREVIEW_LIMIT } from "./bounds.js";
 import { nextCall, queryNextCall } from "./continuation.js";
@@ -27,10 +27,6 @@ import {
   eventLocationDirectory,
   catalogLocation,
 } from "./runtime/projection.js";
-// Public surface is unchanged: these symbols keep their original module path.
-export { OPENCODE_RELEASE } from "./native.js";
-export { parseModelRef, isZeroCostModel, projectMessage, projectAgent } from "./runtime/projection.js";
-export { latestResult } from "./runtime/result.js";
 import { stat } from "node:fs/promises";
 import { ConnectorError as Error } from "./bounds.js";
 
@@ -61,7 +57,7 @@ export type StartInput = {
 export type PromptAttachments = Pick<SessionPromptInput, "files" | "agents" | "skills">;
 export type InspectInput = ResultSelectionInput & { runtime?: Runtime };
 
-// The query contract is declared where it is resolved; re-exported unchanged.
+// The facade adds runtime routing to the native query contract.
 export type QueryInput = NativeQueryInput & { runtime?: Runtime };
 
 export type ActInput = (

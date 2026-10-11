@@ -1,14 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as facade from "../src/opencode.js";
-import * as projection from "../src/runtime/projection.js";
-import { latestResult } from "../src/runtime/result.js";
+import * as codex from "../src/codex.js";
 import { nativeFixture } from "./native-fixture.js";
 
-test("the public backend facade retains the canonical projection and selection implementations", () => {
-  for (const name of ["parseModelRef", "isZeroCostModel", "projectMessage", "projectAgent"] as const)
-    assert.equal(facade[name], projection[name]);
-  assert.equal(facade.latestResult, latestResult);
+test("backend facades expose no relocated-helper aliases", () => {
+  for (const name of ["OPENCODE_RELEASE", "parseModelRef", "isZeroCostModel", "projectMessage", "projectAgent", "latestResult"])
+    assert.equal(Object.hasOwn(facade, name), false, name);
+  assert.equal(Object.hasOwn(codex, "CodexSessionsDefinition"), false);
 });
 
 test("unknown native query types fail locally rather than falling through to a session read", async () => {

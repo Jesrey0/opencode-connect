@@ -31,11 +31,10 @@ async function tempDir(prefix: string): Promise<string> {
 function fakeSource(tree: Record<string, string>): Promise<string> {
   return (async () => {
     const dir = await tempDir("opencode-deploy-src-");
-    await writeFile(path.join(dir, "package.json"), JSON.stringify({ name: "x", version: "0.5.0" }));
     await writeFile(path.join(dir, "package-lock.json"), JSON.stringify({ name: "x", lockfileVersion: 3 }));
     await writeFile(path.join(dir, "tsconfig.json"), JSON.stringify({}));
     await mkdir(path.join(dir, "src"), { recursive: true });
-    for (const [rel, content] of Object.entries(tree)) {
+    for (const [rel, content] of Object.entries({ ...workspaceFiles, ...tree })) {
       const full = path.join(dir, rel);
       await mkdir(path.dirname(full), { recursive: true });
       await writeFile(full, content);
@@ -44,11 +43,22 @@ function fakeSource(tree: Record<string, string>): Promise<string> {
   })();
 }
 
+const workspaceFiles: Record<string, string> = {
+  "package.json": JSON.stringify({ name: "x", version: "0.10.0", workspaces: ["packages/codex-plugin"] }),
+  "scripts/verify-integration.mjs": "// fixture verifier\n",
+  "packages/codex-plugin/package.json": JSON.stringify({ name: "opencode-codex-subagent", version: "0.3.1" }),
+  ...Object.fromEntries(["index", "codex", "direct", "permissions", "usage", "stdio"].map(name => [`packages/codex-plugin/src/${name}.js`, "export {};\n"])),
+};
+
 async function seedBuild(baseDir: string, buildId: string): Promise<string> {
   const paths = deploymentPaths(baseDir);
   const dir = buildDirFor(paths, buildId);
   await mkdir(path.join(dir, "dist", "src"), { recursive: true });
   await mkdir(path.join(dir, "node_modules"), { recursive: true });
+  for (const [rel, content] of Object.entries(workspaceFiles)) {
+    await mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
+    await writeFile(path.join(dir, rel), content);
+  }
   await writeFile(path.join(dir, "dist", "src", "server.js"), "seed");
   await writeFile(path.join(dir, "build.json"), JSON.stringify({
     buildId, version: "0.5.0", commit: null, commitShort: null, branch: null,
@@ -122,7 +132,6 @@ test("plugin sources participate in build identity and release staging", async (
   const source = await fakeSource({
     "src/a.ts": "export const a = 1;\n",
     "packages/codex-plugin/package.json": JSON.stringify({ name: "opencode-codex-subagent", version: "0.3.1" }),
-    "packages/codex-plugin/index.js": "export * from './src/index.js';\n",
     "packages/codex-plugin/src/index.js": "export const plugin = 'v1';\n",
     "packages/codex-plugin/src/usage.js": "export const quota = 1;\n",
     "packages/codex-plugin/src/runtime-data.json": "{\"quota\":1}\n",
@@ -134,6 +143,7 @@ test("plugin sources participate in build identity and release staging", async (
     assert.ok(before.files.includes("packages/codex-plugin/src/index.js"));
     assert.ok(before.files.includes("packages/codex-plugin/src/usage.js"));
     assert.ok(before.files.includes("packages/codex-plugin/package.json"));
+    assert.equal(before.files.includes("packages/codex-plugin/index.js"), false);
     assert.ok(before.files.includes("packages/codex-plugin/src/runtime-data.json"));
     assert.equal(before.files.includes("packages/codex-plugin/test/fixture.js"), false);
     await copySourceTree(source, destination);
@@ -157,6 +167,7 @@ test("declared workspace packages cannot be silently omitted or partially staged
   });
   const destination = await tempDir("opencode-deploy-missing-plugin-");
   try {
+    await rm(path.join(source, "packages/codex-plugin"), { recursive: true });
     await assert.rejects(copySourceTree(source, destination), /incomplete Codex workspace.*package.json/);
     await mkdir(path.join(source, "packages/codex-plugin"), { recursive: true });
     await writeFile(path.join(source, "packages/codex-plugin/package.json"), "{}");
@@ -164,11 +175,30 @@ test("declared workspace packages cannot be silently omitted or partially staged
   } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(destination, { recursive: true, force: true })]); }
 });
 
+test("connector-only sources and builds fail the mandatory workspace invariant before service actions", async () => {
+  const source = await fakeSource({ "package.json": JSON.stringify({ name: "x", version: "1" }) });
+  const base = await tempDir("opencode-deploy-no-workspace-");
+  try {
+    await rm(path.join(source, "packages"), { recursive: true });
+    await assert.rejects(hashSourceTree(source), /root manifest must declare packages\/codex-plugin/);
+    await assert.rejects(copySourceTree(source, path.join(base, "copy")), /root manifest must declare/);
+    await assert.rejects(prepareBuild({ sourceDir: source, baseDir: base, exec: async () => { assert.fail("tooling must not run"); } }), /root manifest must declare/);
+    const build = await seedBuild(base, "aaaaaaaaaaaaaaaa");
+    await writeFile(path.join(build, "package.json"), "{}");
+    const systemctl = async () => { assert.fail("service must not be touched"); return ""; };
+    await assert.rejects(activateBuild("aaaaaaaaaaaaaaaa", { baseDir: base, systemctl }), /root manifest must declare/);
+    await pointLinkAtomically(deploymentPaths(base).previousLink, build);
+    await assert.rejects(rollbackBuild({ baseDir: base, systemctl }), /root manifest must declare/);
+    assert.equal(await readLinkState(deploymentPaths(base).currentLink), null);
+  } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
+});
+
 test("workspace build validation rejects missing plugin code before any service action", async () => {
   const base = await tempDir("opencode-deploy-incomplete-plugin-");
   try {
     const build = await seedBuild(base, "aaaaaaaaaaaaaaaa");
     await writeFile(path.join(build, "package.json"), JSON.stringify({ workspaces: ["packages/codex-plugin"] }));
+    await rm(path.join(build, "packages/codex-plugin/src/usage.js"));
     await assert.rejects(activateBuild("aaaaaaaaaaaaaaaa", { baseDir: base, systemctl: async () => { assert.fail("service must not be touched"); } }), /incomplete Codex workspace/);
   } finally { await rm(base, { recursive: true, force: true }); }
 });
@@ -209,6 +239,7 @@ test("release inputs reject file and directory symlinks instead of copying unhas
     await symlink("a.ts", path.join(source, "src/link.ts"));
     await assert.rejects(hashSourceTree(source), /regular file or directory/);
     await rm(path.join(source, "src/link.ts"));
+    await rm(path.join(source, "scripts"), { recursive: true });
     await symlink("src", path.join(source, "scripts"));
     await assert.rejects(hashSourceTree(source), /regular directory/);
     await rm(path.join(source, "scripts"));
@@ -309,21 +340,25 @@ test("activate failure restores old target and reports rollback ok", async () =>
   }
 });
 
-test("rollback swaps previous/current so it stays reversible", async () => {
+test("rollback to the deployed workspace layout stays reversible even with its extra root entry", async () => {
   const base = await tempDir("opencode-deploy-rollback-");
   try {
     const paths = deploymentPaths(base);
     const cur = await seedBuild(base, "2222222222222222");
-    const prev = await seedBuild(base, "1111111111111111");
+    const previousBuildId = "6ab67427dc237b56";
+    const prev = await seedBuild(base, previousBuildId);
+    // 0ac3e16's workspace layout contains this extra file; runnable validation
+    // requires the canonical src entry, not absence of other files in old builds.
+    await writeFile(path.join(prev, "packages/codex-plugin/index.js"), 'export { default } from "./src/index.js"\n');
     await pointLinkAtomically(paths.currentLink, cur);
     await pointLinkAtomically(paths.previousLink, prev);
     const first = await rollbackBuild({
       baseDir: base,
       systemctl: async () => "",
-      fetchHealth: async () => ({ ok: true, buildId: "1111111111111111" }),
+      fetchHealth: async () => ({ ok: true, buildId: previousBuildId }),
       timeoutMs: 100,
     });
-    assert.equal(first.buildId, "1111111111111111");
+    assert.equal(first.buildId, previousBuildId);
     assert.equal(first.previousBuildId, "2222222222222222");
     const second = await rollbackBuild({
       baseDir: base,
@@ -406,6 +441,7 @@ test("fresh prepare builds with the locked toolchain before pruning dev dependen
       { cmd: "npm", args: ["ci", "--include=dev"] },
       { cmd: "npm", args: ["run", "build"] },
       { cmd: "npm", args: ["prune", "--omit=dev"] },
+      { cmd: "node", args: ["scripts/verify-integration.mjs"] },
     ]);
     assert.equal(await readFile(path.join(result.path, "dist", "src", "server.js"), "utf8"), "built\n");
     assert.equal((await loadBuildRecord(result.path)).buildId, result.buildId);

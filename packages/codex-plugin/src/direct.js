@@ -14,7 +14,6 @@ import {
 import { UsageUnavailableError, readCodexUsage } from "./usage.js"
 
 export const SESSION_RPC_ID = "codex-sessions"
-export { CODEX_DEFAULT_MODE, CODEX_SESSION_MODES, UsageUnavailableError }
 const MAX_OUTPUT = 65_536
 const MAX_HISTORY = 128
 const MAX_HISTORY_TEXT = 262_144

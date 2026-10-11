@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isZeroCostModel, parseModelRef } from "../src/opencode.js";
+import { isZeroCostModel, parseModelRef } from "../src/runtime/projection.js";
 import { OpenCodeBackend } from "../src/opencode.js";
 import { nativeFixture } from "./native-fixture.js";
 

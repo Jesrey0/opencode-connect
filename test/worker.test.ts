@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { latestResult, OpenCodeBackend, projectAgent } from "../src/opencode.js";
+import { OpenCodeBackend } from "../src/opencode.js";
+import { latestResult } from "../src/runtime/result.js";
+import { projectAgent } from "../src/runtime/projection.js";
 import { fingerprint } from "../src/bounds.js";
 import { nativeFixture, session, user, assistant } from "./native-fixture.js";
 import type { AgentInfo, SessionMessageInfo } from "@opencode/client";

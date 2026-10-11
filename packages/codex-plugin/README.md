@@ -3,10 +3,8 @@
 > **Repository location:** This package is maintained inside the OpenCode Connect
 > monorepo under packages/codex-plugin. Install dependencies using npm ci at
 > the repository root (npm ci --include=dev for development) and test with npm test --workspace opencode-codex-subagent.
-> The October 10 standalone deployment instructions below are historical.
 > Connector activation does not migrate/reload this plugin; coordinated loading
-> and rollback are separate authorized actions. See [architecture](../../docs/architecture.md).
-
+> and rollback are separate authorized actions. See [release lifecycle](../../docs/release-cutover.md).
 
 An OpenCode 2.0.24 V2 plugin that adds **one** external agent name, `codex`, to
 OpenCode's existing built-in `subagent` tool. Codex runs over the Agent Client
@@ -105,7 +103,7 @@ to `ask`.
   "$schema": "https://opencode.ai/config.json",
   "plugins": [
     {
-      "package": "/absolute/path/to/immutable-build/packages/codex-plugin",
+      "package": "/absolute/path/to/immutable-build/packages/codex-plugin/src",
       "options": { "enableCodex": true },
     },
   ],
@@ -176,10 +174,6 @@ stdio path and proves both shutdown paths: a cooperative agent exits on stdin
 EOF without ever being signalled, and an uncooperative agent together with its
 own child is reaped through the owned process group.
 
-`scripts/live-acp-handshake.mjs` performs `initialize`, `session/new`, and the
-forced `session/set_mode` switch against the installed binary. It deliberately
-sends **no** `session/prompt`, so it consumes no model quota.
-
 ## Limitations
 
 - Foreground only on the subagent route. `background: true` is rejected for
@@ -195,36 +189,22 @@ sends **no** `session/prompt`, so it consumes no model quota.
 - Codex is an external backend behind the native `subagent` tool. It is not
   itself selectable as an OpenCode agent and does not create a native child session.
 
-## Verified deployment (October 10, 2026)
+## Loading and release lifecycle
 
-OpenCode 2.0.24 loads the plugin from
-`/home/jesrey0/projects/opencode-codex-subagent/src` using
-`~/.config/opencode/opencode.jsonc`. The Build agent alone has an explicit
-`subagent/codex` allow rule. This project's pinned dependencies are installed
-independently of the earlier metadata-only ACP prototype.
+Configure the immutable release's `packages/codex-plugin/src` directory, not
+the package root. OpenCode 2.0.24's local-directory loader resolves `server` or
+`index` inside that directory; it does not use the package's `main` or `exports`.
+The npm workspace export independently resolves to the same `src/index.js`.
+There is no package-root directory entry wrapper. The pinned loader contract is
+tested without plugin setup or live service access.
+Helpers and the native RPC declaration are imported from their owning source
+modules (`codex.js`, `usage.js`, and `direct.js`), not re-exported by the plugin entry.
 
-Ask the OpenCode Build agent to **use the Codex subagent** for a read-only
-review. It uses the regular `subagent` tool; no extra OpenCode Connect MCP tool
-or Codex connector command is needed.
-
-Live verification against the installed service:
-- `npm test` and `npm run check` exercise the plugin contracts.
-- Real Codex ACP 2.1.1: handshake and the foreground read-only mode switch pass.
-- From a globally configured clean workspace, `subagent(agent="codex")`
-  returned `READY` from an actual minimal Codex turn.
-- The same workspace's native `subagent(agent="explore")` returned
-  `NATIVE_OK` in a real OpenCode child session.
-
-Rollback: restore
-`~/.config/opencode/opencode.jsonc.pre-codex-subagent-20261010`
-over `~/.config/opencode/opencode.jsonc`, then reload OpenCode configuration.
-Keep the source installed until it is no longer loaded.
-
-Codex on the subagent route is intentionally limited to foreground read-only
-tasks without continuation, background queues, or model selection. Writable
-modes and operator-approved permissions belong to direct native sessions, which
-are the operator entry point alongside OpenCode Connect for native OpenCode
-work.
+The operator accepted commit `0ac3e16`, release `6ab67427dc237b56`, on October 11,
+2026 with the plugin loaded from the release's immutable `src` directory. This
+is a dated acceptance record, not a promise about current configuration. See
+the [release lifecycle runbook](../../docs/release-cutover.md) for verification,
+separate connector/plugin rollback, and standalone-checkout retirement gates.
 
 ## Direct operator sessions
 

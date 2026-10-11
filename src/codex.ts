@@ -3,7 +3,6 @@ import type { OpenCodeClient } from "@opencode/client";
 import { AdmissionError, ConnectorError, page, textPage, type PageInput } from "./bounds.js";
 import { pageNextCall } from "./continuation.js";
 import { CodexSessionsDefinition } from "./codexRpc.js";
-export { CodexSessionsDefinition } from "./codexRpc.js";
 
 export type Runtime = "opencode" | "codex";
 export const CODEX_MODES = ["read-only", "workspace-write", "agent", "agent-full-access"] as const;

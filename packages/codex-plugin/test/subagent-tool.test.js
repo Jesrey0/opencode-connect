@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url"
 import { test } from "node:test"
 
 import { createHarness } from "./harness.js"
-import { CODEX_AGENT_NAME } from "../src/index.js"
+import { CODEX_AGENT_NAME } from "../src/codex.js"
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fake-acp-stdio.mjs")
 

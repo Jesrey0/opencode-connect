@@ -11,20 +11,13 @@ export const SERVICE_NAME = "opencode-connect.service";
 export const BUILD_ID_RE = /^[0-9a-f]{16}$/;
 const FIXED_SOURCE_FILES = ["package.json", "package-lock.json", "tsconfig.json"];
 const CODEX_PLUGIN_DIR = path.join("packages", "codex-plugin");
-const CODEX_PLUGIN_FILES = ["package.json", "index.js", "src/index.js", "src/codex.js", "src/direct.js", "src/permissions.js", "src/usage.js", "src/stdio.js"];
-
-async function hasCodexWorkspace(sourceDir: string): Promise<boolean> {
-  try {
-    const manifest = JSON.parse(await fs.readFile(path.join(sourceDir, "package.json"), "utf8"));
-    return manifest.workspaces?.includes("packages/codex-plugin") === true;
-  } catch (error: unknown) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
-    throw error;
-  }
-}
+const CODEX_PLUGIN_FILES = ["package.json", "src/index.js", "src/codex.js", "src/direct.js", "src/permissions.js", "src/usage.js", "src/stdio.js"];
 
 async function assertWorkspacePlugin(sourceDir: string): Promise<void> {
-  if (!await hasCodexWorkspace(sourceDir)) return;
+  const manifest = JSON.parse(await fs.readFile(path.join(sourceDir, "package.json"), "utf8"));
+  if (!Array.isArray(manifest.workspaces) || !manifest.workspaces.includes("packages/codex-plugin")) {
+    throw new Error("incomplete Codex workspace: root manifest must declare packages/codex-plugin");
+  }
   for (const name of CODEX_PLUGIN_FILES) {
     try {
       if (!(await fs.lstat(path.join(sourceDir, CODEX_PLUGIN_DIR, name))).isFile()) throw new Error();
@@ -137,36 +130,17 @@ async function collectSourceFiles(sourceDir: string): Promise<string[]> {
   await assertWorkspacePlugin(sourceDir);
   const found: string[] = [];
   for (const name of FIXED_SOURCE_FILES) {
-    try {
-      const stat = await fs.lstat(path.join(sourceDir, name));
-      if (stat.isSymbolicLink()) throw new Error(`release source must be a regular file: ${name}`);
-      if (stat.isFile()) found.push(name);
-    } catch (error: unknown) {
-      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
-      // missing fixed file: hashing still proceeds; prepare validates later
-    }
+    const stat = await fs.lstat(path.join(sourceDir, name));
+    if (!stat.isFile()) throw new Error(`release source must be a regular file: ${name}`);
+    found.push(name);
   }
   // Build-time scripts and the native Codex plugin are release inputs, not
   // development-only files. The plugin must match the connector RPC build.
   const codexPlugin = path.join(sourceDir, CODEX_PLUGIN_DIR);
   for (const dir of [path.join(sourceDir, "packages"), codexPlugin]) {
-    try {
-      if (!(await fs.lstat(dir)).isDirectory()) throw new Error(`release source must be a regular directory: ${path.relative(sourceDir, dir)}`);
-    } catch (error: unknown) {
-      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
-    }
+    if (!(await fs.lstat(dir)).isDirectory()) throw new Error(`release source must be a regular directory: ${path.relative(sourceDir, dir)}`);
   }
-  for (const name of ["package.json", "index.js"]) {
-    try {
-      const full = path.join(codexPlugin, name);
-      const stat = await fs.lstat(full);
-      if (stat.isSymbolicLink()) throw new Error(`release source must be a regular file: ${path.relative(sourceDir, full)}`);
-      if (stat.isFile()) found.push(path.relative(sourceDir, full));
-    } catch (error: unknown) {
-      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
-      // Historical fixture and connector-only trees have no plugin package.
-    }
-  }
+  found.push(path.join(CODEX_PLUGIN_DIR, "package.json"));
   const stack: string[] = [
     path.join(sourceDir, "src"),
     path.join(sourceDir, "scripts"),
@@ -174,14 +148,8 @@ async function collectSourceFiles(sourceDir: string): Promise<string[]> {
   ];
   while (stack.length > 0) {
     const dir = stack.pop()!;
-    let entries;
-    try {
-      if (!(await fs.lstat(dir)).isDirectory()) throw new Error(`release source must be a regular directory: ${path.relative(sourceDir, dir)}`);
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch (error: unknown) {
-      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") continue;
-      throw error;
-    }
+    if (!(await fs.lstat(dir)).isDirectory()) throw new Error(`release source must be a regular directory: ${path.relative(sourceDir, dir)}`);
+    const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) stack.push(full);
@@ -315,9 +283,6 @@ export async function copySourceTree(sourceDir: string, stageDir: string): Promi
   // Use the same inventory for hashing and copying, including runtime assets.
   // A file cannot be shipped without participating in release identity.
   const files = await collectSourceFiles(sourceDir);
-  for (const name of FIXED_SOURCE_FILES) {
-    if (!files.includes(name)) throw new Error(`missing release source: ${name}`);
-  }
   for (const name of files) {
     const target = path.join(stageDir, name);
     await fs.mkdir(path.dirname(target), { recursive: true });
@@ -388,7 +353,7 @@ export async function prepareBuild(options: {
     await exec("npm", ["ci", "--include=dev"], stage);
     await exec("npm", ["run", "build"], stage);
     await exec("npm", ["prune", "--omit=dev"], stage);
-    if (await hasCodexWorkspace(stage)) await exec("node", ["scripts/verify-integration.mjs"], stage);
+    await exec("node", ["scripts/verify-integration.mjs"], stage);
     if ((await hashSourceTree(stage)).buildId !== buildId) throw new Error("release inputs changed during build; refusing mismatched build identity");
     const record: BuildRecord = {
       buildId,
