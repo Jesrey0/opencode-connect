@@ -12,11 +12,14 @@ import {
   openCodexConnection,
 } from "./codex.js"
 import { UsageUnavailableError, readCodexUsage } from "./usage.js"
+import { MAX_OUTCOME_ROWS, createTurnOutcomeReader } from "./outcomes.js"
 
 export const SESSION_RPC_ID = "codex-sessions"
 const MAX_OUTPUT = 65_536
 const MAX_HISTORY = 128
 const MAX_HISTORY_TEXT = 262_144
+/** Native turn outcomes are recovered for at most this many catalog rows. */
+const MAX_RECOVERED_ROWS = MAX_OUTCOME_ROWS
 /** Bounded per-session permission queue. Codex is serial per session, so a
  * small bound is enough to absorb review latency without becoming a sink. */
 export const MAX_PENDING_PERMISSIONS = 8
@@ -37,6 +40,7 @@ const CAPABILITIES = Object.freeze({
   filesystemClient: false,
   terminalClient: false,
   usageQuota: "codex-app-server",
+  turnOutcomeHistory: "codex-app-server",
 })
 
 export class SessionError extends Error {
@@ -240,6 +244,7 @@ function view(record) {
   return {
     sessionId: record.sessionId, cwd: record.cwd, runtime: "codex", title: record.title ?? null,
     status: record.status, outcome: record.outcome, executionKnown: record.executionKnown,
+    outcomeBasis: record.basis, executionOutcome: executionOutcome(record),
     stopReason: record.stopReason ?? null, assistantMessageId: record.assistantMessageId ?? null,
     output: record.output, outputTruncated: record.outputTruncated,
     completedAtMs: record.completedAtMs ?? null, error: record.error ?? null,
@@ -248,7 +253,40 @@ function view(record) {
   }
 }
 
-export function createCodexSessions({ open, connect = openCodexConnection, timeoutMs = DEFAULT_TIMEOUT_MS, maxConcurrent = 2, ttlMs = 600_000, maxPendingPermissions = MAX_PENDING_PERMISSIONS, readUsage = readCodexUsage, now = Date.now } = {}) {
+/**
+ * Names the authority behind a record's execution state.
+ *
+ * Three provenances, never blended: the ACP prompt response this adapter
+ * supervised, the durable native turn status Codex persisted for a turn it did
+ * not supervise, or no evidence at all. Each basis derives its own execution
+ * outcome, so recovered history is never reported as an observed prompt and an
+ * absent prompt response is never reported as native status.
+ */
+function executionOutcome(record) {
+  if (record.basis === "nativeTurnHistory") return record.turn?.executionOutcome ?? null
+  if (record.basis !== "nativePromptResponse") return null
+  return record.stopReason ?? (record.status === "failed" ? "failed" : null)
+}
+
+/**
+ * Applies one recovered native turn to a record.
+ *
+ * Only a terminal native status is applied, and only to a record that has no
+ * prompt-response evidence of its own: a supervised turn's ACP response is
+ * stronger evidence than a later read of the same thread, so it is never
+ * overwritten here. Anything else leaves the record untouched and unknown.
+ */
+function applyTurnEvidence(record, evidence) {
+  if (!evidence || record.executionKnown) return
+  record.basis = "nativeTurnHistory"
+  record.turn = evidence
+  record.executionKnown = true
+  record.status = evidence.status
+  record.outcome = evidence.outcome
+  record.error = evidence.error
+}
+
+export function createCodexSessions({ open, connect = openCodexConnection, timeoutMs = DEFAULT_TIMEOUT_MS, maxConcurrent = 2, ttlMs = 600_000, maxPendingPermissions = MAX_PENDING_PERMISSIONS, readUsage = readCodexUsage, readTurnOutcomes = createTurnOutcomeReader(), now = Date.now } = {}) {
   const records = new Map(), locks = new Set()
   const lifecycle = new AbortController(), operations = new Set()
   function trackOperation() {
@@ -265,7 +303,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
   }
   function remember(record) { record.touched = now(); records.set(record.sessionId, record); sweep(); return record }
   function fresh(sessionId, cwd) {
-    return { sessionId, cwd, status: "idle", outcome: "unknown", executionKnown: false, output: "", outputTruncated: false, messages: [], historyComplete: true, touched: now(), mode: null, pending: new Map(), waiters: new Set(), maxPending: maxPendingPermissions, now }
+    return { sessionId, cwd, status: "idle", outcome: "unknown", executionKnown: false, basis: "historyReplay", turn: null, output: "", outputTruncated: false, messages: [], historyComplete: true, touched: now(), mode: null, pending: new Map(), waiters: new Set(), maxPending: maxPendingPermissions, now }
   }
   async function connection(cwd, onUpdate, signal, onPermission) {
     if (disposed) throw fail("unavailable", "Codex session adapter is closed")
@@ -304,12 +342,51 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
    * resets a loaded session to its initial mode, so `modes.currentModeId` here
    * describes a transient post-load state, not the mode the session ran under.
    * The record therefore keeps its own mode and never claims one it did not
-   * itself select, and `executionKnown` stays false because loading history
-   * proves nothing about how a past turn ended.
+   * itself select.
    */
   async function load(conn, record, signal) {
     if (!conn.initialized.agentCapabilities?.loadSession) throw fail("unsupported", "Codex does not advertise session loading")
     return conn.request("session/load", { sessionId: record.sessionId, cwd: record.cwd, mcpServers: [] }, signal)
+  }
+  /**
+   * Recovers how the newest native turn of these identities ended.
+   *
+   * ACP history alone proves nothing about a turn's termination, so the outcome
+   * comes from Codex's own durable turn status instead. The read is bounded,
+   * batched and read-only, and it holds no session lock, so it never blocks
+   * execution. A read that fails, is cancelled, or finds nothing leaves the
+   * record unknown rather than guessing an outcome.
+   */
+  async function recoverOutcomes(ids, signal, revisions = {}) {
+    if (disposed || ids.length === 0) return new Map()
+    try {
+      return await readTurnOutcomes.read(ids, { signal, revisions }) ?? new Map()
+    } catch {
+      // A read failure is evidence of nothing. It must not become an outcome.
+      return new Map()
+    }
+  }
+  /**
+   * Attaches native turn evidence to catalog rows.
+   *
+   * A row the adapter supervises keeps its own ACP evidence, and only a bounded
+   * prefix of a page is read at all, so one native batch serves a page instead of
+   * one process per displayed row. Rows without evidence are returned exactly as
+   * the native catalog described them.
+   */
+  async function enrich(rows, signal) {
+    const targets = rows.slice(0, MAX_RECOVERED_ROWS).filter(row => !records.get(row.sessionId)?.executionKnown)
+    if (targets.length === 0) return
+    const evidence = await recoverOutcomes(targets.map(row => row.sessionId), signal,
+      Object.fromEntries(targets.map(row => [row.sessionId, row.updatedAt ?? null])))
+    for (const row of targets) {
+      const turn = evidence.get(row.sessionId)
+      if (!turn) continue
+      Object.assign(row, {
+        status: turn.status, outcome: turn.outcome, executionKnown: true,
+        outcomeBasis: "nativeTurnHistory", executionOutcome: turn.executionOutcome, error: turn.error,
+      })
+    }
   }
   async function recover(sessionId) {
     identity(sessionId); sweep()
@@ -317,10 +394,11 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     if (cached) { cached.touched = now(); return cached }
     if (locks.has(sessionId)) throw fail("busy", "Session admission is in progress")
     locks.add(sessionId)
-    let record
+    let record, updatedAt = null
     try {
       await control(async (conn, signal) => {
         const info = await locate(conn, sessionId)
+        updatedAt = info.updatedAt ?? null
         record = fresh(sessionId, resolveSessionCwd(info.cwd))
         record.title = info.title
         await load(conn, record, signal)
@@ -329,6 +407,10 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
       record.output = assistants.at(-1)?.text ?? ""
       record.outputTruncated = assistants.at(-1)?.truncated ?? false
       record.assistantMessageId = assistants.at(-1)?.id ?? null
+      // Read the outcome after the ACP metadata connection is released: the
+      // native read is a separate bounded transport and must not extend it.
+      applyTurnEvidence(record, (await recoverOutcomes([record.sessionId], undefined,
+        { [record.sessionId]: updatedAt })).get(record.sessionId))
       return remember(record)
     } finally { locks.delete(sessionId) }
   }
@@ -390,7 +472,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
       }
       await applySessionMode(null, record.sessionId, selected.mode, modes, { call: (_client, method, params) => conn.request(method, params, admissionSignal) })
       admissionSignal.throwIfAborted()
-      record.status = "inProgress"; record.executionKnown = true
+      record.status = "inProgress"; record.executionKnown = true; record.basis = "nativePromptResponse"
       record.close = () => conn.close()
       record.conn = conn
       remember(record)
@@ -495,6 +577,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     recovered.mode = current?.mode ?? null
     if (current?.executionKnown && current.assistantMessageId === recovered.assistantMessageId) {
       recovered.status = current.status; recovered.outcome = current.outcome; recovered.executionKnown = true
+      recovered.basis = current.basis; recovered.turn = current.turn
       recovered.output = current.output; recovered.outputTruncated = current.outputTruncated
       recovered.stopReason = current.stopReason; recovered.error = current.error; recovered.completedAtMs = current.completedAtMs
     }
@@ -626,7 +709,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     lifecycle.abort()
     usageController?.abort()
     try {
-      const results = await Promise.allSettled([usageDone, ...operations, ...[...records.values()].filter(r => r.close).map(async r => {
+      const results = await Promise.allSettled([usageDone, readTurnOutcomes.dispose?.(), ...operations, ...[...records.values()].filter(r => r.close).map(async r => {
         r.interruptRequested = true
         r.controller?.abort()
         await r.close()
@@ -638,8 +721,20 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
       for (const r of records.values()) { cancelAll(r); notifyWaiters(r) }
     }
   }
+  /**
+   * Lists native sessions and recovers what is knowable about each turn.
+   *
+   * The ACP catalog page is read first and its connection is released before
+   * any native outcome read begins, so a slow or failing history read can only
+   * cost its own bounded budget. Every failure degrades to the plain catalog row.
+   */
+  async function list(input, context = {}) {
+    const page = await control((conn, signal) => catalog(conn, input, signal), undefined, context.signal)
+    await enrich(page.sessions, context.signal)
+    return page
+  }
   return { start, inspect, wait, interrupt, messages, delete: remove, permissions, respondPermission, usage,
-    list: (input, context = {}) => control((conn, signal) => catalog(conn, input, signal), undefined, context.signal),
+    list,
     status: () => ({ sessions: [...records.values()].map(r => ({ ...view(r), output: "" })), capabilities: CAPABILITIES, pendingActions: [...records.values()].flatMap(pendingActions) }), dispose }
 }
 

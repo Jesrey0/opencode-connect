@@ -20,6 +20,25 @@ function fixture(rpc: (request: NativeRequest) => unknown | Promise<unknown>) {
 const unavailable = () => Response.json({ _tag: "RpcError", type: "codex-sessions.unsupported", message: "PRIVATE backend body" }, { status: 400 });
 const plain = (lines: string[]) => lines.map(stripVTControlCharacters).join("\n");
 
+test("durable Codex terminal outcomes appear beside OpenCode without inferred execution", async () => {
+  const terminal = [
+    { sessionId: "complete", cwd: "/work/codex", title: "Complete", status: "completed", outcome: "completed", executionOutcome: "completed", executionKnown: true, outcomeBasis: "nativeTurnHistory", capabilities },
+    { sessionId: "failure", cwd: "/work/codex", title: "Failure", status: "failed", outcome: "failed", executionOutcome: "failed", executionKnown: true, outcomeBasis: "nativeTurnHistory", capabilities },
+    { sessionId: "stopped", cwd: "/work/codex", title: "Stopped", status: "interrupted", outcome: "incomplete", executionOutcome: "interrupted", executionKnown: true, outcomeBasis: "nativeTurnHistory", capabilities },
+    { sessionId: "unknown", cwd: "/work/codex", title: "Unknown", capabilities },
+  ];
+  const native = fixture(request => request.path.endsWith("/list")
+    ? { output: { sessions: terminal, nextCursor: null } }
+    : { output: { sessions: [] } });
+  const snap = await observe(native.client);
+  for (const [id, expected] of [["complete", "completed"], ["failure", "failed"], ["stopped", "interrupted"], ["unknown", "unverified"]]) {
+    const entry = snap.sessions.find(session => session.id === id)!;
+    assert.equal(sessionStatus(entry), expected, id);
+    assert.equal(entry.running, expected === "unverified" ? null : false);
+  }
+  assert.match(plain(renderFrame(snap, null, emptyState(), 100, 30)), /codex\s+completed\s+Complete/);
+});
+
 test("completed Codex stays visible and selectable beside a large recent OpenCode inventory, after running rows", async () => {
   const recent = Array.from({ length: 24 }, (_, index) => ({
     ...session(), id: `oc-${index}`, time: { created: 1, updated: 10_000 + index, idle: 2 },

@@ -92,8 +92,13 @@ function project(value: Record<string, any>, sessionId?: string) {
   if (sessionId && nativeId !== sessionId) throw new ConnectorError("Codex answered for a different native session");
   if (!statuses.has(value.status) || !outcomes.has(value.outcome)) throw new ConnectorError("Codex returned an invalid session state");
   if (typeof value.output !== "string" || value.output.length > 65_536) throw new ConnectorError("Codex output exceeded its bounded session contract");
-  const basis = value.executionKnown === true ? "nativePromptResponse" as const : "historyReplay" as const;
-  return { sessionId: nativeId, cwd: id(value.cwd), runtime: "codex" as const, status: value.status as "idle" | "inProgress" | "completed" | "failed" | "interrupted", outcome: value.outcome as "unknown" | "completed" | "failed" | "incomplete", outcomeBasis: basis, executionOutcome: value.executionKnown === true ? value.stopReason ?? (value.status === "failed" ? "failed" : null) : null, executionKnown: value.executionKnown === true, model: null, modelVariant: null, agent: "codex", capabilities: capabilities(value.capabilities), title: typeof value.title === "string" ? value.title.slice(0, 512) : null, mode: mode(value.mode) };
+  const known = value.executionKnown === true;
+  if (value.outcomeBasis !== undefined && !["nativePromptResponse", "nativeTurnHistory", "historyReplay"].includes(value.outcomeBasis)) throw new ConnectorError("Codex returned invalid outcome provenance");
+  if (known && value.outcomeBasis === "historyReplay" || !known && ["nativeTurnHistory", "nativePromptResponse"].includes(value.outcomeBasis)) throw new ConnectorError("Codex execution evidence contradicts its provenance");
+  const basis = !known ? "historyReplay" as const : value.outcomeBasis === "nativeTurnHistory" ? "nativeTurnHistory" as const : "nativePromptResponse" as const;
+  if (basis === "nativeTurnHistory" && ({ completed: "completed", failed: "failed", interrupted: "incomplete" } as Record<string, string>)[value.status] !== value.outcome) throw new ConnectorError("Codex historical outcome does not match native turn status");
+  const finish = basis === "nativeTurnHistory" ? ({ completed: "completed", failed: "failed", interrupted: "interrupted" } as Record<string, string>)[value.status] : value.stopReason ?? (value.status === "failed" ? "failed" : null);
+  return { sessionId: nativeId, cwd: id(value.cwd), runtime: "codex" as const, status: value.status as "idle" | "inProgress" | "completed" | "failed" | "interrupted", outcome: value.outcome as "unknown" | "completed" | "failed" | "incomplete", outcomeBasis: basis, executionOutcome: known ? finish : null, executionKnown: known, model: null, modelVariant: null, agent: "codex", capabilities: capabilities(value.capabilities), title: typeof value.title === "string" ? value.title.slice(0, 512) : null, mode: mode(value.mode) };
 }
 export async function codexStart(client: OpenCodeClient, input: { task: string; cwd?: string; sessionId?: string; mode?: CodexMode }) {
   const value = await call(client, "start", input);
@@ -161,7 +166,10 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
       // ACP list metadata has no execution/outcome or archive evidence. Its optional
       // RFC3339 update time can be normalized, never substituted with read time.
       const updated = typeof s.updatedAt === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-]\d\d:\d\d)$/.test(s.updatedAt) ? Date.parse(s.updatedAt) : NaN;
-      return { sessionId: id(s.sessionId), cwd: id(s.cwd), title: typeof s.title === "string" ? s.title.slice(0, 512) : null, runtime: "codex", capabilities: capabilities(s.capabilities), status: null, executionOutcome: null, outcome: "unknown", outcomeBasis: "unavailable", createdAtMs: null, updatedAtMs: Number.isFinite(updated) ? updated : null, idleAtMs: null, archivedAtMs: null };
+      const nativeOutcomes: Record<string, string> = { completed: "completed", failed: "failed", interrupted: "incomplete" };
+      const verified = s.executionKnown === true && s.outcomeBasis === "nativeTurnHistory";
+      if (verified && (nativeOutcomes[s.status] !== s.outcome || s.executionOutcome !== s.status)) throw new ConnectorError("Codex history outcome is inconsistent with native status");
+      return { sessionId: id(s.sessionId), cwd: id(s.cwd), title: typeof s.title === "string" ? s.title.slice(0, 512) : null, runtime: "codex", capabilities: capabilities(s.capabilities), status: verified ? s.status as "completed" | "failed" | "interrupted" : null, executionOutcome: verified ? s.executionOutcome as string : null, executionKnown: verified, outcome: verified ? s.outcome as "completed" | "failed" | "incomplete" : "unknown" as const, outcomeBasis: verified ? "nativeTurnHistory" as const : "unavailable" as const, createdAtMs: null, updatedAtMs: Number.isFinite(updated) ? updated : null, idleAtMs: null, archivedAtMs: null };
     }), cursor: { next: value.nextCursor === null ? null : id(value.nextCursor) } };
   }
   if (input.type === "runtime") return { runtime: "codex", capabilities: capabilities((await call(client, "status", {})).capabilities) };

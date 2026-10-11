@@ -57,11 +57,14 @@ export async function observeCodex(client: OpenCodeClient, readHistory = () => c
   const pending: ConsolePending[] = [];
   const gaps: string[] = [];
   if (history.status === "fulfilled" && "sessions" in history.value && history.value.sessions && history.value.cursor) {
-    for (const entry of history.value.sessions) sessions.set(entry.sessionId, {
-      runtime: "codex", id: entry.sessionId, title: entry.title, running: null,
-      outcome: null, agent: "codex", model: null, variant: null,
-      cwd: entry.cwd, updatedMs: entry.updatedAtMs,
-    });
+    for (const entry of history.value.sessions) {
+      const verified = entry.outcomeBasis === "nativeTurnHistory" && entry.executionKnown === true;
+      sessions.set(entry.sessionId, {
+        runtime: "codex", id: entry.sessionId, title: entry.title, running: verified ? false : null,
+        outcome: verified ? entry.status === "interrupted" ? "interrupted" : entry.outcome === "unknown" ? null : entry.outcome : null, agent: "codex", model: null, variant: null,
+        cwd: entry.cwd, updatedMs: entry.updatedAtMs,
+      });
+    }
     if (history.value.cursor.next) gaps.push("more history not shown");
   } else gaps.push("history unavailable");
   if (supervised.status === "fulfilled") {
@@ -70,8 +73,8 @@ export async function observeCodex(client: OpenCodeClient, readHistory = () => c
       const terminalWithoutOutcome = entry.executionKnown && entry.status !== "idle" && entry.status !== "inProgress" && entry.outcome === "unknown";
       sessions.set(entry.sessionId, {
         runtime: "codex", id: entry.sessionId, title: entry.title ?? previous?.title ?? null,
-        running: entry.executionKnown && !terminalWithoutOutcome ? entry.status === "inProgress" : null,
-        outcome: entry.executionKnown && entry.outcome !== "unknown" ? entry.outcome : null,
+        running: entry.executionKnown && !terminalWithoutOutcome ? entry.status === "inProgress" : previous?.running ?? null,
+        outcome: entry.executionKnown && entry.outcome !== "unknown" ? entry.status === "interrupted" ? "interrupted" : entry.outcome : previous?.outcome ?? null,
         agent: "codex", model: null, variant: null, cwd: entry.cwd,
         updatedMs: previous?.updatedMs ?? null,
       });

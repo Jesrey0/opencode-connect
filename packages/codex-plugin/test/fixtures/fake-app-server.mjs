@@ -14,6 +14,8 @@
  * Environment:
  *   FAKE_RATE_LIMITS   "empty" | "missing-windows" | "untyped" | "throw" | "slow"
  *   FAKE_ACCOUNT       "ok" | "throw" | "null"
+ *   FAKE_THREADS       "completed" | "failed" | "interrupted" | "inProgress"
+ *                     | "empty" | "mismatch" | "error"
  *   FAKE_INITIATE      "refresh" | "approval" | ""  (send one server->client request)
  *   FAKE_EXIT_MODE     "eof" | "ignore" | "term"
  *   FAKE_TARGET        marker file path used by FAKE_EXIT_MODE=ignore
@@ -37,6 +39,22 @@ process.stdin.on("data", (chunk) => {
 
 const rateLimitShape = process.env.FAKE_RATE_LIMITS ?? "ok"
 const accountShape = process.env.FAKE_ACCOUNT ?? "ok"
+const threadShapeName = process.env.FAKE_THREADS ?? "completed"
+
+/**
+ * The durable native history this fake reports for one thread.
+ *
+ * `mismatch` echoes a different thread identity than the client asked about,
+ * `empty` is a thread Codex never turned, and `error` is a rejection carrying
+ * text the client must never surface.
+ */
+function threadShape(threadId) {
+  if (threadShapeName === "error") return { error: { code: -32000, message: "provider secret detail that must not leak" } }
+  if (threadShapeName === "mismatch") return { result: { thread: { id: `${threadId}-other` }, turns: [] } }
+  if (threadShapeName === "empty") return { result: { thread: { id: threadId }, turns: [] } }
+  const status = { completed: "completed", failed: "failed", interrupted: "interrupted", inProgress: "inProgress" }[threadShapeName] ?? "completed"
+  return { result: { thread: { id: threadId }, turns: [{ id: "turn-1", status, items: [], error: null, completedAt: 1_700_000_000 }] } }
+}
 
 function rateLimits() {
   if (rateLimitShape === "throw") return { error: { code: -32000, message: "provider secret detail that must not leak" } }
@@ -153,6 +171,21 @@ async function drain() {
       const shape = account()
       if (shape.error) write({ jsonrpc: "2.0", id, error: shape.error })
       else write({ jsonrpc: "2.0", id, result: shape.result })
+      continue
+    }
+    // The two read-only history methods the turn-outcome reader may send. A
+    // thread ID is echoed only as the identity it was asked for, so a mismatch
+    // is observable on the wire rather than silently accepted.
+    if (method === "thread/read" && typeof params?.threadId === "string") {
+      const shape = threadShape(params.threadId)
+      if (shape.error) write({ jsonrpc: "2.0", id, error: shape.error })
+      else write({ jsonrpc: "2.0", id, result: { thread: shape.result.thread } })
+      continue
+    }
+    if (method === "thread/turns/list" && typeof params?.threadId === "string") {
+      const shape = threadShape(params.threadId)
+      if (shape.error) write({ jsonrpc: "2.0", id, error: shape.error })
+      else write({ jsonrpc: "2.0", id, result: { data: shape.result.turns, nextCursor: null } })
       continue
     }
     // Anything outside the read allowlist is refused, mirroring how a real

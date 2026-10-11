@@ -36,7 +36,8 @@
  *   the fixed `initialized` handshake notification, and
  *   each carries a fixed parameter set supplied here. No caller-supplied
  *   params, so nothing can be steered into a write, a login, or a config
- *   change.
+ *   change. The wire format lives in the shared read-only transport
+ *   (`app-server.js`); this module owns the allowlist.
  * - **`account/read` never refreshes a token.** It is always called with
  *   `refreshToken: false`, so the read cannot mutate local auth state.
  * - **No credentials are read.** `auth.json` is never opened. The app-server
@@ -58,31 +59,34 @@
  *   owned process group).
  */
 
-import { spawnOwnedStdio } from "./stdio.js"
+import {
+  AppServerUnavailableError,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  MAX_REQUEST_TIMEOUT_MS,
+  codexBinary,
+  describeUnexpected,
+  spawnCodexAppServer as spawnAppServer,
+} from "./app-server.js"
 
 /** Bounded read budget; owned-process shutdown has its own bounded grace. */
 export const DEFAULT_USAGE_TIMEOUT_MS = 15_000
 
 /** Hard ceiling on one snapshot regardless of caller input. */
-export const MAX_USAGE_TIMEOUT_MS = 60_000
+export const MAX_USAGE_TIMEOUT_MS = MAX_REQUEST_TIMEOUT_MS
 
-const MAX_STDOUT_BYTES = 1_048_576
-const MAX_BUCKETS = 64
+/** Bounds a caller-supplied timeout into the enforced window. */
+export function boundUsageTimeout(timeoutMs) {
+  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return DEFAULT_USAGE_TIMEOUT_MS
+  return Math.min(MAX_USAGE_TIMEOUT_MS, timeoutMs)
+}
 
-/** Identifies this reader to the app-server without claiming any capability. */
-const CLIENT_INFO = Object.freeze({ name: "opencode-codex-subagent", title: null, version: "0.0.0" })
+/** The quota read's own error, so no other read's failure is ever mistaken for it. */
+export const UsageUnavailableError = AppServerUnavailableError
 
-/**
- * Client capabilities for `initialize`.
- *
- * `experimentalApi: false` keeps the surface to documented methods, and
- * `requestAttestation: false` means the app-server must never ask this client
- * for an attestation token. Nothing else is opted into.
- */
-const INITIALIZE_PARAMS = Object.freeze({
-  clientInfo: CLIENT_INFO,
-  capabilities: Object.freeze({ experimentalApi: false, requestAttestation: false }),
-})
+/** Quota uses the installed CLI; ACP may instead use its bundled Codex CLI. */
+export function resolveCodexBinary(codexPath) {
+  return codexBinary(codexPath)
+}
 
 /**
  * The complete set of requests this client may ever send.
@@ -92,7 +96,6 @@ const INITIALIZE_PARAMS = Object.freeze({
  * write, a login, a config change, or a turn-start do not belong.
  */
 const REQUESTS = Object.freeze({
-  initialize: INITIALIZE_PARAMS,
   // No params at all: this read has no client-declared usage capabilities, so
   // the backend is never asked to record experiment exposure.
   "account/rateLimits/read": undefined,
@@ -100,210 +103,25 @@ const REQUESTS = Object.freeze({
   "account/read": Object.freeze({ refreshToken: false }),
 })
 
-/** Quota uses the installed CLI; ACP may instead use its bundled Codex CLI. */
-export function resolveCodexBinary(codexPath) {
-  if (typeof codexPath === "string" && codexPath.length > 0) return codexPath
-  const fromEnv = process.env.CODEX_PATH
-  if (typeof fromEnv === "string" && fromEnv.length > 0) return fromEnv
-  return "codex"
-}
-
-/** Bounds a caller-supplied timeout into the enforced window. */
-export function boundUsageTimeout(timeoutMs) {
-  if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return DEFAULT_USAGE_TIMEOUT_MS
-  return Math.min(MAX_USAGE_TIMEOUT_MS, timeoutMs)
-}
+/** The methods the quota read adds to the shared transport's `initialize`. */
+export const USAGE_REQUESTS = Object.freeze(Object.keys(REQUESTS))
 
 /**
- * Describes an unexpected failure without reproducing its text.
+ * Spawns `codex app-server` for one quota snapshot.
  *
- * Only the error's own code is used, because a code is a fixed token while a
- * message is free-form and can carry upstream detail. Nothing here reads a
- * file, and the cause is retained for a local operator rather than returned.
- */
-function describeUnexpected(error) {
-  const code = typeof error?.code === "string" && /^[A-Z0-9_]{1,64}$/.test(error.code) ? error.code : null
-  return code
-    ? `The Codex quota read failed (${code}).`
-    : "The Codex quota read failed."
-}
-
-/**
- * Bounded error class for this transport. The message is generated here and
- * never carries a child stderr body or an upstream response payload.
- */
-export class UsageUnavailableError extends Error {
-  constructor(message, { code = "unavailable", detail } = {}) {
-    super(message)
-    this.name = "UsageUnavailableError"
-    this.code = code
-    if (detail !== undefined) this.detail = detail
-  }
-}
-
-/**
- * The only server-initiated responses this client ever produces.
- *
- * Every entry is a refusal. In particular `account/chatgptAuthTokens/refresh`
- * is refused rather than answered, so no credential can leave this process in
- * response to a server request.
- */
-const REFUSAL = Object.freeze({ jsonrpc: "2.0", error: Object.freeze({ code: -32601, message: "This read-only usage client services no server-initiated requests." }) })
-
-/**
- * Spawns `codex app-server` and speaks newline-delimited JSON-RPC over stdio.
- *
- * `spawnCodexAcp` cannot be reused: it launches codex-acp with node and speaks
- * ACP. This is the Codex binary's own JSON-RPC surface, so it gets its own
- * small transport rather than a protocol-shaped wrapper it does not fit.
- *
- * @returns {{ request: (method: string) => Promise<any>, onServerRequest: (fn: (method: string) => void) => void, close: () => Promise<void>, stderr: CodexStderr, isRunning: () => boolean }}
+ * The shared transport supplies the wire format, the server-request refusal,
+ * and the bounded shutdown; this reader supplies only the allowlist above and
+ * the fixed parameters behind it.
  */
 export function spawnCodexAppServer({ codexPath, cwd, env } = {}) {
-  const binary = resolveCodexBinary(codexPath)
-  const owned = spawnOwnedStdio(binary, ["app-server"], { cwd, env })
-  const { child, stderr } = owned
-
-  let nextId = 1
-  const pending = new Map()
-  const serverRequestListeners = new Set()
-  let closing, failure
-  const failPending = (error) => {
-    failure ??= error
-    for (const waiter of pending.values()) {
-      clearTimeout(waiter.timer)
-      waiter.reject(failure)
-    }
-    pending.clear()
-  }
-  child.once("error", () => failPending(new UsageUnavailableError("Could not start the Codex app-server.")))
-  child.once("exit", () => failPending(new UsageUnavailableError("The Codex app-server exited before the usage read completed.")))
-  // Requests are bounded so a misbehaving or hostile app-server cannot make
-  // this map grow without limit.
-  const MAX_IN_FLIGHT = 32
-
-  const send = (message) => {
-    if (closing || failure) throw failure ?? new UsageUnavailableError("The Codex usage read is closed.")
-    if (!owned.isRunning()) throw new UsageUnavailableError("The Codex app-server exited before the usage read completed.")
-    try {
-      child.stdin.write(`${JSON.stringify(message)}\n`)
-    } catch {
-      throw new UsageUnavailableError("Could not write to the Codex app-server.")
-    }
-  }
-
-  const refuse = (id) => {
-    try {
-      child.stdin.write(`${JSON.stringify({ ...REFUSAL, id })}\n`)
-    } catch {}
-  }
-
-  const onLine = (line) => {
-    const text = line.trim()
-    if (!text) return
-    let message
-    try {
-      message = JSON.parse(text)
-    } catch {
-      // A non-JSON line is dropped, never forwarded into an error message.
-      return
-    }
-    if (!message || typeof message !== "object" || Array.isArray(message)) return
-    // A server-initiated request carries both an id and a method. It is
-    // refused unconditionally; only the method name is observed.
-    if (typeof message.method === "string" && (typeof message.id === "number" || typeof message.id === "string")) {
-      for (const listener of serverRequestListeners) listener(message.method.slice(0, 128))
-      refuse(message.id)
-      return
-    }
-    if (message.id === undefined) return // a notification; this read needs none
-    const waiter = pending.get(message.id)
-    if (!waiter) return
-    pending.delete(message.id)
-    clearTimeout(waiter.timer)
-    if (message.error !== undefined) {
-      const code = message.error?.code
-      waiter.reject(
-        new UsageUnavailableError(
-          code === -32601
-            ? "The installed Codex app-server does not support this account read."
-            : "The Codex app-server rejected a read-only account request.",
-          { code: code === -32601 ? "unsupported" : "unavailable" },
-        ),
-      )
-      return
-    }
-    waiter.resolve(message.result)
-  }
-  // readline buffers an unterminated line without a bound. Cap the whole wire
-  // read before decoding, including notifications and malformed JSON.
-  let buffered = Buffer.alloc(0), receivedBytes = 0
-  child.stdout.on("data", chunk => {
-    if (failure || closing) return
-    receivedBytes += chunk.length
-    if (receivedBytes > MAX_STDOUT_BYTES) {
-      buffered = Buffer.alloc(0)
-      failPending(new UsageUnavailableError("The Codex usage response exceeded its bounded wire size."))
-      return
-    }
-    buffered = Buffer.concat([buffered, chunk])
-    let end
-    while ((end = buffered.indexOf(10)) !== -1) {
-      const line = buffered.subarray(0, end).toString("utf8")
-      buffered = buffered.subarray(end + 1)
-      onLine(line)
-    }
+  return spawnAppServer({
+    codexPath,
+    cwd,
+    env,
+    requests: USAGE_REQUESTS,
+    buildParams: (method) => REQUESTS[method],
+    requestTimeoutMs: DEFAULT_USAGE_TIMEOUT_MS,
   })
-  child.stdout.once("end", () => failPending(new UsageUnavailableError("The Codex app-server closed its usage response stream.")))
-
-  const request = (method) => {
-    if (typeof method !== "string" || !Object.hasOwn(REQUESTS, method))
-      throw new UsageUnavailableError("Refusing a method outside the read-only usage allowlist.", { code: "unsupported" })
-    const params = REQUESTS[method]
-    if (pending.size >= MAX_IN_FLIGHT)
-      throw new UsageUnavailableError("The Codex usage read exceeded its bounded number of in-flight requests.")
-    const id = nextId++
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(id)
-        reject(new UsageUnavailableError(`The Codex app-server did not answer "${method}" in time.`))
-      }, boundUsageTimeout(DEFAULT_USAGE_TIMEOUT_MS))
-      timer.unref?.()
-      pending.set(id, { resolve, reject, timer })
-      try {
-        send({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) })
-      } catch (error) {
-        pending.delete(id)
-        clearTimeout(timer)
-        reject(error)
-      }
-    })
-  }
-
-  return {
-    request,
-    initialized: () => send({ jsonrpc: "2.0", method: "initialized", params: {} }),
-    onServerRequest(fn) {
-      serverRequestListeners.add(fn)
-    },
-    stderr,
-    isRunning: owned.isRunning,
-    /**
-     * Escalating bounded shutdown, matching the ACP transport.
-     *
-     * stdin EOF is tried first, because a well-behaved stdio server treats it
-     * as "the client is gone". Only a server that ignores EOF is signalled,
-     * and the signal reaches the whole owned group.
-     */
-    close() {
-      if (closing) return closing
-      failPending(new UsageUnavailableError("The Codex usage read was closed before it completed."))
-      serverRequestListeners.clear()
-      buffered = Buffer.alloc(0)
-      closing = owned.close()
-      return closing
-    },
-  }
 }
 
 // --- Projection -----------------------------------------------------------
@@ -312,6 +130,8 @@ export function spawnCodexAppServer({ codexPath, cwd, env } = {}) {
 // sanitized shape. Each reader is total: a wrong-typed or missing field becomes
 // `null` rather than propagating, so a protocol change degrades the snapshot
 // instead of corrupting it.
+
+const MAX_BUCKETS = 64
 
 const finiteNumber = (value) => (typeof value === "number" && Number.isFinite(value) ? value : null)
 const boolean = (value) => (typeof value === "boolean" ? value : null)

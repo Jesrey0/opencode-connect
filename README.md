@@ -751,11 +751,13 @@ Native worktree branch is an existing Git reference, not a new branch name. Omit
 The read-only terminal console shows both OpenCode and Codex native inventories,
 with runtime-labeled rows and runtime-specific detail routing. Codex combines one
 native history page with supervised workers, including workers absent from that
-page. History-only execution outcomes display as `unverified` and models remain
-unknown: the native history page provides no outcome evidence. A previously
-verified supervised outcome also becomes unverified after the plugin releases
-that in-memory record or restarts; the console does not infer the current turn's
-result from historical messages. Unsupported or
+page. Native ACP history alone has no turn outcome; a separate bounded,
+read-only Codex App Server lookup checks the newest native turn. Historical
+`completed`, `failed`, and `interrupted` states appear only when verified by
+that lookup. Unavailable, in-progress, or mismatched history remains
+`unverified`; models and unsupervised session modes are not inferred.
+ACP still owns execution, and no history read starts or resumes a turn.
+Unsupported or
 disconnected Codex RPC leaves OpenCode visible and marks partial visibility;
 history and supervised-status failures are independent. Codex supervised status uses the five-second fallback cadence, while
 expensive native Codex history discovery is cached for five minutes (including
