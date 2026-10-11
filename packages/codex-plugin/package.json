@@ -13,7 +13,7 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check src/index.js && node --check src/codex.js && node --check src/permissions.js && node --check src/direct.js && node --check src/usage.js && node --check src/stdio.js"
+    "check": "node --check src/index.js && node --check src/codex.js && node --check src/permissions.js && node --check src/direct.js && node --check src/usage.js && node --check src/app-server.js && node --check src/outcomes.js && node --check src/stdio.js"
   },
   "keywords": [
     "opencode",

@@ -86,6 +86,16 @@ it; this plugin never overrides either. `workspace-write`, `agent`, and
 ACP filesystem and terminal delegation stays denied on both routes, because
 Codex performs its tools natively rather than through the client.
 
+## Historical turn outcomes
+
+ACP remains the Codex execution protocol. Historical session reads use a separate
+bounded, read-only Codex App Server lookup (`thread/read` and newest
+`thread/turns/list`) to recover completed, failed, or interrupted turns after
+adapter restart. Results are tied to the native session/thread ID and the ACP
+session revision; a newer turn invalidates a cached outcome. Missing, active,
+or unverifiable history is never labeled as completed. Historical reads never
+select a session mode, run a turn, or answer an approval.
+
 ## Authorization
 
 The backend is inert unless `enableCodex: true`. When disabled, **no tool
