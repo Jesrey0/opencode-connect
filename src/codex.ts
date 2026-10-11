@@ -4,8 +4,10 @@ import { AdmissionError, ConnectorError, page, textPage, type PageInput } from "
 import { pageNextCall } from "./continuation.js";
 
 export type Runtime = "opencode" | "codex";
+export const CODEX_MODES = ["read-only", "workspace-write", "agent", "agent-full-access"] as const;
+export type CodexMode = typeof CODEX_MODES[number];
 const RPC_ID = "codex-sessions";
-const definition = { id: RPC_ID, methods: Object.fromEntries(["start", "inspect", "wait", "interrupt", "delete", "messages", "list", "status"].map(method => [method, { input: z.unknown(), output: z.unknown() }])), events: {} };
+const definition = { id: RPC_ID, methods: Object.fromEntries(["start", "inspect", "wait", "interrupt", "delete", "messages", "list", "status", "permissions", "respondPermission"].map(method => [method, { input: z.unknown(), output: z.unknown() }])), events: {} };
 const CONTROL = /[\x00-\x1f\x7f]/;
 const statuses = new Set(["idle", "inProgress", "completed", "failed", "interrupted"]);
 const outcomes = new Set(["unknown", "completed", "failed", "incomplete"]);
@@ -30,12 +32,33 @@ async function call(client: OpenCodeClient, method: string, input: object, signa
     if (method === "start" && type === "codex-sessions.admission_failed" && typeof error.data?.sessionId === "string") {
       throw new AdmissionError("Codex session exists; reconcile admission before retrying", { sessionId: id(error.data.sessionId), stage: "codexPromptAdmission", promptSubmitted: error.data.promptSubmitted === false ? false : null });
     }
-    throw new ConnectorError(`Codex ${method} failed${type ? ` (${type})` : ""}; details omitted; ${["start", "interrupt", "delete"].includes(method) ? "mutation may have occurred; do not retry automatically" : "retry the read, not a mutation"}`);
+    throw new ConnectorError(`Codex ${method} failed${type ? ` (${type})` : ""}; details omitted; ${["start", "interrupt", "delete", "respondPermission"].includes(method) ? "mutation may have occurred; do not retry automatically" : "retry the read, not a mutation"}`);
   }
+}
+function mode(value: unknown): CodexMode | null {
+  if (value == null) return null;
+  if (!(CODEX_MODES as readonly unknown[]).includes(value)) throw new ConnectorError("Codex returned an invalid native mode");
+  return value as CodexMode;
 }
 function capabilities(value: unknown) {
   const native = record(value);
-  return { continuation: native.continuation === true, exactPromptWait: false, modelSelection: false, permissions: "read-only" as const, events: false };
+  if (native.permissions !== "operator-selected" || !Array.isArray(native.modes) || native.modes.length > 16) throw new ConnectorError("Codex mode capabilities are unavailable");
+  const modes = native.modes.map(raw => {
+    const m = record(raw);
+    return { id: mode(m.id), name: id(m.name), sandboxPolicy: id(m.sandboxPolicy), approvalPolicy: id(m.approvalPolicy), approvalsReviewer: id(m.approvalsReviewer) };
+  });
+  return { continuation: native.continuation === true, exactPromptWait: false, modelSelection: false, permissions: "operator-selected" as const, modes, defaultMode: mode(native.defaultMode), events: false, filesystemClient: false, terminalClient: false };
+}
+function pending(value: unknown, sessionId: string) {
+  if (!Array.isArray(value) || value.length > 8) throw new ConnectorError("Codex returned invalid pending permissions");
+  return value.map(raw => {
+    const r = record(raw), d = record(r.details);
+    if (id(r.sessionId) !== sessionId || !Array.isArray(r.options) || r.options.length > 16) throw new ConnectorError("Codex permission identity is unusable");
+    const text = (v: unknown, limit: number) => { if (v == null) return null; if (typeof v !== "string" || v.length > limit) throw new ConnectorError("Codex permission detail exceeded its bound"); return v; };
+    const strings = (v: unknown) => { if (!Array.isArray(v) || v.length > 32) throw new ConnectorError("Codex permission paths exceeded their bound"); return v.map(p => { if (typeof p !== "string") throw new ConnectorError("Codex permission path is invalid"); return text(p, 4096)!; }); };
+    const details = { command: text(d.command, 16384), cwd: text(d.cwd, 4096), locations: strings(d.locations), content: text(d.content, 16384), truncated: d.truncated === true, truncatedFields: strings(d.truncatedFields) };
+    return { requestId: id(r.requestId), sessionId, action: text(r.action, 512), resources: strings(r.resources), message: text(r.message, 16384), details, options: r.options.map(o => { const option = record(o); return { optionId: id(option.optionId), name: text(option.name, 256), kind: text(option.kind, 64) }; }), reviewable: r.reviewable === true && !details.truncated, createdAtMs: typeof r.createdAtMs === "number" ? r.createdAtMs : null };
+  });
 }
 function project(value: Record<string, any>, sessionId?: string) {
   const nativeId = id(value.sessionId);
@@ -43,20 +66,21 @@ function project(value: Record<string, any>, sessionId?: string) {
   if (!statuses.has(value.status) || !outcomes.has(value.outcome)) throw new ConnectorError("Codex returned an invalid session state");
   if (typeof value.output !== "string" || value.output.length > 65_536) throw new ConnectorError("Codex output exceeded its bounded session contract");
   const basis = value.executionKnown === true ? "nativePromptResponse" as const : "historyReplay" as const;
-  return { sessionId: nativeId, cwd: id(value.cwd), runtime: "codex" as const, status: value.status as "idle" | "inProgress" | "completed" | "failed" | "interrupted", outcome: value.outcome as "unknown" | "completed" | "failed" | "incomplete", outcomeBasis: basis, executionOutcome: value.executionKnown === true ? value.stopReason ?? (value.status === "failed" ? "failed" : null) : null, executionKnown: value.executionKnown === true, model: null, modelVariant: null, agent: "codex", capabilities: capabilities(value.capabilities), title: typeof value.title === "string" ? value.title.slice(0, 512) : null };
+  return { sessionId: nativeId, cwd: id(value.cwd), runtime: "codex" as const, status: value.status as "idle" | "inProgress" | "completed" | "failed" | "interrupted", outcome: value.outcome as "unknown" | "completed" | "failed" | "incomplete", outcomeBasis: basis, executionOutcome: value.executionKnown === true ? value.stopReason ?? (value.status === "failed" ? "failed" : null) : null, executionKnown: value.executionKnown === true, model: null, modelVariant: null, agent: "codex", capabilities: capabilities(value.capabilities), title: typeof value.title === "string" ? value.title.slice(0, 512) : null, mode: mode(value.mode) };
 }
-export async function codexStart(client: OpenCodeClient, input: { task: string; cwd?: string; sessionId?: string }) {
+export async function codexStart(client: OpenCodeClient, input: { task: string; cwd?: string; sessionId?: string; mode?: CodexMode }) {
   const value = await call(client, "start", input);
   if (input.sessionId && value.sessionId !== input.sessionId) throw new ConnectorError("Codex continued a different native session; reconcile admission before retrying");
+  if (input.mode && value.mode !== input.mode) throw new ConnectorError("Codex admitted a different native mode; reconcile admission before retrying");
   if (value.status !== "inProgress" || value.messageId !== null) throw new ConnectorError("Codex returned unusable prompt admission evidence");
-  return { runtime: "codex" as const, sessionId: id(value.sessionId), messageId: null, cwd: id(value.cwd), status: "inProgress" as const, model: null, modelVariant: null, agent: "codex", capabilities: capabilities(value.capabilities) };
+  return { runtime: "codex" as const, sessionId: id(value.sessionId), messageId: null, cwd: id(value.cwd), status: "inProgress" as const, model: null, modelVariant: null, agent: "codex", mode: mode(value.mode), capabilities: capabilities(value.capabilities) };
 }
 export type CodexInspectInput = { sessionId: string; messageId?: string; detail?: "semantic" | "result"; textOffset?: number; textLimit?: number; textFingerprint?: string; selectionCursor?: string; candidateAssistantMessageId?: string; selectionFingerprint?: string };
 function inspection(value: Record<string, any>, input: CodexInspectInput) {
   const session = project(value, input.sessionId);
   const paged = textPage(value.output, input.textOffset, input.textLimit, input.textFingerprint);
   const result = { ...paged, outcome: session.outcome, outcomeBasis: session.outcomeBasis, messageId: null, assistantMessageId: value.assistantMessageId === null ? null : id(value.assistantMessageId), correlationSupported: false as const, terminal: session.executionKnown && session.status !== "inProgress", finish: typeof value.stopReason === "string" ? value.stopReason.slice(0, 64) : null, completedAtMs: typeof value.completedAtMs === "number" ? value.completedAtMs : null, error: value.error ? { type: errorType(value.error) ?? "unavailable", messageOmitted: true } : null, outputTruncated: value.outputTruncated === true, textNextCall: pageNextCall("opencode.inspect", { runtime: "codex", sessionId: input.sessionId, detail: "result", ...(input.textLimit ? { textLimit: input.textLimit } : {}) }, paged) };
-  return { session, result };
+  return { session, result, pendingActions: pending(value.pendingActions, session.sessionId) };
 }
 export async function codexInspect(client: OpenCodeClient, input: CodexInspectInput) {
   if (input.messageId || input.selectionCursor || input.candidateAssistantMessageId || input.selectionFingerprint) throw new ConnectorError("Codex exact-prompt result selection is unsupported; query native messages by ID instead");
@@ -67,12 +91,18 @@ export async function codexWait(client: OpenCodeClient, sessionId: string, messa
   const value = await call(client, "wait", { sessionId, waitMs }, signal);
   const inspected = inspection(value, { sessionId });
   const state = !inspected.session.executionKnown ? "unknown" as const : inspected.session.status === "inProgress" ? "active" as const : "terminal" as const;
-  return { runtime: "codex" as const, sessionId, messageId: null, state, wakeReason: state === "unknown" ? "executionUnavailable" as const : state === "active" ? "timeout" as const : "terminal" as const, ...inspected };
+  return { runtime: "codex" as const, sessionId, messageId: null, state, wakeReason: state === "unknown" ? "executionUnavailable" as const : state === "active" ? inspected.pendingActions.length ? "actionRequired" as const : "timeout" as const : "terminal" as const, ...inspected };
 }
-export async function codexAct(client: OpenCodeClient, action: string, sessionId: string) {
-  if (!["interrupt", "delete"].includes(action)) throw new ConnectorError(`Codex session action ${action} is unsupported`);
-  const value = await call(client, action, { sessionId });
+export async function codexAct(client: OpenCodeClient, input: { action: string; sessionId: string; requestId?: string; optionId?: string; decision?: string; message?: string }) {
+  const { action, sessionId } = input;
+  if (!["interrupt", "delete", "respondPermission"].includes(action)) throw new ConnectorError("Codex session action " + action + " is unsupported");
+  if (action === "respondPermission" && (!input.optionId || !input.requestId || input.decision !== undefined || input.message !== undefined)) throw new ConnectorError("Codex permission replies require an exact native optionId and requestId");
+  const value = await call(client, action, { sessionId, ...(action === "respondPermission" ? { requestId: input.requestId, optionId: input.optionId } : {}) });
   if (id(value.sessionId) !== sessionId) throw new ConnectorError("Codex answered for a different native session");
+  if (action === "respondPermission") {
+    if (value.accepted !== true || value.requestId !== input.requestId || value.optionId !== input.optionId) throw new ConnectorError("Codex permission response was not confirmed; reconcile the request");
+    return { action: "respondPermission" as const, runtime: "codex" as const, sessionId, requestId: id(value.requestId), optionId: id(value.optionId), accepted: true as const };
+  }
   if (action === "delete") {
     if (value.deleted !== true) throw new ConnectorError("Codex deletion was not confirmed");
     return { action: "delete" as const, runtime: "codex" as const, sessionId, deleted: true as const };
@@ -83,7 +113,7 @@ export async function codexAct(client: OpenCodeClient, action: string, sessionId
 export async function codexStatus(client: OpenCodeClient) {
   const value = await call(client, "status", {});
   if (!Array.isArray(value.sessions) || value.sessions.length > 64) throw new ConnectorError("Codex returned an invalid supervised session inventory");
-  return value.sessions.map(entry => ({ ...project(record(entry)), retry: null, retryReadError: null, outcomeEvidence: { basis: record(entry).executionKnown ? "nativePromptResponse" : "historyReplay" }, nextCall: null }));
+  return value.sessions.map(entry => ({ ...project(record(entry)), pendingActions: pending(record(entry).pendingActions, id(record(entry).sessionId)), retry: null, retryReadError: null, outcomeEvidence: { basis: record(entry).executionKnown ? "nativePromptResponse" : "historyReplay" }, nextCall: null }));
 }
 export async function codexQuery(client: OpenCodeClient, input: { type: string; sessionId?: string; messageId?: string; cwd?: string; cursor?: string; order?: "asc" | "desc"; searchTerm?: string; textOffset?: number; textLimit?: number; textFingerprint?: string; section?: string; field?: string } & PageInput) {
   if (input.type === "sessions") {
@@ -96,9 +126,13 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
   if (input.type === "runtime") return { runtime: "codex", capabilities: capabilities((await call(client, "status", {})).capabilities) };
   if (input.type === "session") return (await codexInspect(client, { sessionId: id(input.sessionId) })).session;
   if (input.type === "permissions") {
-    if (input.section && input.section !== "summary") throw new ConnectorError("Codex exposes adapter policy only; OpenCode permission-rule operations are unsupported");
-    await codexInspect(client, { sessionId: id(input.sessionId) });
-    return { sessionId: input.sessionId, runtime: "codex", source: "adapter", mode: "read-only", permissionRequests: "deny", filesystemClient: false, terminalClient: false };
+    if (input.section && !["summary", "pending"].includes(input.section)) throw new ConnectorError("Codex exposes native mode selection and pending requests, not OpenCode permission rules");
+    const sessionId = id(input.sessionId), value = await call(client, "permissions", { sessionId });
+    if (id(value.sessionId) !== sessionId) throw new ConnectorError("Codex answered for a different native session");
+    const requests = pending(value.pendingActions, sessionId);
+    if (input.section === "pending") return { sessionId, runtime: "codex", ...page(requests, input) };
+    const caps = capabilities(value.capabilities), selected = mode(value.mode);
+    return { sessionId, runtime: "codex", source: "adapterSelection", mode: selected, modeKnown: selected !== null, policy: selected ? caps.modes.find(m => m.id === selected) ?? null : null, permissionRequests: "operatorWhenRequested", filesystemClient: false, terminalClient: false };
   }
   if (["messages", "message"].includes(input.type)) {
     if (input.cursor || input.field) throw new ConnectorError("Codex message history uses bounded fingerprint pagination and has no compaction fields");

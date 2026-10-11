@@ -8,13 +8,18 @@ import { HostBackend } from "../src/host.js";
 import { outputSchemas } from "../src/results.js";
 import { nativeFixture, type NativeRequest } from "./native-fixture.js";
 
-const capabilities = { continuation: true, exactPromptWait: false, modelSelection: false, permissions: "read-only", events: false };
-const snapshot = { sessionId: "native-thread", cwd: "/tmp", status: "completed", outcome: "completed", executionKnown: true, output: "answer", outputTruncated: false, assistantMessageId: "native-assistant", stopReason: "end_turn", completedAtMs: 1, error: null, capabilities };
+const capabilities = { continuation: true, exactPromptWait: false, modelSelection: false, permissions: "operator-selected", events: false, defaultMode: "agent", modes: [
+  { id: "read-only", name: "Read-only", sandboxPolicy: "readOnly", approvalPolicy: "on-request", approvalsReviewer: "user" },
+  { id: "workspace-write", name: "Workspace access", sandboxPolicy: "workspaceWrite", approvalPolicy: "on-request", approvalsReviewer: "user" },
+  { id: "agent", name: "Auto review", sandboxPolicy: "workspaceWrite", approvalPolicy: "on-request", approvalsReviewer: "auto_review" },
+  { id: "agent-full-access", name: "Full access", sandboxPolicy: "dangerFullAccess", approvalPolicy: "never", approvalsReviewer: "user" },
+] };
+const snapshot = { sessionId: "native-thread", cwd: "/tmp", status: "completed", outcome: "completed", executionKnown: true, output: "answer", outputTruncated: false, assistantMessageId: "native-assistant", stopReason: "end_turn", completedAtMs: 1, error: null, capabilities, mode: "agent", pendingActions: [] };
 function fixture(handler: (request: NativeRequest) => unknown = () => undefined) {
   return nativeFixture(request => {
     assert.ok(request.path.startsWith("/api/rpc/codex-sessions/"), request.path);
     const custom = handler(request); if (custom !== undefined) return custom;
-    if (request.path.endsWith("/start")) return { output: { sessionId: "native-thread", cwd: "/tmp", status: "inProgress", messageId: null, capabilities } };
+    if (request.path.endsWith("/start")) return { output: { sessionId: "native-thread", cwd: "/tmp", status: "inProgress", messageId: null, capabilities, mode: "agent" } };
     if (request.path.endsWith("/interrupt")) return { output: { sessionId: "native-thread", interrupted: true } };
     return { output: snapshot };
   });
@@ -81,4 +86,60 @@ test("MCP removes job actions and enforces OpenCode prompt identity requirements
     ] as const) assert.equal((await client.callTool({ name, arguments: args })).isError, true);
     assert.equal(f.requests.length, before);
   } finally { await client.close(); await server.close(); }
+});
+
+const permission = {
+  sessionId: "native-thread", requestId: "native-request", action: "Run command",
+  resources: [], message: null, details: { command: "npm test", cwd: "/tmp", locations: [], content: null, truncated: false, truncatedFields: [] },
+  options: [{ optionId: "accept_execpolicy_amendment", name: "Remember", kind: "allow_always" }, { optionId: "native-once", name: "Proceed", kind: "allow_once" }],
+  reviewable: true, createdAtMs: 1,
+};
+test("pending Codex approvals wake waits and retain native options without raw configuration", async () => {
+  const f = fixture(request => {
+    if (request.path.endsWith("/permissions")) return { output: { sessionId: "native-thread", mode: "workspace-write", pendingActions: [permission], capabilities } };
+    return { output: { ...snapshot, status: "inProgress", outcome: "unknown", stopReason: null, pendingActions: [{ ...permission, config: { apiKey: "SECRET" } }] } };
+  });
+  const backend = new OpenCodeBackend(f.connect);
+  const waited = await backend.wait("native-thread", undefined, undefined, "codex");
+  outputSchemas.wait.parse(waited);
+  assert.equal(waited.wakeReason, "actionRequired");
+  assert.equal(waited.pendingActions[0].details.command, "npm test");
+  assert.equal(JSON.stringify(waited).includes("SECRET"), false);
+  const result = await backend.query([{ runtime: "codex", type: "permissions", section: "pending", sessionId: "native-thread" }]);
+  assert.equal((result.results[0].result as any).data[0].options[0].optionId, "accept_execpolicy_amendment");
+});
+test("MCP routes exact Codex options and rejects mixing runtime decision formats before admission", async () => {
+  const f = fixture(request => {
+    if (request.path.endsWith("/start")) return { output: { sessionId: "native-thread", cwd: "/tmp", status: "inProgress", messageId: null, capabilities, mode: (request.body as any).input.mode ?? "agent" } };
+    if (request.path.endsWith("/respondPermission")) return { output: { ...(request.body as any).input, accepted: true } };
+    if (request.path.endsWith("/list")) return { output: { sessions: [], nextCursor: null } };
+  });
+  const server = createServer(new OpenCodeBackend(f.connect), new HostBackend(f.connect));
+  const client = new Client({ name: "codex-mode-contract", version: "1" });
+  const [a,b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
+  try {
+    const admitted = await client.callTool({ name: "opencode.start", arguments: { runtime: "codex", cwd: "/tmp", task: "implement", mode: "workspace-write" } });
+    assert.notEqual(admitted.isError, true);
+    assert.equal((admitted.structuredContent as any).mode, "workspace-write");
+    const accepted = await client.callTool({ name: "opencode.act", arguments: { runtime: "codex", action: "respondPermission", sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
+    assert.notEqual(accepted.isError, true);
+    assert.deepEqual(f.requests.at(-1)?.body, { input: { sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
+    const inventory = await client.callTool({ name: "opencode.query", arguments: { queries: [{ runtime: "codex", type: "sessions" }] } });
+    assert.notEqual(inventory.isError, true);
+    assert.equal("error" in (inventory.structuredContent as any).results[0], false);
+    const before = f.requests.length;
+    for (const args of [
+      { runtime: "codex", action: "respondPermission", sessionId: "native-thread", requestId: "native-request", decision: "once" },
+      { action: "respondPermission", sessionId: "native-thread", requestId: "native-request", optionId: "native-once" },
+      { runtime: "codex", action: "respondPermission", sessionId: "native-thread", requestId: "native-request", decision: "always", optionId: "native-once" },
+    ]) assert.equal((await client.callTool({ name: "opencode.act", arguments: args })).isError, true);
+    assert.equal((await client.callTool({ name: "opencode.start", arguments: { cwd: "/tmp", task: "native", model: "openai/model", mode: "agent" } })).isError, true);
+    assert.equal(f.requests.length, before);
+  } finally { await client.close(); await server.close(); }
+});
+test("Codex mode mismatches and foreign permission sessions fail instead of hiding identity loss", async () => {
+  const wrongMode = fixture(request => request.path.endsWith("/start") ? { output: { sessionId: "native-thread", cwd: "/tmp", status: "inProgress", messageId: null, capabilities, mode: "agent-full-access" } } : undefined);
+  await assert.rejects(new OpenCodeBackend(wrongMode.connect).start({ runtime: "codex", cwd: "/tmp", task: "review", mode: "read-only" }), /different native mode/);
+  const wrongSession = fixture(() => ({ output: { ...snapshot, pendingActions: [{ ...permission, sessionId: "other-session" }] } }));
+  await assert.rejects(new OpenCodeBackend(wrongSession.connect).inspect({ runtime: "codex", sessionId: "native-thread" }), /permission identity/);
 });

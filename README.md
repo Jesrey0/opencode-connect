@@ -518,7 +518,9 @@ uncertain admission or mutation; reconcile native state first.
 
 Use `opencode.start` with `runtime: "codex"`, `task`, and an existing absolute
 `cwd`. Admission returns the actual native Codex `sessionId` after session setup
-and read-only mode enforcement. ACP prompt execution continues asynchronously;
+and native mode selection. Fresh sessions default to native `agent` mode.
+Optional `mode` selects `read-only`, `workspace-write`, `agent`, or
+`agent-full-access`. ACP prompt execution continues asynchronously;
 `messageId` is null because ACP does not return a canonical user prompt ID at
 admission. Retain the runtime and session ID together. Never retry uncertain
 admission automatically; a known session ID remains available for reconciliation.
@@ -528,12 +530,15 @@ They observe the current session turn, not an exact historical prompt. Omit
 `messageId`; `capabilities.exactPromptWait` is false. Results retain the native
 assistant ID when available, bounded text pagination and explicit truncation.
 Wait is bounded to 40 seconds. A terminal result distinguishes native prompt
-completion from objective success. After adapter restart or cache eviction,
+completion from objective success. Pending native permissions wake wait with
+`actionRequired` and appear in `pendingActions`. After adapter restart or cache eviction,
 native conversation history is recoverable, but execution termination evidence
 is unavailable: outcome stays unknown and wait returns `executionUnavailable`.
 
 Continue an idle session with `opencode.start runtime: "codex" sessionId task`.
-Continuation inherits cwd and reapplies read-only mode. Interrupt with
+Continuation inherits cwd and the locally known mode. If selection was lost
+after cache eviction or restart, continuation requires an explicit `mode`;
+native history does not prove the previous selection. Interrupt with
 `opencode.act action: "interrupt"`; this preserves the conversation. Execution
 capacity remains reserved until the ACP process is reaped. Delete an idle native
 session with `action: "delete"`. The plugin has two execution slots, one bounded
@@ -541,7 +546,7 @@ metadata connection, and a 64-entry expiring supervision cache. Cache eviction
 never deletes native Codex sessions.
 
 `query sessions/session/messages/message`, `query runtime`, and
-`query permissions section: "summary"` accept `runtime: "codex"`. Native history
+`query permissions section: "summary"` or `"pending"` accept `runtime: "codex"`. Native history
 replay supplies canonical user and assistant IDs. Message inventories page a
 bounded history snapshot with offsets and fingerprints; full text recovery uses
 native message IDs. `historyComplete: false` and `outputTruncated` disclose
@@ -549,9 +554,21 @@ retention limits. Missing exact messages fail without selecting another result.
 Session inventories use the ACP native cursor. `status runtime: "codex"` reports
 locally supervised sessions; native inventories use `query sessions`.
 
-Codex inherits its own configured model and runs read-only. Permission requests
-are denied; ACP filesystem and terminal client access remain disabled. Model,
-agent and permission selection, fork, attachments, active steering, inbox,
+Codex inherits its own configured model and uses native sandbox and approval
+presets. Native `agent` grants workspace writes with automatic approval review;
+`workspace-write` routes escalation to the operator, `read-only` selects the
+native read-only sandbox, and `agent-full-access` explicitly disables sandbox
+and approval checks. Choose full access only for an authorized need.
+
+Answer pending permissions with `opencode.act action: "respondPermission"`,
+`runtime: "codex"`, the owning `sessionId`, `requestId`, and exact offered
+`optionId`. Native options are not translated to OpenCode decisions. Inspect
+the bounded command or diff first; truncated requests cannot be approved.
+Stale, foreign, and duplicate replies fail. Handle requests within the task
+authority without repeatedly interrupting the user for routine implementation.
+
+Codex executes native tools; ACP filesystem and terminal client access remain
+disabled. Model and agent selection, fork, attachments, active steering, inbox,
 compaction and MCP Events are not exposed for Codex. Unsupported operations fail
 explicitly instead of reaching OpenCode or fabricating IDs. Ordinary native
 OpenCode operations retain their existing behavior.

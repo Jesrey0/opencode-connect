@@ -14,7 +14,7 @@ import {
   type SessionInboxInfo,
 } from "@opencode/client";
 import { connectNative, OPENCODE_RELEASE, type Connect } from "./native.js";
-import { codexStart, codexInspect, codexWait, codexAct, codexQuery, codexStatus, type Runtime } from "./codex.js";
+import { codexStart, codexInspect, codexWait, codexAct, codexQuery, codexStatus, type Runtime, type CodexMode } from "./codex.js";
 import { page, textPage, type PageInput, integer, fingerprint, checkFingerprint, safeError, AdmissionError, CatalogError, TEXT_LIMIT, MESSAGE_PREVIEW_LIMIT, COMPACTION_PREVIEW_LIMIT, MESSAGE_TOOL_PREVIEW_LIMIT } from "./bounds.js";
 import { nextCall, pageNextCall, queryNextCall } from "./continuation.js";
 import { compactAgent, contextualPage, permissionSummary } from "./catalog.js";
@@ -43,6 +43,7 @@ async function readAgent(client: Client, agentId: string, cwd?: string) {
 
 export type StartInput = {
   runtime?: Runtime;
+  mode?: CodexMode;
   task: string;
   model?: string;
   cwd?: string;
@@ -98,7 +99,7 @@ export type ActInput = (
   | ({ action: "command"; sessionId: string; name: string; text: string; delivery?: "steer" | "queue" } & PromptAttachments)
   | { action: "invokeSkill"; sessionId: string; skillId: string; resume?: boolean }
   | { action: "interrupt"; sessionId: string }
-  | { action: "respondPermission"; sessionId: string; requestId: string; decision: "once" | "always" | "reject"; message?: string }
+  | { action: "respondPermission"; sessionId: string; requestId: string; decision?: "once" | "always" | "reject"; message?: string; optionId?: string }
   | { action: "respondForm"; sessionId: string; formId: string; answer: Record<string, string | number | boolean | string[]> }
   | { action: "cancelForm"; sessionId: string; formId: string }
   | { action: "delete"; sessionId: string }
@@ -572,13 +573,14 @@ export class OpenCodeBackend {
     }
   }
 
-  async status(runtime: "codex"): Promise<{ ready: true; opencodeRelease: string; serverPid: number; workers: Awaited<ReturnType<typeof codexStatus>>; pendingActions: never[] }>;
+  async status(runtime: "codex"): Promise<{ ready: true; opencodeRelease: string; serverPid: number; workers: Awaited<ReturnType<typeof codexStatus>>; pendingActions: Array<Record<string, unknown>> }>;
   async status(runtime?: "opencode"): Promise<Awaited<ReturnType<OpenCodeBackend["statusNative"]>>>;
-  async status(runtime?: Runtime): Promise<Awaited<ReturnType<OpenCodeBackend["statusNative"]>> | { ready: true; opencodeRelease: string; serverPid: number; workers: Awaited<ReturnType<typeof codexStatus>>; pendingActions: never[] }>;
-  async status(runtime: Runtime = "opencode") {
+  async status(runtime?: Runtime): Promise<Awaited<ReturnType<OpenCodeBackend["statusNative"]>> | { ready: true; opencodeRelease: string; serverPid: number; workers: Awaited<ReturnType<typeof codexStatus>>; pendingActions: Array<Record<string, unknown>> }>;
+  async status(runtime: Runtime = "opencode"): Promise<Awaited<ReturnType<OpenCodeBackend["statusNative"]>> | { ready: true; opencodeRelease: string; serverPid: number; workers: Awaited<ReturnType<typeof codexStatus>>; pendingActions: Array<Record<string, unknown>> }> {
     if (runtime !== "codex") return this.statusNative();
     const { client, info } = await this.connect();
-    return { ready: true as const, opencodeRelease: info.version, serverPid: info.pid, workers: await codexStatus(client), pendingActions: [] as never[] };
+    const workers = await codexStatus(client);
+    return { ready: true as const, opencodeRelease: info.version, serverPid: info.pid, workers, pendingActions: workers.flatMap(worker => worker.pendingActions) };
   }
   private async statusNative() {
     const { client, info } = await this.connect();
@@ -630,8 +632,9 @@ export class OpenCodeBackend {
       for (const field of ["model", "agent", "variant", "permissions", "forkFromSessionId", "beforeMessageId", "title", "files", "agents", "skills"] as const) if (input[field] !== undefined) throw new Error(`Codex start field ${field} is unsupported`);
       if (input.cwd) await assertDirectory(input.cwd);
       const { client } = await this.connect();
-      return codexStart(client, { task: input.task, ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.sessionId ? { sessionId: input.sessionId } : {}) });
+      return codexStart(client, { task: input.task, ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.sessionId ? { sessionId: input.sessionId } : {}), ...(input.mode !== undefined ? { mode: input.mode } : {}) });
     }
+    if (input.mode !== undefined) throw new Error("mode selects a Codex preset; OpenCode uses canonical permission rules");
     return this.startNative(input);
   }
   private async startNative(input: StartInput) {
@@ -1060,7 +1063,7 @@ export class OpenCodeBackend {
   async act(input: ActInput): Promise<Awaited<ReturnType<typeof codexAct>> | Awaited<ReturnType<OpenCodeBackend["actNative"]>>>;
   async act(input: ActInput) {
     if (input.runtime !== "codex") return this.actNative(input);
-    return codexAct((await this.connect()).client, input.action, input.sessionId);
+    return codexAct((await this.connect()).client, input);
   }
   private async actNative(input: ActInput) {
     const { client } = await this.connect();
@@ -1157,6 +1160,7 @@ export class OpenCodeBackend {
       return { action: input.action, sessionId: input.sessionId, interrupted: result.interrupted };
     }
     if (input.action === "respondPermission") {
+      if (!input.decision || input.optionId !== undefined) throw new Error("OpenCode permission replies require decision, not optionId");
       if (!(await client.permission.list({ sessionID: session.id })).some((entry) => entry.id === input.requestId && entry.sessionID === session.id)) throw new Error("permission request absent from targeted session");
       await client.permission.reply({ sessionID: input.sessionId, requestID: input.requestId, decision: input.decision, message: input.message });
       return { action: input.action, sessionId: input.sessionId, requestId: input.requestId, accepted: true };

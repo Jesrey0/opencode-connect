@@ -10,6 +10,7 @@ import { ProtocolErrorCode, ProtocolError } from "@modelcontextprotocol/server";
 import { Events, EVENT_NAME, eventArgumentsSchema } from "./events.js";
 import type { ServerContext, ContentBlock } from "@modelcontextprotocol/server";
 import { outputSchemas } from "./results.js";
+import { CODEX_MODES } from "./codex.js";
 
 const runtimeSchema = z.enum(["opencode", "codex"]).optional().describe("Session runtime; omission selects OpenCode. Codex uses native ACP session IDs and advertises its narrower capabilities.");
 
@@ -77,7 +78,7 @@ export const querySchema = exposedUnion("type", [
   z.object({ runtime: runtimeSchema,
     type: z.literal("sessions"),
     cursor: z.string().min(1).optional(),
-    limit: z.number().int().min(1).max(50).default(25),
+    limit: z.number().int().min(1).max(50).optional().meta({ default: 25 }),
     cwd: z.string().min(1).optional(),
     searchTerm: z.string().min(1).optional(),
   }),
@@ -97,9 +98,10 @@ export const actSchema = exposedUnion("action", [
     action: z.literal("respondPermission"),
     sessionId: z.string().min(1),
     requestId: z.string().min(1),
-    decision: z.enum(["once", "always", "reject"]),
+    decision: z.enum(["once", "always", "reject"]).optional(),
+    optionId: z.string().min(1).max(512).optional().describe("Codex only: an exact optionId advertised by this pending native request."),
     message: z.string().optional(),
-  }),
+  }).refine(input => input.runtime === "codex" ? !!input.optionId && input.decision === undefined && input.message === undefined : !!input.decision && input.optionId === undefined, { message: "Codex requires optionId; OpenCode requires decision" }).meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { required: ["optionId"], not: { anyOf: [{ required: ["decision"] }, { required: ["message"] }] } }, else: { required: ["decision"], not: { required: ["optionId"] } } }),
   z.object({ runtime: runtimeSchema,
     action: z.literal("respondForm"),
     sessionId: z.string().min(1),
@@ -223,9 +225,10 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("opencode.start", {
     title: "Start OpenCode Work",
-    description: "Admit fresh, idle-resume or forked native work. Catalog agents and ordered permissions first; agent selects execution, agents[] supplies prompt context. Select runtime, retain native sessionId and any returned user messageId; reconcile uncertain admission. Codex is read-only, returns messageId null, and supports idle continuation.",
+    description: "Admit fresh, idle-resume or forked native work. Catalog agents and ordered permissions first; agent selects execution, agents[] supplies prompt context. Select runtime, retain native sessionId and any returned user messageId; reconcile uncertain admission. Codex selects a native mode (fresh default agent), returns messageId null, and supports idle continuation.",
     inputSchema: z.object({
       runtime: runtimeSchema,
+      mode: z.enum(CODEX_MODES).optional().describe("Codex native preset. Fresh default agent permits workspace writes with automatic approval review. Continuation inherits locally known mode; recovered conversations require an explicit mode."),
       task: z.string().min(1).max(65536).describe("Self-contained objective or next delta for the workstream."),
       model: z.string().min(1).optional().describe("Required canonical provider/model ID for OpenCode. Codex inherits its runtime model and rejects this field."),
       cwd: z.string().min(1).optional().describe("Required for fresh work; resume/fork inherit canonical cwd."),
@@ -241,6 +244,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       // Publish the fresh/resume/fork admission rules the backend already enforces, so
       // discovery describes the contract and rejected combinations fail before any native
       // access. These mirror the guards in OpenCodeBackend.start; both layers must agree.
+      .refine((input) => input.mode === undefined || input.runtime === "codex", { message: "mode is only valid for Codex", path: ["mode"] })
       .refine((input) => input.runtime === "codex" || !!input.model, { message: "OpenCode start requires an explicit model", path: ["model"] })
       .refine((input) => !input.sessionId || !input.forkFromSessionId, { message: "sessionId and forkFromSessionId are mutually exclusive", path: ["forkFromSessionId"] })
       .refine((input) => !input.beforeMessageId || !!input.forkFromSessionId, { message: "beforeMessageId requires forkFromSessionId", path: ["beforeMessageId"] })
@@ -253,7 +257,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
         dependentRequired: { beforeMessageId: ["forkFromSessionId"] },
         anyOf: [{ required: ["cwd"] }, { required: ["sessionId"] }, { required: ["forkFromSessionId"] }],
         allOf: [
-          { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: {}, else: { required: ["model"] } },
+          { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: {}, else: { required: ["model"], not: { required: ["mode"] } } },
           { not: { anyOf: [{ required: ["sessionId", "cwd"] }, { required: ["forkFromSessionId", "cwd"] }] } },
           { not: { anyOf: [{ required: ["sessionId", "permissions"] }, { required: ["forkFromSessionId", "permissions"] }] } },
           { not: { anyOf: [{ required: ["sessionId", "variant"] }, { required: ["forkFromSessionId", "variant"] }] } },
@@ -301,7 +305,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("opencode.query", {
     title: "Query OpenCode State",
-    description: "Batch read native catalogs, ordered permissions, sessions, messages, inbox and tool evidence. Agents default to compact effective catalog with hidden entries excluded. Message pages return 512-unit previews with canonical IDs and bounded tool counts; recover full text via type:message. Session tokens are cumulative totals, not context occupancy. runtime selects the native session backend; Codex supports session inventories, history, adapter policy and capabilities. Unsupported operations fail explicitly. Continue using fingerprints/native cursors; selected text may contain secrets.",
+    description: "Batch read native catalogs, ordered permissions, sessions, messages, inbox and tool evidence. Agents default to compact effective catalog with hidden entries excluded. Message pages return 512-unit previews with canonical IDs and bounded tool counts; recover full text via type:message. Session tokens are cumulative totals, not context occupancy. runtime selects the native session backend; Codex supports session inventories, history, native mode selection, pending permission requests and capabilities. Unsupported operations fail explicitly. Continue using fingerprints/native cursors; selected text may contain secrets.",
     inputSchema: z.object({
       queries: z.array(querySchema).min(1).max(10),
     }).strict(),
@@ -311,7 +315,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("opencode.act", {
     title: "Act on OpenCode State",
-    description: "Mutate a native session or admit prompt/inbox/command/skill work. Select the session runtime. Codex supports interrupt and delete; continuation uses start sessionId. Read back configuration. Never automatically retry uncertain mutations.",
+    description: "Mutate a native session or admit prompt/inbox/command/skill work. Select the session runtime. Codex supports interrupt, delete and exact-option permission replies; continuation uses start sessionId. Read back configuration. Never automatically retry uncertain mutations.",
     inputSchema: actSchema,
     outputSchema: outputSchemas.act,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },

@@ -19,7 +19,7 @@ const commandShape = { kind: z.enum(["shell", "pty", "persistentPty"]), location
 const cursorShape = { cursor: count, cursorUnit: z.enum(["bytes", "utf16CodeUnits"]) };
 
 const codexResult = z.object({ outcomeBasis: z.enum(["nativePromptResponse", "historyReplay"]), outcome, messageId: z.null(), assistantMessageId: id.nullable(), correlationSupported: z.literal(false), terminal: z.boolean(), finish: z.string().nullable(), completedAtMs: z.number().nullable(), error: nativeObject.nullable(), outputTruncated: z.boolean(), ...textShape, textNextCall: nextCall }).strict();
-const codexInspection = z.object({ session, result: codexResult }).strict();
+const codexInspection = z.object({ session, result: codexResult, pendingActions: z.array(nativeObject) }).strict();
 
 export const outputSchemas = {
   status: z.object({ ready: z.literal(true), opencodeRelease: id, serverPid: z.number().int(), workers: z.array(z.object({ sessionId: id, cwd: id, status: session.shape.status, executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "historyReplay"]), outcomeEvidence: nativeObject, retry, retryReadError: z.string().nullable(), nextCall }).loose()), pendingActions: z.array(nativeObject), events: nativeObject.optional() }).strict(),
@@ -46,10 +46,10 @@ export const outputSchemas = {
   ]),
   start: z.union([
     z.object({ sessionId: id, messageId: id, cwd: id, model: id, modelVariant: id.nullable(), agent: id, status: z.literal("inProgress") }).strict(),
-    z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), cwd: id, model: z.null(), modelVariant: z.null(), agent: z.literal("codex"), status: z.literal("inProgress"), capabilities: nativeObject }).strict(),
+    z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), cwd: id, model: z.null(), modelVariant: z.null(), agent: z.literal("codex"), status: z.literal("inProgress"), mode: z.string().nullable(), capabilities: nativeObject }).strict(),
   ]),
   wait: z.union([
-    z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), state: z.enum(["active", "terminal", "unknown"]), wakeReason: z.enum(["timeout", "terminal", "executionUnavailable"]), session, result: codexResult }).strict(),
+    z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), state: z.enum(["active", "terminal", "unknown"]), wakeReason: z.enum(["timeout", "terminal", "executionUnavailable", "actionRequired"]), session, result: codexResult, pendingActions: z.array(nativeObject) }).strict(),
     z.object({ sessionId: id, messageId: id, state: z.literal("terminal"), wakeReason: z.literal("terminal"), session, result }).strict(),
     z.object({ sessionId: id, messageId: id, state: z.literal("active"), wakeReason: z.enum(["actionRequired", "timeout"]), ...semanticShape }).strict(),
   ]),
@@ -71,7 +71,7 @@ export const outputSchemas = {
     z.object({ action: z.literal("synthetic"), sessionId: id, inboxId: id, type: id, createdAtMs: z.number(), delivery: z.enum(["steer", "queue"]) }).strict(),
     z.object({ action: z.literal("steer"), sessionId: id, messageId: id }).strict(),
     z.object({ action: z.literal("interrupt"), runtime: z.literal("codex").optional(), sessionId: id, interrupted: z.boolean() }).strict(),
-    z.object({ action: z.literal("respondPermission"), sessionId: id, requestId: id, accepted: z.literal(true) }).strict(),
+    z.object({ action: z.literal("respondPermission"), runtime: z.literal("codex").optional(), sessionId: id, requestId: id, optionId: id.optional(), accepted: z.literal(true) }).strict(),
     z.object({ action: z.literal("respondForm"), sessionId: id, formId: id, accepted: z.literal(true) }).strict(),
     z.object({ action: z.literal("cancelForm"), sessionId: id, formId: id, cancelled: z.literal(true) }).strict(),
     z.object({ action: z.literal("delete"), runtime: z.literal("codex").optional(), sessionId: id, deleted: z.literal(true) }).strict(),
