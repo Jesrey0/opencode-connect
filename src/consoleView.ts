@@ -40,6 +40,13 @@ export type ConsoleUsage = {
   models: string[];
 } | null;
 
+export type ConsoleQuota = {
+  status: "connecting" | "available" | "stale" | "unavailable";
+  usage: { buckets: { bucketKey: string | null; primary: { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null; secondary: { usedPercent: number | null; resetsAt: number | null; windowDurationMins: number | null } | null }[] } | null;
+  observedAtMs?: number | null;
+  watcher?: "watching" | "manual";
+};
+
 export type ConsoleSnapshot = {
   ready: boolean;
   release: string;
@@ -463,7 +470,23 @@ export function transcriptLines(entries: TranscriptEntry[], width: number, runni
   return lines;
 }
 
-export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | null, state: ConsoleState, width: number, height: number): string[] {
+function quotaLine(quota: ConsoleQuota | null): string {
+  if (!quota || (quota.status === "connecting" && !quota.usage)) return "Codex quota · connecting…";
+  if (quota.status === "unavailable") return `Codex quota · unavailable${quota.watcher === "manual" ? " · manual · press r to retry" : ""}`;
+  const bucket = quota.usage?.buckets.find(entry => entry.bucketKey === "codex") ?? quota.usage?.buckets[0];
+  const window = (duration: number) => {
+    const item = [bucket?.primary, bucket?.secondary].find(entry => entry?.windowDurationMins === duration);
+    if (!item) return null;
+    return item.usedPercent === null ? "?%" : `${item.usedPercent}%`;
+  };
+  const fiveHour = window(300) ?? "unavailable";
+  const weekly = window(10080) ?? "unavailable";
+  const age = quota.observedAtMs === null || quota.observedAtMs === undefined ? "unknown age" : `${Math.max(0, Math.floor((Date.now() - quota.observedAtMs) / 1000))}s old`;
+  const freshness = quota.status === "available" ? age : `stale · ${age}`;
+  return `Codex${quota.status !== "available" ? " stale" : ""} · 5h ${fiveHour} · wk ${weekly} · ${freshness}${quota.watcher === "manual" ? " · manual · r refresh" : ""}`;
+}
+
+export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | null, state: ConsoleState, width: number, height: number, quota: ConsoleQuota | null = null): string[] {
   if (width <= 0 || height <= 0) return [];
   const lines = [styled(row(`opencode connect${error ? " · stale" : ""} · read-only`, width), BOLD)];
   const room = Math.max(0, height - 2);
@@ -475,6 +498,7 @@ export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | nul
     const sessions = visibleSessions(snapshot, state.activeOnly);
     syncSelection(state, sessions);
     lines.push(styled(row(`${sessions.length} sessions · ${sessions.filter(session => session.running).length} running · ${snapshot?.pending.length ?? 0} pending`, width), TEXT));
+    if (quota) lines.push(styled(row(quotaLine(quota), width), quota.status !== "available" ? YELLOW : DIM));
     if (error) lines.push(styled(row(`Stale: ${error}`, width), RED));
     const selected = sessions[state.selected];
     if (selected) {
@@ -493,10 +517,10 @@ export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | nul
   return lines;
 }
 
-export function renderFrame(snapshot: ConsoleSnapshot | null, error: string | null, state: ConsoleState, width: number, height: number): string[] {
+export function renderFrame(snapshot: ConsoleSnapshot | null, error: string | null, state: ConsoleState, width: number, height: number, quota: ConsoleQuota | null = null): string[] {
   const sessions = visibleSessions(snapshot, state.activeOnly);
   syncSelection(state, sessions);
-  if (width < 44 || height < 14) return renderTiny(snapshot, error, state, width, height);
+  if (width < 44 || height < 14) return renderTiny(snapshot, error, state, width, height, quota);
 
   const connection = snapshot && !error ? snapshot.ready ? "connected" : "not ready" : snapshot ? "stale · reconnecting" : "connecting";
   const lines: string[] = [
@@ -526,6 +550,11 @@ export function renderFrame(snapshot: ConsoleSnapshot | null, error: string | nu
     renderSessionView(lines, state, snapshot, width, bodyHeight, false, !error && Boolean(snapshot?.ready));
   } else {
     renderDashboard(lines, state, snapshot, sessions, width, bodyHeight);
+    // Place the independent Codex quota directly after native OpenCode usage.
+    const quotaIndex = lines.findIndex(line => stripVTControlCharacters(line).includes(" Sessions"));
+    if (quota && quotaIndex > 0 && stripVTControlCharacters(lines[quotaIndex - 1]).trim() === "") {
+      lines[quotaIndex - 1] = styled(row(` ${quotaLine(quota)}`, width), quota.status !== "available" ? YELLOW : DIM);
+    }
   }
 
   lines.length = Math.min(lines.length, bodyStart + bodyHeight);

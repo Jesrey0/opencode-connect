@@ -2,6 +2,7 @@
 // the native client only; pure state/render logic lives in consoleView.ts.
 import { type OpenCodeClient, type OpenCodeEvent, type SessionMessageInfo } from "@opencode/client";
 import { connectNative } from "./native.js";
+import { observeCodexQuota } from "./codexQuota.js";
 import { ConnectorError, safeError } from "./bounds.js";
 import {
   ConsoleState,
@@ -18,6 +19,7 @@ import {
   syncSelection,
   visibleSessions,
   type TranscriptEntry,
+  type ConsoleQuota,
 } from "./consoleView.js";
 
 const REFRESH_THROTTLE_MS = 750;
@@ -428,11 +430,13 @@ export async function run(): Promise<void> {
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let redrawTimer: ReturnType<typeof setTimeout> | undefined;
   const eventAbort = new AbortController();
+  let quota: ConsoleQuota = { status: "connecting", usage: null };
+  let quotaObserver: ReturnType<typeof observeCodexQuota> | undefined;
 
   const redraw = () => {
     const columns = process.stdout.columns ?? 80;
     const rows = process.stdout.rows ?? 24;
-    screen.draw(renderFrame(observer.snapshot, observer.error, state, columns, rows));
+    screen.draw(renderFrame(observer.snapshot, observer.error, state, columns, rows, quota));
   };
   const observer = new ConsoleObserver(state, {
     snapshot: () => observe(client),
@@ -483,23 +487,13 @@ export async function run(): Promise<void> {
   process.stdin.resume();
   let escapeTimer: ReturnType<typeof setTimeout> | undefined;
   const applyKeys = (keys: InputKey[]) => {
+    if (state.view.kind === "dashboard" && keys.some(key => key.kind === "char" && key.value.toLowerCase() === "r")) void quotaObserver?.refresh();
     const needsRefresh = observer.applyKeys(keys);
     if (state.quit) {
-      cleanup();
-      process.exit(0);
+      void shutdown(0);
     }
     if (needsRefresh) scheduleRefresh();
   };
-  process.stdin.on("data", (chunk: Buffer) => {
-    let keys: InputKey[] = [];
-    for (const byte of chunk) keys = keys.concat(decoder.push(byte));
-    if (decoder.pendingEscape()) {
-      if (escapeTimer) clearTimeout(escapeTimer);
-      escapeTimer = setTimeout(() => applyKeys(decoder.flushEscape()), 50);
-    }
-    if (keys.length > 0) applyKeys(keys);
-  });
-
   const cleanup = () => {
     state.quit = true;
     eventAbort.abort();
@@ -507,14 +501,40 @@ export async function run(): Promise<void> {
     if (redrawTimer) clearTimeout(redrawTimer);
     clearInterval(fallbackTimer);
     if (escapeTimer) clearTimeout(escapeTimer);
+    process.stdin.off("data", onInput);
+    process.stdout.off("resize", redraw);
+    process.off("SIGINT", onSigint);
     try { process.stdin.setRawMode(false); } catch {}
     process.stdin.pause();
     screen.leave();
   };
-  process.on("SIGINT", () => { cleanup(); process.exit(130); });
+  const shutdown = async (code: number) => {
+    cleanup();
+    await quotaObserver?.close();
+    process.exit(code);
+  };
+  const onSigint = () => { void shutdown(130); };
+  process.on("SIGINT", onSigint);
   process.stdout.on("resize", redraw);
 
+  const onInput = (chunk: Buffer) => {
+    let keys: InputKey[] = [];
+    for (const byte of chunk) keys = keys.concat(decoder.push(byte));
+    if (decoder.pendingEscape()) {
+      if (escapeTimer) clearTimeout(escapeTimer);
+      escapeTimer = setTimeout(() => applyKeys(decoder.flushEscape()), 50);
+    }
+    if (keys.length > 0) applyKeys(keys);
+  };
+  process.stdin.on("data", onInput);
+
   try {
+    quotaObserver = observeCodexQuota({
+      onChange: (next) => {
+        quota = next;
+        if (!state.quit) redraw();
+      },
+    });
     await observer.refresh();
     syncSelection(state, visibleSessions(observer.snapshot, state.activeOnly));
     redraw();
@@ -522,6 +542,7 @@ export async function run(): Promise<void> {
     await new Promise<void>(() => {});
   } catch (cause) {
     cleanup();
+    await quotaObserver?.close();
     throw cause;
   }
 }

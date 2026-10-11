@@ -92,6 +92,21 @@ test("40x10 tiny dashboard keeps status, selected context and navigation", () =>
   assert.ok(plain(renderFrame(snapshot(), null, state, 40, 10)).includes("> succeeded · Verify the parser"));
 });
 
+test("the dashboard renders sanitized Codex quota windows and labels retained data stale", () => {
+  const quota = {
+    status: "stale" as const,
+    usage: { buckets: [{
+      bucketKey: "codex",
+      primary: { usedPercent: 31, windowDurationMins: 300, resetsAt: 1_800_000_000 },
+      secondary: { usedPercent: 72, windowDurationMins: 10_080, resetsAt: 1_800_500_000 },
+    }] },
+  };
+  const frame = renderFrame(snapshot(), null, emptyState(), 80, 24, quota);
+  const text = plain(frame).join("\n");
+  assert.match(text, /Codex stale · 5h 31% · wk 72% · stale · unknown age/);
+  assert.equal(frame.length, 24);
+});
+
 test("selected details stay pinned, sessions page by one row and paths retain their tail", () => {
   const snap = snapshot();
   snap.sessions = Array.from({ length: 25 }, (_, index) => ({ ...snap.sessions[0], id: `s${index}`, title: `Task ${index}`, running: index === 0,
