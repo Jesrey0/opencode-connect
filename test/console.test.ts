@@ -105,7 +105,8 @@ test("renderFrame is deterministic and includes core native evidence", () => {
   assert.ok(text.includes("opencode 2.0.24 · pid 7"));
   assert.ok(text.includes("Fix the parser"));
   assert.ok(text.includes("running"));
-  assert.ok(text.includes("Needs 0xOperator · 1 pending"));
+  assert.ok(text.includes("1 running · 1 pending"));
+  assert.ok(text.includes("Needs 0xOperator · permission: write · src/a.ts"));
   assert.ok(text.includes("openai/a"));
   assert.ok(text.includes("? help"));
   assert.equal(a.length, height);

@@ -3,7 +3,7 @@ import test from "node:test";
 import { inspect } from "node:util";
 import type { OpenCodeEvent, SessionMessageInfo } from "@opencode/client";
 import { ConsoleObserver, fetchTranscript } from "../src/console.js";
-import { DIM, emptyState, renderFrame, transcriptLines, type ConsoleSnapshot, type TranscriptEntry } from "../src/consoleView.js";
+import { emptyState, renderFrame, transcriptLines, type ConsoleSnapshot, type TranscriptEntry } from "../src/consoleView.js";
 import { assistant, nativeFixture, user } from "./native-fixture.js";
 
 // Pinned evidence: packages/schema/src/{session-event,session-message}.ts,
@@ -65,7 +65,8 @@ test("native reasoning start/delta/end shows activity only, deduplicated by even
   assert.equal(observer.applyEvent(event("delta", 2)), false);
   assert.equal(observer.applyEvent(event("started", 2)), false);
   const rendered = transcriptLines(state.transcript!, 80);
-  assert.ok(rendered.some(line => line.startsWith(DIM) && line.includes("Reasoning · active")));
+  assert.equal(rendered.filter(line => line.includes("Reasoning · active")).length, 1);
+  assert.ok(rendered.find(line => line.includes("Reasoning · active"))?.includes("OpenCode worker"));
   assertExcluded(state.transcript);
   assertExcluded(rendered);
 });

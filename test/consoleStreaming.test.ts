@@ -119,8 +119,8 @@ test("full multiline answers retain their tail and scroll from the followed posi
   const state = emptyState();
   state.view = { kind: "session", sessionId: "s" };
   state.transcript = [{ role: "assistant", text: "FIRST\n\n" + "x".repeat(600) + "\n" + "line\n".repeat(30) + "LAST" }];
-  const transcript = plain(transcriptLines(state.transcript, 80));
-  assert.ok(transcript.includes("FIRST\n  \n"));
+  const transcript = transcriptLines(state.transcript, 80).map(line => plain([line]).trimEnd()).join("\n");
+  assert.ok(transcript.includes("FIRST\n\n"));
   assert.ok(transcript.endsWith("LAST\n"));
   assert.ok(plain(renderFrame(snapshot(), null, state, 80, 24)).includes("LAST"));
   const tail = state.scroll;
