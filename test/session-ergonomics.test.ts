@@ -15,7 +15,7 @@ function deletion(state: string) {
     if (r.method === "DELETE") { submitted = true; return state === "mutationError" ? fault() : state === "raceBusy" ? fault("SessionBusyError") : undefined; }
     if (r.path === "/api/session/s") return state === "notFound" ? fault("SessionNotFoundError") : state === "getError" ? fault() : submitted && state !== "remains" && state !== "mutationError" && state !== "raceBusy" ? fault(state === "readbackError" ? "ServiceUnavailableError" : "SessionNotFoundError") : { data: session() };
     if (r.path === "/api/session/active") return { data: state === "active" ? { s: { sessionID: "s" } } : {} };
-    if (r.path.endsWith("/permission")) return state === "preflightError" ? fault() : { data: state === "malformedPreflight" ? {} : state === "approval" ? [{ id: "p", sessionID: "s" }] : [] };
+    if (r.path.endsWith("/permission")) return state === "locationMissing" ? Response.json({ _tag: "LocationNotFoundError", location: { directory: "/confidential/deleted-worktree" }, message: "SECRET native body" }, { status: 404 }) : state === "preflightError" ? fault() : { data: state === "malformedPreflight" ? {} : state === "approval" ? [{ id: "p", sessionID: "s" }] : [] };
     if (r.path.endsWith("/form")) return { data: state === "form" ? [{ id: "f", sessionID: "s" }] : [] };
     if (r.path.endsWith("/inbox")) return { data: state === "inbox" ? [{ id: "i", sessionID: "s" }] : [] };
     throw new Error(`unexpected ${r.path}`);
@@ -38,6 +38,25 @@ test("OpenCode deletion blocks authoritative active/pending state and unreadable
     await assert.rejects(f.backend.act({ action: "delete", runtime: "opencode", sessionId: "s" }), (e: unknown) => e instanceof SessionDeleteError && e.code === code && !e.mutationMayHaveOccurred && !e.message.includes("SECRET"));
     assert.equal(f.requests.some(r => r.method === "DELETE"), false);
   }
+});
+test("OpenCode deletion explains removed worktree location without bypassing pending-action checks", async () => {
+  const f = deletion("locationMissing");
+  await assert.rejects(
+    f.backend.act({ action: "delete", runtime: "opencode", sessionId: "s" }),
+    (e: unknown) => e instanceof SessionDeleteError && e.code === "DELETE_LOCATION_UNAVAILABLE" &&
+      !e.mutationMayHaveOccurred && e.reason.includes("restore") && !e.message.includes("SECRET"),
+  );
+  assert.equal(f.requests.some(r => r.method === "DELETE"), false);
+  const server = createServer(f.backend);
+  const client = new Client({ name: "missing-location-delete", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a); await client.connect(b);
+  try {
+    const blocked = await client.callTool({ name: "opencode.act", arguments: { action: "delete", runtime: "opencode", sessionId: "s" } });
+    assert.equal(blocked.isError, true);
+    assert.equal((blocked.structuredContent as Record<string, unknown>).errorCode, "DELETE_LOCATION_UNAVAILABLE");
+    assert.equal((blocked.structuredContent as Record<string, unknown>).mutationMayHaveOccurred, false);
+  } finally { await client.close(); await server.close(); }
 });
 test("OpenCode preflight distinguishes typed not-found from transport ambiguity", async () => {
   for (const [state, code] of [["notFound", "DELETE_NOT_FOUND"], ["getError", "DELETE_PREFLIGHT_FAILED"]]) {

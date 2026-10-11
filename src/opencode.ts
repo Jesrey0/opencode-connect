@@ -696,6 +696,11 @@ export class OpenCodeBackend {
       if (inbox.length) throw new SessionDeleteError("DELETE_PENDING_INBOX", "native session has pending inbox work");
     } catch (error) {
       if (error instanceof SessionDeleteError) throw error;
+      // Native pending-permission/form queries resolve the session's original
+      // location. A retired worktree makes those checks unreadable even when
+      // session.get succeeds; never assume missing location means no approvals.
+      if (error && typeof error === "object" && "_tag" in error && error._tag === "LocationNotFoundError")
+        throw new SessionDeleteError("DELETE_LOCATION_UNAVAILABLE", "the session's original location is missing; restore that location to verify native pending actions before deletion");
       throw new SessionDeleteError("DELETE_PREFLIGHT_FAILED", "native session safety state could not be established");
     }
     try { await client.session.remove({ sessionID: sessionId }); }
