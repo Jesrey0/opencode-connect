@@ -9,7 +9,7 @@ const cwd = process.cwd()
 const ALL_MODES = ["read-only", "workspace-write", "agent", "agent-full-access"]
 
 function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, permissions, toolCall, permissionSessionId } = {}) {
-  const persisted = new Map(), calls = [], cancels = new Map(), modeState = new Map()
+  const persisted = new Map(), calls = [], cancels = new Map(), modeState = new Map(), permissionRequests = []
   let sequence = 0
   const app = new AgentApp({ name: "persistent-codex-test" })
   const modeStateFor = (sessionId) => ({
@@ -56,16 +56,20 @@ function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, p
       // request without awaiting, which is the only way a queue bound is
       // actually exercised against a normally serial agent.
       const options = permissions.options ?? permissions
-      const ask = () => client.request("session/request_permission", {
-        sessionId: permissionSessionId ?? s.sessionId,
-        toolCall: toolCall ?? {
-          toolCallId: "call-1", title: "Run a command", kind: "execute", status: "pending",
-          rawInput: { command: ["rm", "-rf", "/tmp/x"], cwd: "/tmp", env: { SECRET_TOKEN: "do-not-export" } },
-          locations: [{ path: "/tmp/x" }],
-          content: [{ type: "content", content: { type: "text", text: "Remove a temporary directory" } }],
-        },
-        options,
-      })
+      const ask = () => {
+        const request = client.request("session/request_permission", {
+          sessionId: permissionSessionId ?? s.sessionId,
+          toolCall: toolCall ?? {
+            toolCallId: "call-1", title: "Run a command", kind: "execute", status: "pending",
+            rawInput: { command: ["rm", "-rf", "/tmp/x"], cwd: "/tmp", env: { SECRET_TOKEN: "do-not-export" } },
+            locations: [{ path: "/tmp/x" }],
+            content: [{ type: "content", content: { type: "text", text: "Remove a temporary directory" } }],
+          },
+          options,
+        })
+        permissionRequests.push(request)
+        return request
+      }
       const outcomes = []
       if (permissions.concurrent) {
         outcomes.push(...await Promise.all(Array.from({ length: permissions.count ?? 2 }, ask)))
@@ -84,7 +88,7 @@ function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, p
     s.messages.push({ role: "agent", id, text: output })
     return { stopReason: "end_turn" }
   })
-  return { open: async () => ({ target: app, close: async () => {} }), persisted, calls, modeStateFor }
+  return { open: async () => ({ target: app, close: async () => {} }), persisted, calls, modeStateFor, permissionRequests }
 }
 
 test("a fresh session selects the default agent mode and reapplies it before every prompt", async () => {
@@ -366,17 +370,27 @@ test("stale, unknown and cross-session permission responses are all rejected", a
   await sessions.dispose()
 })
 
-test("interruption settles parked decisions so no request is left dangling", async () => {
+test("interruption settles parked decisions so no request is left dangling", { timeout: 5000 }, async () => {
   const options = [{ optionId: "allow_once", name: "Yes", kind: "allow_once" }]
   const native = backend({ permissions: options }), sessions = createCodexSessions(native)
-  const admitted = await sessions.start({ cwd, task: "hang", mode: "workspace-write" })
-  await sessions.wait({ sessionId: admitted.sessionId, waitMs: 2000 })
-  const interrupted = await sessions.interrupt({ sessionId: admitted.sessionId })
-  assert.equal(interrupted.interrupted, true)
-  const inspected = await sessions.inspect({ sessionId: admitted.sessionId })
-  assert.deepEqual(inspected.pendingActions, [])
-  await assert.rejects(sessions.respondPermission({ sessionId: admitted.sessionId, requestId: "stale-id", optionId: "allow_once" }))
-  await sessions.dispose()
+  try {
+    const admitted = await sessions.start({ cwd, task: "write", mode: "workspace-write" })
+    const waiting = await sessions.wait({ sessionId: admitted.sessionId, waitMs: 2000 })
+    assert.equal(waiting.wakeReason, "actionRequired")
+    assert.equal(waiting.pendingActions.length, 1)
+    const [parked] = waiting.pendingActions
+    assert.equal(native.permissionRequests.length, 1)
+    const interrupted = await sessions.interrupt({ sessionId: admitted.sessionId })
+    assert.equal(interrupted.interrupted, true)
+    // ACP closes the connection during cancellation: the agent-side request
+    // must reject, not remain pending after the local queue is cleared.
+    await assert.rejects(native.permissionRequests[0], /connection closed/)
+    const inspected = await sessions.inspect({ sessionId: admitted.sessionId })
+    assert.deepEqual(inspected.pendingActions, [])
+    await assert.rejects(sessions.respondPermission({ sessionId: admitted.sessionId, requestId: parked.requestId, optionId: "allow_once" }), /unknown, already answered/)
+  } finally {
+    await sessions.dispose()
+  }
 })
 
 test("a bounded permission queue never holds more than its bound", async () => {
@@ -423,13 +437,23 @@ test("a request naming another session is never parked as this session's decisio
   await sessions.dispose()
 })
 
-test("disposal settles parked decisions", async () => {
+test("disposal settles parked decisions", { timeout: 5000 }, async () => {
   const options = [{ optionId: "allow_once", name: "Yes", kind: "allow_once" }]
   const native = backend({ permissions: options }), sessions = createCodexSessions(native)
-  const admitted = await sessions.start({ cwd, task: "hang", mode: "workspace-write" })
-  await sessions.wait({ sessionId: admitted.sessionId, waitMs: 2000 })
-  await sessions.dispose()
-  assert.deepEqual((await sessions.permissions({ sessionId: admitted.sessionId })).pendingActions, [])
+  try {
+    const admitted = await sessions.start({ cwd, task: "write", mode: "workspace-write" })
+    const waiting = await sessions.wait({ sessionId: admitted.sessionId, waitMs: 2000 })
+    assert.equal(waiting.wakeReason, "actionRequired")
+    assert.equal(waiting.pendingActions.length, 1)
+    const [parked] = waiting.pendingActions
+    assert.equal(native.permissionRequests.length, 1)
+    await sessions.dispose()
+    await assert.rejects(native.permissionRequests[0], /connection closed/)
+    assert.deepEqual((await sessions.permissions({ sessionId: admitted.sessionId })).pendingActions, [])
+    await assert.rejects(sessions.respondPermission({ sessionId: admitted.sessionId, requestId: parked.requestId, optionId: "allow_once" }), /unknown, already answered/)
+  } finally {
+    await sessions.dispose()
+  }
 })
 
 test("every selectable native Codex mode is exposed with its native policy", async () => {

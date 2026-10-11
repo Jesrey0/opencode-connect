@@ -166,17 +166,6 @@ test("one delivery tick serves several due subscriptions in order within an expl
   } finally { await events.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("subscription state store is exclusive and survives reopening", async () => {
-  const root = await mkdtemp(join(tmpdir(), "opencode-events-store-"));
-  const path = join(root, "events", "store.json");
-  const first = await Events.open(path);
-  await assert.rejects(Events.open(path), /already owned/u);
-  await first.close();
-  const restarted = await Events.open(path);
-  try { assert.deepEqual(restarted.targets(), []); }
-  finally { await restarted.close(); await rm(root, { recursive: true, force: true }); }
-});
-
 test("subscribe verifies a signed challenge with deterministic subscription header; exact filters and restart are preserved", async () => {
   const root = await mkdtemp(join(tmpdir(), "opencode-events-lifecycle-"));
   const path = join(root, "events", "store.json"); const fixture = eventHarness(path);

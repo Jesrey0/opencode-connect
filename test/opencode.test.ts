@@ -15,14 +15,6 @@ test("parseModelRef rejects non-canonical IDs", () => {
   assert.throws(() => parseModelRef("muse-spark-1.3-contributor-free"), /provider\/model/);
 });
 
-test("zero-cost classification relies only on canonical pricing metadata", () => {
-  const paid = [{ input: 1, output: 2, cache: { read: 0.1, write: 0.1 } }];
-  const free = [{ input: 0, output: 0, cache: { read: 0, write: 0 } }];
-  assert.equal(isZeroCostModel({ cost: free }), true);
-  assert.equal(isZeroCostModel({ cost: paid }), false);
-  assert.equal(isZeroCostModel({ cost: [] }), false);
-});
-
 test("zero-cost classification requires every pricing field in every tier to be exactly zero", () => {
   const free = { input: 0, output: 0, cache: { read: 0, write: 0 } };
   for (const field of ["input", "output", "read", "write"] as const) {

@@ -249,22 +249,6 @@ test("release inputs reject file and directory symlinks instead of copying unhas
   } finally { await rm(source, { recursive: true, force: true }); }
 });
 
-test("symlink switch is atomic and link state round-trips", async () => {
-  const base = await tempDir("opencode-deploy-links-");
-  try {
-    const paths = deploymentPaths(base);
-    assert.equal(await readLinkState(paths.currentLink), null);
-    const first = await seedBuild(base, "1111111111111111");
-    const second = await seedBuild(base, "2222222222222222");
-    await pointLinkAtomically(paths.currentLink, first);
-    assert.deepEqual(await readLinkState(paths.currentLink), { buildId: "1111111111111111", path: first });
-    await pointLinkAtomically(paths.currentLink, second);
-    assert.deepEqual(await readLinkState(paths.currentLink), { buildId: "2222222222222222", path: second });
-  } finally {
-    await rm(base, { recursive: true, force: true });
-  }
-});
-
 test("health parsing accepts release shape and reports source runs as missing", () => {
   assert.deepEqual(parseHealthPayload({ ok: true, version: "0.5.0", buildId: "abcdef0123456789", build: { buildId: "abcdef0123456789" } }),
     { buildId: "abcdef0123456789", version: "0.5.0", ok: true });

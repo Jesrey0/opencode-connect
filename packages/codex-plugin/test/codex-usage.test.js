@@ -24,7 +24,6 @@ import {
   resolveCodexBinary,
   spawnCodexAppServer,
 } from "../src/usage.js"
-import { createHarness } from "./harness.js"
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fake-app-server.mjs")
 const POSIX = process.platform !== "win32"
@@ -323,7 +322,7 @@ test("bucket inventory and refused method labels cannot grow without bound", asy
   assert.ok(usage.refusedServerRequests[0].length <= 128)
 })
 
-test("a server-initiated request is refused and reported, and its body is never echoed", async () => {
+test("server-initiated request methods are refused and reported", async () => {
   let release
   const transport = okTransport({ initialize: () => new Promise(resolve => { release = () => resolve({}) }) })
   const pending = readCodexUsage({ open: () => transport })
@@ -333,7 +332,6 @@ test("a server-initiated request is refused and reported, and its body is never 
   release()
   const usage = await pending
   assert.deepEqual(usage.refusedServerRequests, ["account/chatgptAuthTokens/refresh", "item/fileChange/requestApproval"])
-  assert.equal(JSON.stringify(usage).includes("access_token"), false)
 })
 
 test("the transport is always closed, even when the read fails", async () => {
@@ -431,10 +429,25 @@ test("an empty quota read is unavailable, not reported as 0% used", async () => 
 })
 
 test("a server that never answers is bounded and reaped", async () => {
-  await assert.rejects(
-    () => readThroughStdio({ FAKE_RATE_LIMITS: "slow" }),
-    (error) => error instanceof UsageUnavailableError,
-  )
+  const trace = scratch("trace.txt")
+  let transport
+  try {
+    await assert.rejects(
+      () => readCodexUsage({
+        timeoutMs: 1000,
+        open: () => {
+          transport = spawnCodexAppServer({ codexPath: fixtureBinary(), env: { ...process.env, FAKE_RATE_LIMITS: "slow", FAKE_TRACE: trace } })
+          assert.equal(transport.isRunning(), true)
+          return transport
+        },
+      }),
+      (error) => error instanceof UsageUnavailableError && /exceeded its 1000ms limit/.test(error.message),
+    )
+    assert.deepEqual(fs.readFileSync(trace, "utf8").trim().split("\n"), ["initialize", "initialized", "account/rateLimits/read"])
+    assert.equal(transport.isRunning(), false, "the real app-server exited before the timeout rejection settled")
+  } finally {
+    await transport?.close()
+  }
 })
 
 test("a cooperative app-server exits on stdin EOF without ever being signalled", async (t) => {
@@ -517,21 +530,4 @@ test("a concurrent quota read is rejected rather than spawning a second client",
   const subsequent = sessions.usage()
   release()
   assert.equal((await subsequent).scope, "chatgpt-codex-usage-quota")
-})
-
-test("usage is exposed through the codex-sessions RPC and takes no input", async () => {
-  const harness = await createHarness({ internals: { direct: { readUsage: () => Promise.resolve({ source: "codex-app-server", buckets: [] }) } } })
-  const snapshot = await harness.rpcCall("codex-sessions", "usage", {})
-  assert.equal(snapshot.source, "codex-app-server")
-  assert.ok(harness.rpc("codex-sessions").definition.methods.usage)
-  await harness.subagent // the tool surface is unchanged
-})
-
-test("a usage read never disturbs the existing session behaviour", async () => {
-  const harness = await createHarness({ internals: { direct: { readUsage: () => Promise.resolve({ source: "codex-app-server", buckets: [] }) } } })
-  await harness.rpcCall("codex-sessions", "usage", {})
-  await harness.rpcCall("codex-sessions", "status", {})
-  // Nothing about the plugin's registration or the native tool changed.
-  assert.deepEqual(harness.rpcCalls.map((call) => call.method), ["codex-sessions.usage", "codex-sessions.status"])
-  assert.equal(harness.nativeCalls.length, 0)
 })

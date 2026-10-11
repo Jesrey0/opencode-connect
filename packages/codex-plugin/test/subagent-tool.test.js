@@ -111,11 +111,16 @@ test("a later deny overrides an earlier allow", async () => {
 })
 
 test("a wildcard allow rule authorizes codex", async () => {
-  const harness = await createHarness({ permissions: [{ action: "subagent", resource: "*", effect: "allow" }] })
-  await assert.rejects(
-    () => harness.call({ agent: CODEX_AGENT_NAME, description: "d", prompt: "p", background: true }),
-    /foreground/i,
-  )
+  const harness = await createHarness({
+    permissions: [{ action: "subagent", resource: "*", effect: "allow" }],
+    pluginOptions: { enableCodex: true, codexAcpEntry: FIXTURE, nodePath: "node", cwd: path.dirname(FIXTURE) },
+  })
+  const result = await harness.call({ agent: CODEX_AGENT_NAME, description: "d", prompt: "p" })
+  assert.equal(result.output.sessionID, "stdio-session")
+  assert.equal(result.output.status, "completed")
+  assert.equal(result.output.output, "stdio ok")
+  assert.equal(result.metadata.codexSubagentMode, "read-only")
+  assert.equal(harness.nativeCalls.length, 0)
 })
 
 test("an allowed codex call returns the native tool result shape", async () => {
