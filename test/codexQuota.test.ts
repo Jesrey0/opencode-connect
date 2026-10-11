@@ -90,3 +90,67 @@ test("closing an active quota read cancels it and waits for settlement", async (
   assert.equal(aborted, true);
   assert.notEqual(monitor.snapshot().status, "available");
 });
+
+test("remote quota resets use bounded timers and re-arm without an early read", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const timers = t.mock.method(globalThis, "setTimeout");
+  const maxDelay = 2 ** 31 - 1;
+  let reads = 0;
+  const monitor = observeCodexQuota({
+    onChange: () => {}, watch: () => { throw new Error("manual"); },
+    readUsage: async () => {
+      reads++;
+      return { buckets: [{ bucketKey: "codex", primary: { usedPercent: 10, resetsAt: (maxDelay + 1000) / 1000, windowDurationMins: 300 }, secondary: null }] };
+    },
+    debounceMs: 5, minReadGapMs: 0,
+  });
+  await monitor.refresh();
+  const initialReads = reads;
+  assert.ok(timers.mock.calls.some(call => call.arguments[1] === maxDelay));
+  assert.ok(timers.mock.calls.every(call => Number(call.arguments[1]) <= maxDelay));
+  t.mock.timers.tick(maxDelay);
+  await Promise.resolve();
+  assert.equal(reads, initialReads);
+  t.mock.timers.tick(1000);
+  t.mock.timers.tick(5);
+  await Promise.resolve();
+  assert.equal(reads, initialReads + 1);
+  await monitor.close();
+});
+
+test("a quota read resolving after close cannot publish success or restore timers", async t => {
+  const timers = t.mock.method(globalThis, "setTimeout");
+  let resolve!: (value: typeof usage) => void;
+  const states: string[] = [];
+  const monitor = observeCodexQuota({
+    onChange: state => states.push(state.status),
+    watch: () => { throw new Error("manual"); },
+    readUsage: () => new Promise(done => { resolve = done; }),
+  });
+  const closing = monitor.close();
+  resolve(usage);
+  await closing;
+  assert.deepEqual(states, []);
+  assert.equal(monitor.snapshot().status, "connecting");
+  assert.equal(timers.mock.callCount(), 0);
+});
+
+test("continuous rollout events do not slide the quota refresh deadline", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const watcher = new EventEmitter() as EventEmitter & { close: () => void };
+  watcher.close = () => {};
+  let reads = 0;
+  const monitor = observeCodexQuota({
+    onChange: () => {}, watch: () => watcher as unknown as QuotaWatcher,
+    readUsage: async () => { reads++; return usage; }, debounceMs: 10, minReadGapMs: 100,
+  });
+  await monitor.refresh();
+  const initialReads = reads;
+  for (let elapsed = 0; elapsed < 100; elapsed += 5) {
+    watcher.emit("change", "change", "rollout-busy.jsonl");
+    t.mock.timers.tick(5);
+    await Promise.resolve();
+  }
+  assert.equal(reads, initialReads + 1);
+  await monitor.close();
+});

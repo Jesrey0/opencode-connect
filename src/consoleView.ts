@@ -1,6 +1,7 @@
 // Pure console state, navigation, and rendering. No I/O: src/console.ts owns
 // terminal transport, native observation, and message fetching.
 import { stripVTControlCharacters } from "node:util";
+import type { Runtime } from "./codex.js";
 
 export const RESET = "\x1b[0m";
 export const BOLD = "\x1b[1m\x1b[38;5;255m";
@@ -11,18 +12,20 @@ export const YELLOW = "\x1b[38;5;180m";
 export const RED = "\x1b[38;5;203m";
 
 export type ConsoleSession = {
+  runtime: Runtime;
   id: string;
   title: string | null;
-  running: boolean;
-  outcome: "succeeded" | "failed" | "interrupted" | null;
+  running: boolean | null;
+  outcome: "succeeded" | "failed" | "interrupted" | "completed" | "incomplete" | null;
   agent: string | null;
   model: string | null;
   variant: string | null;
   cwd: string;
-  updatedMs: number;
+  updatedMs: number | null;
 };
 
 export type ConsolePending = {
+  runtime: Runtime;
   kind: "permission" | "form";
   sessionId: string;
   id: string;
@@ -55,6 +58,7 @@ export type ConsoleSnapshot = {
   pending: ConsolePending[];
   usage: ConsoleUsage;
   observedAtMs: number;
+  codexVisibility: string;
 };
 
 export type TranscriptEntry = {
@@ -67,7 +71,7 @@ export type TranscriptEntry = {
   reasoningParts?: { ordinal: number; status: "active" | "ended" | "observed" }[];
 };
 
-export type View = { kind: "dashboard" } | { kind: "session"; sessionId: string };
+export type View = { kind: "dashboard" } | { kind: "session"; runtime: Runtime; sessionId: string };
 
 export type ConsoleState = {
   view: View;
@@ -152,11 +156,12 @@ export class InputDecoder {
 
 export function sessionStatus(session: ConsoleSession): string {
   if (session.running) return "running";
+  if (session.running === null) return "unknown";
   return session.outcome ?? "idle";
 }
 
 export function modelLabel(session: ConsoleSession): string {
-  return session.model ? `${session.model}${session.variant ? `#${session.variant}` : ""}` : "<no model>";
+  return session.model ? `${session.model}${session.variant ? `#${session.variant}` : ""}` : session.runtime === "codex" ? "<unknown model>" : "<no model>";
 }
 
 // Returns true when the key changed view/selection so the caller can refetch
@@ -201,7 +206,7 @@ export function handleKey(state: ConsoleState, snapshot: ConsoleSnapshot | null,
       case "enter": case "right": {
         const target = sessions[state.selected];
         if (!target) return false;
-        state.view = { kind: "session", sessionId: target.id };
+        state.view = { kind: "session", runtime: target.runtime, sessionId: target.id };
         state.transcript = null;
         state.transcriptError = null;
         state.scroll = 0;
@@ -445,13 +450,13 @@ function toolPriority(status: string): number {
   return status === "running" || status === "pending" ? 2 : status === "error" ? 1 : 0;
 }
 
-export function transcriptLines(entries: TranscriptEntry[], width: number, running = false, agent: string | null = null): string[] {
+export function transcriptLines(entries: TranscriptEntry[], width: number, running = false, agent: string | null = null, runtime: Runtime = "opencode"): string[] {
   if (width <= 0) return [];
   const lines: string[] = [];
   for (const [index, entry] of entries.entries()) {
     if (!entry.text && !entry.tools?.length && !entry.reasoningParts?.length && entry.completed !== false) continue;
     const operator = entry.role === "user";
-    const label = operator ? "0xOperator" : entry.role === "assistant" ? `OpenCode worker${agent && width >= 60 ? ` · ${oneLine(agent)}` : ""}` : entry.role === "system" ? "System" : "Event";
+    const label = operator ? "0xOperator" : entry.role === "assistant" ? `${runtime === "codex" ? "Codex" : "OpenCode"} worker${agent && width >= 60 ? ` · ${oneLine(agent)}` : ""}` : entry.role === "system" ? "System" : "Event";
     const live = running && index === entries.length - 1 && entry.role === "assistant" && entry.completed === false;
     const reasoning = reasoningLabel(entry);
     const activity = reasoning || (live ? "live" : "");
@@ -473,7 +478,7 @@ export function transcriptLines(entries: TranscriptEntry[], width: number, runni
 function quotaLine(quota: ConsoleQuota | null): string {
   if (!quota || (quota.status === "connecting" && !quota.usage)) return "Codex quota · connecting…";
   if (quota.status === "unavailable") return `Codex quota · unavailable${quota.watcher === "manual" ? " · manual · press r to retry" : ""}`;
-  const bucket = quota.usage?.buckets.find(entry => entry.bucketKey === "codex") ?? quota.usage?.buckets[0];
+  const bucket = quota.usage?.buckets.find(entry => entry.bucketKey === "codex");
   const window = (duration: number) => {
     const item = [bucket?.primary, bucket?.secondary].find(entry => entry?.windowDurationMins === duration);
     if (!item) return null;
@@ -502,10 +507,11 @@ export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | nul
     if (error) lines.push(styled(row(`Stale: ${error}`, width), RED));
     const selected = sessions[state.selected];
     if (selected) {
-      lines.push(styled(row(`> ${sessionStatus(selected)} · ${selected.title ?? "Untitled"}`, width), BOLD));
+      lines.push(styled(row(`> ${selected.runtime} · ${sessionStatus(selected)} · ${selected.title ?? "Untitled"}`, width), BOLD));
       lines.push(styled(row(`Model ${modelLabel(selected)}`, width), DIM));
       lines.push(styled(row(`Cwd ${pathLabel(selected.cwd, width - 4)}`, width), DIM));
     }
+    if (snapshot) lines.push(styled(row(`Codex · ${snapshot.codexVisibility}`, width), DIM));
     state.pageSize = 1;
   }
   lines.length = Math.min(lines.length, height - 1);
@@ -581,6 +587,7 @@ function renderDashboard(lines: string[], state: ConsoleState, snapshot: Console
   const pending = snapshot?.pending ?? [];
   const running = snapshot?.sessions.filter(session => session.running).length ?? 0;
   lines.push(styled(rowLeftRight(` ${running} running · ${pending.length} pending`, snapshot ? `opencode ${snapshot.release} · pid ${snapshot.pid} ` : "connecting… ", width), pending.length ? YELLOW : BOLD));
+  if (snapshot) lines.push(styled(row(` Codex · ${snapshot.codexVisibility}`, width), DIM));
   if (pending.length) {
     const first = pending[0];
     lines.push(styled(row(` Needs 0xOperator · ${first.kind}: ${first.label}${pending.length > 1 ? ` (+${pending.length - 1} more)` : ""}`, width), YELLOW));
@@ -626,8 +633,8 @@ function renderDashboard(lines: string[], state: ConsoleState, snapshot: Console
     const selectedRow = index === state.selected;
     const marker = selectedRow ? ">" : " ";
     const title = session.title ?? "Untitled";
-    const waiting = pending.some((action) => action.sessionId === session.id);
-    const label = `${marker} ${sessionStatus(session).padEnd(11)} ${title}`;
+    const waiting = pending.some((action) => action.runtime === session.runtime && action.sessionId === session.id);
+    const label = `${marker} ${session.runtime.padEnd(8)} ${sessionStatus(session).padEnd(11)} ${title}`;
     lines.push(styled(waiting ? rowLeftRight(label, "pending ", width) : row(label, width), selectedRow ? BOLD : session.running ? TEXT : DIM));
   }
   lines.push(styled(row(` ${first + 1}–${Math.min(first + capacity, sessions.length)} of ${sessions.length} · selected ${state.selected + 1}`, width), DIM));
@@ -640,24 +647,26 @@ function renderDashboard(lines: string[], state: ConsoleState, snapshot: Console
 
 function renderSessionView(lines: string[], state: ConsoleState, snapshot: ConsoleSnapshot | null, width: number, height: number, compact: boolean, fresh: boolean): void {
   const start = lines.length;
-  const session = snapshot?.sessions.find((entry) => state.view.kind === "session" && entry.id === state.view.sessionId);
+  const session = snapshot?.sessions.find((entry) => state.view.kind === "session" && entry.runtime === state.view.runtime && entry.id === state.view.sessionId);
+  const runtime = state.view.kind === "session" ? state.view.runtime : "opencode";
   const running = session?.running ?? false;
-  const live = running && fresh;
+  const live = runtime === "opencode" && Boolean(running) && fresh;
   const latest = state.transcript?.at(-1);
   const phase = latest?.role === "assistant" && latest.completed === false
     ? latest.reasoningParts?.some(part => part.status === "active") ? " · reasoning"
       : latest.tools?.some(tool => tool.status === "running" || tool.status === "pending") ? " · tools" : ""
     : "";
-  lines.push(styled(rowLeftRight(` ${session?.title ?? (state.view.kind === "session" ? state.view.sessionId : "?")}`, live ? `running · live${phase} ` : `${session ? sessionStatus(session) : "unavailable"}${running ? " · stale" : ""} `, width), BOLD));
+  lines.push(styled(rowLeftRight(` ${runtime} · ${session?.title ?? (state.view.kind === "session" ? state.view.sessionId : "?")}`, live ? `running · live${phase} ` : `${session ? sessionStatus(session) : "unavailable"}${running && !fresh ? " · stale" : ""} `, width), BOLD));
+  if (runtime === "codex") lines.push(styled(row(" Bounded history previews · no live deltas", width), DIM));
   if (session) {
     lines.push(styled(row(` ${modelLabel(session)}${compact ? "" : ` · agent ${session.agent ?? "<unset>"}`}`, width), DIM));
     if (!compact) lines.push(styled(row(` Cwd ${pathLabel(session.cwd, width - 5)}`, width), DIM));
   }
-  const pending = (snapshot?.pending ?? []).filter((action) => session && action.sessionId === session.id);
+  const pending = (snapshot?.pending ?? []).filter((action) => session && action.runtime === session.runtime && action.sessionId === session.id);
   if (pending.length) lines.push(styled(row(` Pending ${pending.length} · ${pending[0].kind}: ${pending[0].label}`, width), YELLOW));
   if (state.transcriptError) lines.push(styled(row(` Transcript stale: ${oneLine(state.transcriptError)}`, width), RED));
   if (!compact) lines.push(styled(rule(width), DIM));
-  const rendered = transcriptLines(state.transcript ?? [], width, live, session?.agent ?? null);
+  const rendered = transcriptLines(state.transcript ?? [], width, live, session?.agent ?? null, runtime);
   const room = Math.max(0, height - (lines.length - start));
   const maxScroll = Math.max(0, rendered.length - room);
   const offset = state.follow ? maxScroll : Math.min(state.scroll, maxScroll);

@@ -748,7 +748,19 @@ Native worktree branch is an existing Git reference, not a new branch name. Omit
 
 ## Live console
 
-The native terminal console streams assistant text while a selected session is
+The read-only terminal console shows both OpenCode and Codex native inventories,
+with runtime-labeled rows and runtime-specific detail routing. Codex combines one
+native history page with supervised workers, including workers absent from that
+page. History-only execution status and models remain unknown. Unsupported or
+disconnected Codex RPC leaves OpenCode visible and marks partial visibility;
+history and supervised-status failures are independent. Codex reads use the
+existing five-second fallback cadence (not OpenCode's event refresh rate), with a
+three-second read deadline. Codex detail shows the latest 25 bounded native
+message previews (up to 512 characters each, with truncation markers), replaces
+each history snapshot, and never advertises live deltas. No quota reads or
+session mutations are performed by this inventory view.
+
+For OpenCode, the console streams assistant text while a selected session is
 followed. Tool-only steps show tool names and status, excluding their inputs,
 outputs. Reasoning parts show a dim **activity-only** marker: `active` from native
 start/delta events or an incomplete part's timing, `ended` from native end events
@@ -770,7 +782,7 @@ payload-free ordering anchors remain while earlier identities are missing.
 Anchors are bounded to 128 IDs and released only when earlier identities have
 native readback. At capacity, new identities are skipped until slots can safely
 be released or the view is reopened; persisted reads remain available.
-Opening a view reads back to its latest operator
+Opening an OpenCode view reads back to its latest operator
 prompt within 500 native messages; subsequent refreshes read one recent page and
 update loaded history by canonical message ID. Refreshes do not discard earlier
 loaded operator messages or unflushed streamed text. Home/PgUp scroll back;

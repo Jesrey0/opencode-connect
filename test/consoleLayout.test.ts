@@ -9,13 +9,13 @@ import {
 
 function snapshot(): ConsoleSnapshot {
   return {
-    ready: true, release: "2.0.24", pid: 7, observedAtMs: 0,
+    codexVisibility: "recent + supervised", ready: true, release: "2.0.24", pid: 7, observedAtMs: 0,
     sessions: [
-      { id: "s1", title: "Refine the console", running: true, outcome: null, agent: "build", model: "openai/gpt-6.1-sol", variant: "high", cwd: "/home/operator/projects/opencode-connect", updatedMs: 3 },
-      { id: "s2", title: "Verify the parser", running: false, outcome: "succeeded", agent: "build", model: "openai/gpt-6.1-sol", variant: null, cwd: "/home/operator/projects/parser", updatedMs: 2 },
-      { id: "s3", title: "Review native events", running: false, outcome: "failed", agent: "review", model: "anthropic/claude-sonnet-4-6", variant: null, cwd: "/home/operator/projects/events", updatedMs: 1 },
+      { runtime: "opencode", id: "s1", title: "Refine the console", running: true, outcome: null, agent: "build", model: "openai/gpt-6.1-sol", variant: "high", cwd: "/home/operator/projects/opencode-connect", updatedMs: 3 },
+      { runtime: "opencode", id: "s2", title: "Verify the parser", running: false, outcome: "succeeded", agent: "build", model: "openai/gpt-6.1-sol", variant: null, cwd: "/home/operator/projects/parser", updatedMs: 2 },
+      { runtime: "opencode", id: "s3", title: "Review native events", running: false, outcome: "failed", agent: "review", model: "anthropic/claude-sonnet-4-6", variant: null, cwd: "/home/operator/projects/events", updatedMs: 1 },
     ],
-    pending: [{ kind: "permission", sessionId: "s1", id: "p1", label: "write · src/consoleView.ts" }],
+    pending: [{ runtime: "opencode", kind: "permission", sessionId: "s1", id: "p1", label: "write · src/consoleView.ts" }],
     usage: { sessions: 12, prompts: 48, steps: 136, tokensTotal: 234500, costUsd: 2.34, activeDays: 4, streak: 3,
       models: ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-4-6", "google/gemini-3.1-pro"] },
   };
@@ -27,7 +27,7 @@ const splitRow = (left: string, right: string, width: number) => left + " ".repe
 
 function sessionState(entries: TranscriptEntry[]): ConsoleState {
   const state = emptyState();
-  state.view = { kind: "session", sessionId: "s1" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
   state.transcript = entries;
   return state;
 }
@@ -52,14 +52,15 @@ for (const [width, height] of [[80, 24], [120, 32]]) {
       splitRow("  opencode connect", "observer · connected · read-only ", width),
       rule(width),
       splitRow(" 1 running · 1 pending", "opencode 2.0.24 · pid 7 ", width),
+      " Codex · recent + supervised",
       " Needs 0xOperator · permission: write · src/consoleView.ts",
       splitRow(" Usage  234.5k tokens · $2.34 · 48 prompts · 136 steps", "4 days · 3 streak ", width),
       " Models openai/gpt-6.1-sol, anthropic/claude-sonnet-4-6, google/gemini-3.1-pro",
       "",
       splitRow(" Sessions", "3 recent ", width),
-      splitRow("> running     Refine the console", "pending ", width),
-      "  succeeded   Verify the parser",
-      "  failed      Review native events",
+      splitRow("> opencode running     Refine the console", "pending ", width),
+      "  opencode succeeded   Verify the parser",
+      "  opencode failed      Review native events",
       " 1–3 of 3 · selected 1",
     ];
     while (expected.length < height - 6) expected.push("");
@@ -82,14 +83,14 @@ test("40x10 tiny dashboard keeps status, selected context and navigation", () =>
   assert.deepEqual(plain(frame), [
     "opencode connect · read-only",
     "3 sessions · 1 running · 1 pending",
-    "> running · Refine the console",
+    "> opencode · running · Refine the conso…",
     "Model openai/gpt-6.1-sol#high",
     "Cwd …/operator/projects/opencode-connect",
-    "", "", "", "", "↑/↓ select · Enter open · ? help",
+    "Codex · recent + supervised", "", "", "", "↑/↓ select · Enter open · ? help",
   ]);
   assert.equal(state.pageSize, 1);
   handleKey(state, snapshot(), { kind: "down" });
-  assert.ok(plain(renderFrame(snapshot(), null, state, 40, 10)).includes("> succeeded · Verify the parser"));
+  assert.ok(plain(renderFrame(snapshot(), null, state, 40, 10)).some(line => line.startsWith("> opencode · succeeded · Verify")));
 });
 
 test("the dashboard renders sanitized Codex quota windows and labels retained data stale", () => {
@@ -105,6 +106,27 @@ test("the dashboard renders sanitized Codex quota windows and labels retained da
   const text = plain(frame).join("\n");
   assert.match(text, /Codex stale · 5h 31% · wk 72% · stale · unknown age/);
   assert.equal(frame.length, 24);
+});
+
+test("combined dashboard quota never attributes another bucket to Codex", () => {
+  for (const [width, height] of [[24, 8], [40, 10], [44, 14], [80, 24], [120, 32]]) {
+    for (const bucketKey of ["other", null, "codex"]) {
+      const quota = { status: "available" as const, usage: { buckets: [{
+        bucketKey, primary: { usedPercent: 31, windowDurationMins: 300, resetsAt: null },
+        secondary: { usedPercent: 72, windowDurationMins: 10080, resetsAt: null },
+      }] } };
+      const frame = renderFrame(snapshot(), null, emptyState(), width, height, quota);
+      assertFrame(frame, width, height);
+      const text = plain(frame).join("\n");
+      assert.match(text, /Codex · 5h/);
+      if (bucketKey === "codex") assert.match(text, /5h 31%/);
+      else {
+        assert.match(text, /5h unavail/);
+        assert.doesNotMatch(text, /31%|72%/);
+      }
+      if (width >= 44) assert.match(text, /Usage/);
+    }
+  }
 });
 
 test("selected details stay pinned, sessions page by one row and paths retain their tail", () => {
@@ -150,7 +172,7 @@ test("native metadata and transcript cannot inject terminal controls or extra ro
     assertFrame(renderFrame(snap, injected, emptyState(), width, height), width, height);
     const state = sessionState([{ role: "user", text: injected }, { role: "assistant", text: injected,
       tools: [{ id: "t", name: injected, status: injected }] }]);
-    state.view = { kind: "session", sessionId: injected };
+    state.view = { kind: "session", runtime: "opencode", sessionId: injected };
     state.transcriptError = injected;
     const frame = renderFrame(snap, injected, state, width, height);
     assertFrame(frame, width, height);
@@ -227,8 +249,8 @@ test("long model summaries disclose overflow instead of cutting off the last mod
   for (const width of [80, 120]) {
     const frame = renderFrame(snap, null, emptyState(), width, 24);
     assertFrame(frame, width, 24);
-    assert.match(plain(frame)[5], /^ Models provider\/.*…  \+2 more$/);
-    assert.match(plain(frame)[4], /234\.5k tokens.*\$2\.34.*48 prompts.*136 steps.*4 days.*3 streak/);
+    assert.match(plain(frame)[6], /^ Models provider\/.*…  \+2 more$/);
+    assert.match(plain(frame)[5], /234\.5k tokens.*\$2\.34.*48 prompts.*136 steps.*4 days.*3 streak/);
   }
 });
 

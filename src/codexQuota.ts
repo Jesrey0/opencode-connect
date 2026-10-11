@@ -7,6 +7,7 @@ import type { ConsoleQuota } from "./consoleView.js";
 const DEBOUNCE_MS = 500;
 const MIN_READ_GAP_MS = 10_000;
 const STALE_AFTER_MS = 10 * 60_000;
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 export type CodexQuotaState = ConsoleQuota & { observedAtMs: number | null; watcher: "watching" | "manual" };
 export type QuotaWatcher = { close: () => void; on: (event: string, listener: (...args: any[]) => void) => unknown };
@@ -48,10 +49,16 @@ export function observeCodexQuota({
 
   const scheduleReset = () => {
     clear(resetTimer);
+    if (stopped) return;
     const resets = (state.usage?.buckets ?? []).flatMap(bucket => [bucket.primary?.resetsAt, bucket.secondary?.resetsAt])
-      .filter((value): value is number => value !== null && value !== undefined && value * 1000 > now());
+      .filter((value): value is number => value !== null && value !== undefined && Number.isFinite(value * 1000) && value * 1000 > now());
     if (!resets.length) return;
-    resetTimer = setTimeout(() => { resetTimer = undefined; invalidate(); }, Math.max(0, Math.min(...resets) * 1000 - now()));
+    const delayMs = Math.max(0, Math.min(...resets) * 1000 - now());
+    resetTimer = setTimeout(() => {
+      resetTimer = undefined;
+      if (delayMs > MAX_TIMER_MS) scheduleReset();
+      else invalidate();
+    }, Math.min(MAX_TIMER_MS, delayMs));
     resetTimer.unref?.();
   };
   const refresh = (): Promise<void> => {
@@ -62,6 +69,7 @@ export function observeCodexQuota({
         queued = false;
         try {
           const usage = await readUsage(controller.signal);
+          if (stopped) return;
           const observedAtMs = now();
           publish({ status: "available", usage, observedAtMs, watcher: watcher ? "watching" : "manual" });
           clear(staleTimer);
@@ -72,6 +80,7 @@ export function observeCodexQuota({
           staleTimer.unref?.();
           scheduleReset();
         } catch {
+          if (stopped) return;
           publish({ ...state, status: state.usage ? "stale" : "unavailable", watcher: watcher ? "watching" : "manual" });
         }
       } while (queued && !stopped);

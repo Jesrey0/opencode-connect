@@ -1,9 +1,10 @@
-// OpenCode-native terminal console. Observes canonical OpenCode state through
+// Native terminal console. Observes canonical runtime state through
 // the native client only; pure state/render logic lives in consoleView.ts.
 import { type OpenCodeClient, type OpenCodeEvent, type SessionMessageInfo } from "@opencode/client";
 import { connectNative } from "./native.js";
 import { observeCodexQuota } from "./codexQuota.js";
 import { ConnectorError, safeError } from "./bounds.js";
+import { codexQuery, codexStatus, type Runtime } from "./codex.js";
 import {
   ConsoleState,
   ConsoleSnapshot,
@@ -38,16 +39,58 @@ type LiveMessage = {
   reasoning: Map<number, { status: "active" | "ended"; created: number; revision: number }>;
 };
 
-export async function observe(client: OpenCodeClient): Promise<ConsoleSnapshot> {
-  const [info, active, list, stats] = await Promise.all([
+type CodexInventory = { sessions: ConsoleSession[]; pending: ConsolePending[]; visibility: string };
+
+export async function observeCodex(client: OpenCodeClient): Promise<CodexInventory> {
+  const signal = AbortSignal.timeout(3000);
+  const [history, supervised] = await Promise.allSettled([
+    codexQuery(client, { type: "sessions" }, signal),
+    codexStatus(client, signal),
+  ]);
+  const sessions = new Map<string, ConsoleSession>();
+  const pending: ConsolePending[] = [];
+  const gaps: string[] = [];
+  if (history.status === "fulfilled" && "sessions" in history.value && history.value.sessions && history.value.cursor) {
+    for (const entry of history.value.sessions) sessions.set(entry.sessionId, {
+      runtime: "codex", id: entry.sessionId, title: entry.title, running: null,
+      outcome: null, agent: "codex", model: null, variant: null,
+      cwd: entry.cwd, updatedMs: entry.updatedAtMs,
+    });
+    if (history.value.cursor.next) gaps.push("more history not shown");
+  } else gaps.push("history unavailable");
+  if (supervised.status === "fulfilled") {
+    for (const entry of supervised.value) {
+      const previous = sessions.get(entry.sessionId);
+      sessions.set(entry.sessionId, {
+        runtime: "codex", id: entry.sessionId, title: entry.title ?? previous?.title ?? null,
+        running: entry.executionKnown ? entry.status === "inProgress" : null,
+        outcome: entry.executionKnown && entry.outcome !== "unknown" ? entry.outcome : null,
+        agent: "codex", model: null, variant: null, cwd: entry.cwd,
+        updatedMs: previous?.updatedMs ?? null,
+      });
+      for (const action of entry.pendingActions) pending.push({
+        runtime: "codex", kind: "permission", sessionId: entry.sessionId,
+        id: action.requestId, label: action.action ?? "native permission request",
+      });
+    }
+  } else gaps.push("supervised status unavailable");
+  return { sessions: [...sessions.values()], pending,
+    visibility: gaps.length === 2 && history.status === "rejected" && supervised.status === "rejected"
+      ? "unavailable · partial visibility" : gaps.length ? `partial · ${gaps.join("; ")}` : "recent + supervised · history status may be unknown" };
+}
+
+export async function observe(client: OpenCodeClient, readCodex = () => observeCodex(client)): Promise<ConsoleSnapshot> {
+  const [info, active, list, stats, codex] = await Promise.all([
     client.server.info(),
     client.session.active(),
     client.session.list({ limit: RECENT_LIMIT, order: "desc" }),
     client.session.stats().catch(() => null),
+    readCodex().catch(() => ({ sessions: [], pending: [], visibility: "unavailable · partial visibility" })),
   ]);
   const sessions: ConsoleSession[] = list.data
     .map((session) => ({
       id: session.id,
+      runtime: "opencode" as const,
       title: session.title ?? null,
       running: Boolean(active[session.id]),
       outcome: session.outcome ?? null,
@@ -56,8 +99,7 @@ export async function observe(client: OpenCodeClient): Promise<ConsoleSnapshot> 
       variant: session.model?.variant ?? null,
       cwd: session.location.directory,
       updatedMs: session.time.updated,
-    }))
-    .sort((a, b) => Number(b.running) - Number(a.running) || b.updatedMs - a.updatedMs);
+    }));
   const pending: ConsolePending[] = [];
   for (const session of sessions.filter((entry) => entry.running)) {
     try {
@@ -65,8 +107,8 @@ export async function observe(client: OpenCodeClient): Promise<ConsoleSnapshot> 
         client.permission.list({ sessionID: session.id }),
         client.session.form.list({ sessionID: session.id }),
       ]);
-      for (const permission of permissions) pending.push({ kind: "permission", sessionId: session.id, id: permission.id, label: `${permission.action} · ${permission.resources.join(", ")}` });
-      for (const form of forms) pending.push({ kind: "form", sessionId: session.id, id: form.id, label: form.title });
+      for (const permission of permissions) pending.push({ runtime: "opencode", kind: "permission", sessionId: session.id, id: permission.id, label: `${permission.action} · ${permission.resources.join(", ")}` });
+      for (const form of forms) pending.push({ runtime: "opencode", kind: "form", sessionId: session.id, id: form.id, label: form.title });
     } catch {
       // Pending-action evidence is best-effort; a disconnected session must not
       // blank the whole dashboard.
@@ -86,7 +128,10 @@ export async function observe(client: OpenCodeClient): Promise<ConsoleSnapshot> 
       models: top.slice(0, 4),
     };
   }
-  return { ready: true, release: info.version, pid: info.pid, sessions, pending, usage, observedAtMs: Date.now() };
+  sessions.push(...codex.sessions);
+  sessions.sort((a, b) => Number(b.running) - Number(a.running) || (b.updatedMs ?? 0) - (a.updatedMs ?? 0));
+  pending.push(...codex.pending);
+  return { ready: true, release: info.version, pid: info.pid, sessions, pending, usage, codexVisibility: codex.visibility, observedAtMs: Date.now() };
 }
 
 export function messageToEntry(message: SessionMessageInfo): TranscriptEntry | null {
@@ -141,10 +186,48 @@ export async function fetchTranscript(client: OpenCodeClient, sessionId: string,
   return entries.reverse();
 }
 
+export async function fetchRuntimeTranscript(client: OpenCodeClient, runtime: Runtime, sessionId: string, includePrompt = true): Promise<TranscriptEntry[]> {
+  if (runtime === "opencode") return fetchTranscript(client, sessionId, includePrompt);
+  const history = await codexQuery(client, { type: "messages", sessionId, limit: TRANSCRIPT_LIMIT }, AbortSignal.timeout(3000));
+  if (!("data" in history)) throw new ConnectorError("Codex history unavailable");
+  // Native messages are bounded previews, not live activity or completion evidence.
+  return history.data.map((entry): TranscriptEntry => {
+    if (!("text" in entry) || !("previewTruncated" in entry)) throw new ConnectorError("Codex history unavailable");
+    return {
+      role: entry.type as "user" | "assistant",
+      text: entry.text + (entry.previewTruncated || entry.outputTruncated ? "\n[preview truncated]" : ""),
+      ...(entry.id ? { messageId: entry.id } : {}),
+    };
+  }).reverse();
+}
+
 export type ConsoleReads = {
   snapshot: () => Promise<ConsoleSnapshot>;
-  transcript: (sessionId: string, includePrompt?: boolean) => Promise<TranscriptEntry[]>;
+  transcript: (sessionId: string, includePrompt: boolean, runtime: Runtime) => Promise<TranscriptEntry[]>;
 };
+
+// OpenCode events may refresh the dashboard frequently. Codex has no event API:
+// reuse both successful and failed reads until the existing slow fallback is due.
+export function consoleReads(client: OpenCodeClient, now = Date.now): ConsoleReads {
+  let inventory: { readAt: number; result: Promise<CodexInventory> } | undefined;
+  let transcript: { sessionId: string; readAt: number; result: Promise<TranscriptEntry[]> } | undefined;
+  const readCodex = () => {
+    if (!inventory || now() - inventory.readAt >= REFRESH_FALLBACK_MS) {
+      inventory = { readAt: now(), result: observeCodex(client) };
+    }
+    return inventory.result;
+  };
+  return {
+    snapshot: () => observe(client, readCodex),
+    transcript: (sessionId, includePrompt, runtime) => {
+      if (runtime === "opencode") return fetchTranscript(client, sessionId, includePrompt);
+      if (!transcript || transcript.sessionId !== sessionId || now() - transcript.readAt >= REFRESH_FALLBACK_MS) {
+        transcript = { sessionId, readAt: now(), result: fetchRuntimeTranscript(client, runtime, sessionId, includePrompt) };
+      }
+      return transcript.result;
+    },
+  };
+}
 
 // Coalesce events while a read is in flight. A result belongs to the exact
 // opened view, including when the user leaves and reopens the same session.
@@ -248,7 +331,7 @@ export class ConsoleObserver {
   // until text.ended. Keep only this view's display overlay, keyed by canonical
   // assistant ID and content ordinal; persisted completion replaces it.
   applyEvent(event: OpenCodeEvent): boolean {
-    if (this.state.quit || this.state.view.kind !== "session") return false;
+    if (this.state.quit || this.state.view.kind !== "session" || this.state.view.runtime !== "opencode") return false;
     if (event.type !== "session.text.started" && event.type !== "session.text.delta" && event.type !== "session.text.ended" &&
       event.type !== "session.reasoning.started" && event.type !== "session.reasoning.delta" && event.type !== "session.reasoning.ended") return false;
     if (event.data.sessionID !== this.state.view.sessionId) return false;
@@ -308,8 +391,17 @@ export class ConsoleObserver {
     if (view.kind === "session" && (this.state.follow || this.state.transcript === null || this.state.transcriptError !== null)) {
       try {
         const readRevision = this.eventRevision;
-        const entries = await this.reads.transcript(view.sessionId, this.transcriptBase === null);
+        const entries = await this.reads.transcript(view.sessionId, this.transcriptBase === null, view.runtime);
         if (!this.state.quit && this.state.view === view) {
+          if (view.runtime === "codex") {
+            // Replace each bounded snapshot: null message IDs cannot be merged
+            // by identity, and history replay does not provide live deltas.
+            this.transcriptBase = entries;
+            this.publishTranscript();
+            this.state.transcriptError = null;
+            this.redraw();
+            return;
+          }
           const retained = (this.transcriptBase ?? []).filter(entry => entry.messageId);
           // Fill this page's previously loaded slots in native page order,
           // including newly read identities beside their native neighbors.
@@ -438,10 +530,7 @@ export async function run(): Promise<void> {
     const rows = process.stdout.rows ?? 24;
     screen.draw(renderFrame(observer.snapshot, observer.error, state, columns, rows, quota));
   };
-  const observer = new ConsoleObserver(state, {
-    snapshot: () => observe(client),
-    transcript: (sessionId, includePrompt) => fetchTranscript(client, sessionId, includePrompt),
-  }, redraw);
+  const observer = new ConsoleObserver(state, consoleReads(client), redraw);
 
   const scheduleRefresh = () => {
     if (refreshTimer) return;

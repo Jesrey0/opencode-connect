@@ -137,8 +137,8 @@ export async function codexAct(client: OpenCodeClient, input: { action: string; 
   if (typeof value.interrupted !== "boolean") throw new ConnectorError("Codex interruption was not confirmed");
   return { action: "interrupt" as const, runtime: "codex" as const, sessionId, interrupted: value.interrupted };
 }
-export async function codexStatus(client: OpenCodeClient) {
-  const value = await call(client, "status", {});
+export async function codexStatus(client: OpenCodeClient, signal?: AbortSignal) {
+  const value = await call(client, "status", {}, signal);
   if (!Array.isArray(value.sessions) || value.sessions.length > 64) throw new ConnectorError("Codex returned an invalid supervised session inventory");
   return value.sessions.map(entry => ({ ...project(record(entry)), pendingActions: pending(record(entry).pendingActions, id(record(entry).sessionId)), retry: null, retryReadError: null, outcomeEvidence: { basis: record(entry).executionKnown ? "nativePromptResponse" : "historyReplay" }, nextCall: null }));
 }
@@ -154,7 +154,7 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
   if (input.type === "sessions") {
     if (input.offset !== undefined || input.fingerprint !== undefined) throw new ConnectorError("Codex session listing uses its native cursor");
     if (input.limit !== undefined || input.order !== undefined || input.searchTerm !== undefined) throw new ConnectorError("Codex session listing uses native page size and ordering; search is unsupported");
-    const value = await call(client, "list", { ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) });
+    const value = await call(client, "list", { ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }, signal);
     if (!Array.isArray(value.sessions)) throw new ConnectorError("Codex session inventory is unavailable");
     return { runtime: "codex", sessions: value.sessions.map(raw => {
       const s = record(raw);
@@ -177,7 +177,7 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
   }
   if (["messages", "message"].includes(input.type)) {
     if (input.cursor || input.field) throw new ConnectorError("Codex message history uses bounded fingerprint pagination and has no compaction fields");
-    const value = await call(client, "messages", { sessionId: id(input.sessionId) });
+    const value = await call(client, "messages", { sessionId: id(input.sessionId) }, signal);
     if (value.sessionId !== input.sessionId || !Array.isArray(value.messages) || value.messages.length > 128) throw new ConnectorError("Codex returned invalid native history");
     const messages = value.messages.map(raw => { const m = record(raw); if (!["user", "assistant"].includes(m.role) || typeof m.text !== "string" || m.text.length > 65_536) throw new ConnectorError("Codex returned invalid native message content"); return { id: m.id === null ? null : id(m.id), type: m.role, text: m.text, outputTruncated: m.truncated === true }; });
     if (input.type === "message") {

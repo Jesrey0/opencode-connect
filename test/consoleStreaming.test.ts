@@ -6,8 +6,8 @@ import { emptyState, handleKey, renderFrame, transcriptLines, type ConsoleSnapsh
 import { nativeFixture, assistant, user } from "./native-fixture.js";
 
 const snapshot = (): ConsoleSnapshot => ({
-  ready: true, release: "2.0.24", pid: 1, observedAtMs: 0, usage: null, pending: [],
-  sessions: [{ id: "s", title: "Stream", running: true, outcome: null, agent: "build", model: "openai/a", variant: null, cwd: "/tmp", updatedMs: 0 }],
+  codexVisibility: "recent + supervised", ready: true, release: "2.0.24", pid: 1, observedAtMs: 0, usage: null, pending: [],
+  sessions: [{ runtime: "opencode", id: "s", title: "Stream", running: true, outcome: null, agent: "build", model: "openai/a", variant: null, cwd: "/tmp", updatedMs: 0 }],
 });
 let sequence = 0;
 function textEvent(kind: "started" | "delta" | "ended", text = "", ordinal = 0, sessionID = "s", assistantMessageID = "a"): OpenCodeEvent {
@@ -24,7 +24,7 @@ function activeMessage(text = ""): SessionMessageInfo {
 }
 function observerFor(transcript: () => Promise<TranscriptEntry[]>) {
   const state = emptyState();
-  state.view = { kind: "session", sessionId: "s" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s" };
   return { state, observer: new ConsoleObserver(state, { snapshot: async () => snapshot(), transcript }, () => {}) };
 }
 const plain = (lines: string[]) => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
@@ -117,7 +117,7 @@ test("stream overlays belong only to the selected session and exact opened view"
 
 test("full multiline answers retain their tail and scroll from the followed position", () => {
   const state = emptyState();
-  state.view = { kind: "session", sessionId: "s" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s" };
   state.transcript = [{ role: "assistant", text: "FIRST\n\n" + "x".repeat(600) + "\n" + "line\n".repeat(30) + "LAST" }];
   const transcript = transcriptLines(state.transcript, 80).map(line => plain([line]).trimEnd()).join("\n");
   assert.ok(transcript.includes("FIRST\n\n"));

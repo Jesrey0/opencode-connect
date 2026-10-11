@@ -6,15 +6,15 @@ import { nativeFixture, session, assistant, user } from "./native-fixture.js";
 
 function snapshot(): ConsoleSnapshot {
   return {
-    ready: true,
+    codexVisibility: "recent + supervised", ready: true,
     release: "2.0.24",
     pid: 7,
     sessions: [
-      { id: "s1", title: "Fix the parser", running: true, outcome: null, agent: "build", model: "openai/a", variant: "low", cwd: "/tmp/a", updatedMs: 5 },
-      { id: "s2", title: "Old task", running: false, outcome: "succeeded", agent: "build", model: "openai/b", variant: null, cwd: "/tmp/b", updatedMs: 3 },
-      { id: "s3", title: null, running: false, outcome: "failed", agent: null, model: null, variant: null, cwd: "/tmp/c", updatedMs: 1 },
+      { runtime: "opencode", id: "s1", title: "Fix the parser", running: true, outcome: null, agent: "build", model: "openai/a", variant: "low", cwd: "/tmp/a", updatedMs: 5 },
+      { runtime: "opencode", id: "s2", title: "Old task", running: false, outcome: "succeeded", agent: "build", model: "openai/b", variant: null, cwd: "/tmp/b", updatedMs: 3 },
+      { runtime: "opencode", id: "s3", title: null, running: false, outcome: "failed", agent: null, model: null, variant: null, cwd: "/tmp/c", updatedMs: 1 },
     ],
-    pending: [{ kind: "permission", sessionId: "s1", id: "p1", label: "write · src/a.ts" }],
+    pending: [{ runtime: "opencode", kind: "permission", sessionId: "s1", id: "p1", label: "write · src/a.ts" }],
     usage: { sessions: 3, prompts: 9, steps: 20, tokensTotal: 1500, costUsd: 0.42, activeDays: 2, streak: 1, models: ["openai/a"] },
     observedAtMs: 100,
   };
@@ -43,7 +43,7 @@ test("dashboard navigation moves selection and enter opens a session", () => {
   assert.equal(handleKey(state, snap, { kind: "char", value: "k" }), true);
   assert.equal(state.selected, 0);
   assert.equal(handleKey(state, snap, { kind: "enter" }), true);
-  assert.deepEqual(state.view, { kind: "session", sessionId: "s1" });
+  assert.deepEqual(state.view, { kind: "session", runtime: "opencode", sessionId: "s1" });
   assert.equal(state.follow, true);
   assert.equal(handleKey(state, snap, { kind: "escape" }), true);
   assert.deepEqual(state.view, { kind: "dashboard" });
@@ -57,12 +57,12 @@ test("active-only toggle re-filters and clamps selection", () => {
   assert.equal(state.activeOnly, true);
   assert.equal(state.selected, 0);
   assert.equal(handleKey(state, snap, { kind: "enter" }), true);
-  assert.deepEqual(state.view, { kind: "session", sessionId: "s1" });
+  assert.deepEqual(state.view, { kind: "session", runtime: "opencode", sessionId: "s1" });
 });
 
 test("transcript scroll pauses follow; G re-follows; q exits from dashboard", () => {
   const state: ConsoleState = emptyState();
-  state.view = { kind: "session", sessionId: "s1" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
   assert.equal(handleKey(state, snapshot(), { kind: "down" }), true);
   assert.equal(state.follow, false);
   assert.equal(state.scroll, 1);
@@ -213,7 +213,7 @@ test("console refresh coalesces events without overlapping native reads", async 
 for (const fails of [false, true]) {
   test(`late transcript ${fails ? "error" : "content"} cannot affect a newly opened view`, async () => {
     const state = emptyState();
-    state.view = { kind: "session", sessionId: "s1" };
+    state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
     const started = deferred<void>();
     const release = deferred<NonNullable<ConsoleState["transcript"]>>();
     const observer = new ConsoleObserver(state, {
@@ -234,7 +234,7 @@ for (const fails of [false, true]) {
 
 test("late transcript error cannot leak into another session", async () => {
   const state = emptyState();
-  state.view = { kind: "session", sessionId: "s1" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
   const started = deferred<void>();
   const release = deferred<NonNullable<ConsoleState["transcript"]>>();
   const observer = new ConsoleObserver(state, {
@@ -249,7 +249,7 @@ test("late transcript error cannot leak into another session", async () => {
   observer.applyKeys([{ kind: "escape" }, { kind: "down" }, { kind: "enter" }]);
   release.reject(new Error("session one read failed"));
   await refresh;
-  assert.deepEqual(state.view, { kind: "session", sessionId: "s2" });
+  assert.deepEqual(state.view, { kind: "session", runtime: "opencode", sessionId: "s2" });
   assert.equal(state.transcriptError, null);
   await observer.refresh();
   assert.deepEqual(state.transcript, [{ role: "assistant", text: "session two" }]);
@@ -257,7 +257,7 @@ test("late transcript error cannot leak into another session", async () => {
 
 test("scrolling and help retain the loaded transcript without another read", async () => {
   const state = emptyState();
-  state.view = { kind: "session", sessionId: "s1" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
   let reads = 0;
   const observer = new ConsoleObserver(state, {
     snapshot: async () => snapshot(),
@@ -279,7 +279,7 @@ test("scrolling and help retain the loaded transcript without another read", asy
 
 test("failed reads retain cached content and recover while follow is paused", async () => {
   const state = emptyState();
-  state.view = { kind: "session", sessionId: "s1" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
   const cached = [{ role: "user" as const, text: "cached" }];
   state.transcript = cached;
   let reads = 0;
@@ -303,7 +303,7 @@ test("failed reads retain cached content and recover while follow is paused", as
 
 test("console ignores late reads and redraws after quitting", async () => {
   const state = emptyState();
-  state.view = { kind: "session", sessionId: "s1" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
   const started = deferred<void>();
   const release = deferred<NonNullable<ConsoleState["transcript"]>>();
   let redraws = 0;

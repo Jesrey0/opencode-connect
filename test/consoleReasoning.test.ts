@@ -14,8 +14,8 @@ import { assistant, nativeFixture, user } from "./native-fixture.js";
 // provider text/state round-trip, not a separate guaranteed-safe summary.
 
 const snapshot = (): ConsoleSnapshot => ({
-  ready: true, release: "2.0.24", pid: 1, observedAtMs: 0, usage: null, pending: [],
-  sessions: [{ id: "s", title: "Activity", running: true, outcome: null, agent: "build", model: "openai/a", variant: null, cwd: "/tmp", updatedMs: 0 }],
+  codexVisibility: "recent + supervised", ready: true, release: "2.0.24", pid: 1, observedAtMs: 0, usage: null, pending: [],
+  sessions: [{ runtime: "opencode", id: "s", title: "Activity", running: true, outcome: null, agent: "build", model: "openai/a", variant: null, cwd: "/tmp", updatedMs: 0 }],
 });
 type ReasoningEvent = Extract<OpenCodeEvent, { type: "session.reasoning.started" | "session.reasoning.delta" | "session.reasoning.ended" }>;
 let sequence = 0;
@@ -42,7 +42,7 @@ function active(): SessionMessageInfo & { type: "assistant" } {
 }
 function observerFor(transcript: () => Promise<TranscriptEntry[]> = async () => []) {
   const state = emptyState();
-  state.view = { kind: "session", sessionId: "s" };
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s" };
   return { state, observer: new ConsoleObserver(state, { snapshot: async () => snapshot(), transcript }, () => {}) };
 }
 const plain = (lines: string[]) => lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
