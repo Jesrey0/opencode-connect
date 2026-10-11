@@ -7,7 +7,7 @@ import { nativeFixture, session, assistant, user, type NativeRequest } from "./n
 
 const capabilities = { permissions: "operator-selected", modes: [], defaultMode: null };
 const supervised = (sessionId = "worker") => ({ sessionId, cwd: "/work/codex", title: "Codex task", status: "inProgress", outcome: "unknown", executionKnown: true, output: "", capabilities, mode: null, pendingActions: [] });
-function fixture(rpc: (request: NativeRequest) => unknown) {
+function fixture(rpc: (request: NativeRequest) => unknown | Promise<unknown>) {
   return nativeFixture(request => {
     if (request.path.startsWith("/api/rpc/")) return rpc(request);
     if (request.path === "/api/server/info" || request.path === "/api/info") return { version: "2.0.24", pid: 3, urls: [], paths: { tmp: "/tmp" } };
@@ -75,6 +75,22 @@ test("fair recent ordering preserves trusted timestamps and stable unknown Codex
   assert.deepEqual(snapshot.sessions.map(entry => entry.id), ["s", "newer", "older", "unknown-first", "unknown-last"]);
   assert.deepEqual(snapshot.sessions.filter(entry => entry.runtime === "codex").map(entry => entry.updatedMs),
     [Date.parse("2026-10-11T12:00:00Z"), Date.parse("2026-10-10T12:00:00Z"), null, null]);
+});
+
+test("cold Codex history waits for native ACP startup beyond three seconds", { timeout: 10_000 }, async () => {
+  const native = fixture(async request => {
+    if (request.path.endsWith("/list")) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, 3_200);
+        request.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("history request aborted")); }, { once: true });
+      });
+      return { output: { sessions: [{ sessionId: "cold-history", cwd: "/work/codex", title: "Cold start", capabilities }], nextCursor: null } };
+    }
+    return { output: { sessions: [] } };
+  });
+  const snapshot = await observe(native.client);
+  assert.ok(snapshot.sessions.some(entry => entry.runtime === "codex" && entry.id === "cold-history"));
+  assert.doesNotMatch(snapshot.codexVisibility, /history unavailable/);
 });
 
 test("console includes Codex history and active worker omitted by native listing", async () => {

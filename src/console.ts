@@ -28,6 +28,8 @@ const REDRAW_THROTTLE_MS = 50;
 const RECONNECT_MS = 1000;
 const REFRESH_FALLBACK_MS = 5000;
 const CODEX_HISTORY_REFRESH_MS = 5 * 60 * 1000;
+// Codex history opens a native ACP metadata session. A live cold read can take >3s.
+const CODEX_HISTORY_TIMEOUT_MS = 12_000;
 const RECENT_LIMIT = 25;
 const TRANSCRIPT_LIMIT = 25;
 // One payload-free admission order for both overlays. Never evict an unflushed
@@ -42,7 +44,7 @@ type LiveMessage = {
 
 type CodexInventory = { sessions: ConsoleSession[]; pending: ConsolePending[]; visibility: string };
 
-export async function observeCodex(client: OpenCodeClient, readHistory = () => codexQuery(client, { type: "sessions" }, AbortSignal.timeout(3000))): Promise<CodexInventory> {
+export async function observeCodex(client: OpenCodeClient, readHistory = () => codexQuery(client, { type: "sessions" }, AbortSignal.timeout(CODEX_HISTORY_TIMEOUT_MS))): Promise<CodexInventory> {
   const signal = AbortSignal.timeout(3000);
   const [history, supervised] = await Promise.allSettled([
     readHistory(),
@@ -226,7 +228,7 @@ export function consoleReads(client: OpenCodeClient, now = Date.now): ConsoleRea
   let transcript: { sessionId: string; readAt: number; result: Promise<TranscriptEntry[]> } | undefined;
   const readHistory = () => {
     if (!history || now() - history.readAt >= CODEX_HISTORY_REFRESH_MS) {
-      history = { readAt: now(), result: codexQuery(client, { type: "sessions" }, AbortSignal.timeout(3000)) };
+      history = { readAt: now(), result: codexQuery(client, { type: "sessions" }, AbortSignal.timeout(CODEX_HISTORY_TIMEOUT_MS)) };
     }
     return history.result;
   };

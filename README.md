@@ -755,9 +755,9 @@ page. History-only execution status and models remain unknown. Unsupported or
 disconnected Codex RPC leaves OpenCode visible and marks partial visibility;
 history and supervised-status failures are independent. Codex supervised status uses the five-second fallback cadence, while
 expensive native Codex history discovery is cached for five minutes (including
-failed reads). Dashboard `r` explicitly refreshes history and quota. Both Codex
-metadata requests have a three-second client deadline, and the plugin releases
-metadata-read ownership on cancellation. Codex detail shows the latest 25 bounded native
+failed reads). Dashboard `r` explicitly refreshes history and quota. Native Codex history reads have a twelve-second deadline to accommodate
+ACP startup, while supervised status keeps a three-second deadline. The plugin
+releases metadata-read ownership on cancellation. Codex detail shows the latest 25 bounded native
 message previews (up to 512 characters each, with truncation markers), replaces
 each history snapshot, and never advertises live deltas. No quota reads or
 session mutations are performed by this inventory view.
