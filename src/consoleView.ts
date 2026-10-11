@@ -99,7 +99,7 @@ export function visibleSessions(snapshot: ConsoleSnapshot | null, activeOnly: bo
 // deterministic as the snapshot changes underneath it.
 export function syncSelection(state: ConsoleState, sessions: ConsoleSession[]): void {
   if (sessions.length === 0) state.selected = 0;
-  else state.selected = Math.min(state.selected, sessions.length - 1);
+  else state.selected = Math.max(0, Math.min(state.selected, sessions.length - 1));
 }
 
 export type InputKey =
@@ -111,13 +111,46 @@ export type InputKey =
   | { kind: "home" } | { kind: "end" };
 
 const ESCAPE_SEQUENCE_MAX = 32;
+const BRACKETED_PASTE_END = [0x1b, 0x5b, 0x32, 0x30, 0x31, 0x7e];
+const PASTE_CANCEL = 0x03;
 
 export class InputDecoder {
   private escape: number[] = [];
+  private pasting = false;
+  private pasteEndMatched = 0;
+  // Any non-empty escape buffer means the terminal may still be sending the
+  // rest of a sequence. Reporting it as pending lets the caller arm the flush
+  // timer, so a truncated sequence is cleared instead of silently absorbing
+  // every later key. Paste state is excluded: an unfinished paste has no
+  // sequence to flush and must never be reinterpreted on a timer.
   pendingEscape(): boolean {
     return this.escape.length > 0;
   }
   push(byte: number): InputKey[] {
+    if (this.pasting) {
+      // Explicit operator recovery for a paste whose end marker never arrives.
+      // Raw mode delivers Ctrl-C as a byte, so it is the only in-band escape
+      // hatch. It cancels the paste and is not forwarded as input, so pasted
+      // shortcuts cannot reach the view. Pasted Ctrl-C ends the paste early;
+      // that trade is deliberate and is the point of the hatch.
+      if (byte === PASTE_CANCEL) {
+        this.pasting = false;
+        this.pasteEndMatched = 0;
+        return [];
+      }
+      // Ignore every pasted byte, including shortcuts and line breaks. Track
+      // only the fixed end marker; it may be split across stdin chunks.
+      if (byte === BRACKETED_PASTE_END[this.pasteEndMatched]) {
+        this.pasteEndMatched++;
+        if (this.pasteEndMatched === BRACKETED_PASTE_END.length) {
+          this.pasting = false;
+          this.pasteEndMatched = 0;
+        }
+      } else {
+        this.pasteEndMatched = byte === BRACKETED_PASTE_END[0] ? 1 : 0;
+      }
+      return [];
+    }
     if (this.escape.length === 0) {
       if (byte === 0x1b) { this.escape.push(byte); return []; }
       if (byte === 0x0d || byte === 0x0a) return [{ kind: "enter" }];
@@ -136,6 +169,9 @@ export class InputDecoder {
     this.escape = [];
     const body = sequence.slice(2).map((value) => String.fromCharCode(value)).join("");
     switch (body) {
+      case "200~":
+        if (sequence[1] === 0x5b) this.pasting = true;
+        return [];
       case "A": return [{ kind: "up" }];
       case "B": return [{ kind: "down" }];
       case "C": return [{ kind: "right" }];
@@ -148,6 +184,9 @@ export class InputDecoder {
     }
   }
   flushEscape(): InputKey[] {
+    // A standalone ESC is a real key. A longer buffer is a truncated sequence
+    // that carries no standalone escape, so it is dropped -- but the buffer
+    // must still be cleared, otherwise the stale bytes keep consuming keys.
     const standalone = this.escape.length === 1;
     this.escape = [];
     return standalone ? [{ kind: "escape" }] : [];
@@ -156,7 +195,7 @@ export class InputDecoder {
 
 export function sessionStatus(session: ConsoleSession): string {
   if (session.running) return "running";
-  if (session.running === null) return "unknown";
+  if (session.running === null) return "unverified";
   return session.outcome ?? "idle";
 }
 
@@ -175,6 +214,7 @@ export function handleKey(state: ConsoleState, snapshot: ConsoleSnapshot | null,
   const sessions = visibleSessions(snapshot, state.activeOnly);
   syncSelection(state, sessions);
   if (state.view.kind === "dashboard") {
+    const lastIndex = Math.max(0, sessions.length - 1);
     if (key.kind === "char" && key.value === "q") { state.quit = true; return true; }
     if (key.kind === "char" && key.value === "a") {
       state.activeOnly = !state.activeOnly;
@@ -187,18 +227,18 @@ export function handleKey(state: ConsoleState, snapshot: ConsoleSnapshot | null,
       case "up":
         state.selected = Math.max(0, state.selected - 1); break;
       case "down":
-        state.selected = Math.min(sessions.length - 1, state.selected + 1); break;
+        state.selected = Math.min(lastIndex, state.selected + 1); break;
       case "pageUp":
         state.selected = Math.max(0, state.selected - state.pageSize); break;
       case "pageDown":
-        state.selected = Math.min(sessions.length - 1, state.selected + state.pageSize); break;
+        state.selected = Math.min(lastIndex, state.selected + state.pageSize); break;
       case "home":
         state.selected = 0; break;
       case "end":
         state.selected = Math.max(0, sessions.length - 1); break;
       case "char":
         if (char === "k") state.selected = Math.max(0, state.selected - 1);
-        else if (char === "j") state.selected = Math.min(sessions.length - 1, state.selected + 1);
+        else if (char === "j") state.selected = Math.min(lastIndex, state.selected + 1);
         else if (char === "g") state.selected = 0;
         else if (char === "G") state.selected = Math.max(0, sessions.length - 1);
         else return false;
@@ -247,7 +287,12 @@ export function handleKey(state: ConsoleState, snapshot: ConsoleSnapshot | null,
   }
 }
 
+function nonnegativeCells(value: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+}
+
 export function elide(text: string, width: number): string {
+  width = nonnegativeCells(width);
   text = oneLine(text);
   if (width <= 0) return "";
   if (displayWidth(text) <= width) return text;
@@ -307,6 +352,7 @@ function takeCells(text: string, width: number): string {
 // Keep the directory's meaningful tail instead of repeatedly showing only the
 // shared /home/... prefix. This also works for long single path components.
 export function pathLabel(path: string, width: number): string {
+  width = nonnegativeCells(width);
   path = oneLine(path);
   if (width <= 0) return "";
   if (displayWidth(path) <= width) return path;
@@ -323,11 +369,13 @@ export function pathLabel(path: string, width: number): string {
 }
 
 export function row(text: string, width: number): string {
+  width = nonnegativeCells(width);
   const fitted = elide(text, width);
   return fitted + " ".repeat(Math.max(0, width - displayWidth(fitted)));
 }
 
 export function rowLeftRight(left: string, right: string, width: number): string {
+  width = nonnegativeCells(width);
   right = elide(right, Math.max(0, width));
   const room = width - displayWidth(right) - 1;
   if (room <= 0) return row(right, width);
@@ -336,7 +384,7 @@ export function rowLeftRight(left: string, right: string, width: number): string
 }
 
 export function rule(width: number): string {
-  return "─".repeat(Math.max(0, width));
+  return "─".repeat(nonnegativeCells(width));
 }
 
 export function styled(text: string, code: string): string {
@@ -451,6 +499,7 @@ function toolPriority(status: string): number {
 }
 
 export function transcriptLines(entries: TranscriptEntry[], width: number, running = false, agent: string | null = null, runtime: Runtime = "opencode"): string[] {
+  width = nonnegativeCells(width);
   if (width <= 0) return [];
   const lines: string[] = [];
   for (const [index, entry] of entries.entries()) {
@@ -475,10 +524,16 @@ export function transcriptLines(entries: TranscriptEntry[], width: number, runni
   return lines;
 }
 
-function quotaLine(quota: ConsoleQuota | null): string {
+function quotaLine(quota: ConsoleQuota | null, width: number): string {
   if (!quota || (quota.status === "connecting" && !quota.usage)) return "Codex quota · connecting…";
-  if (quota.status === "unavailable") return `Codex quota · unavailable${quota.watcher === "manual" ? " · manual · press r to retry" : ""}`;
+  if (quota.status === "unavailable") return "Codex quota · unavailable · press r to retry";
   const bucket = quota.usage?.buckets.find(entry => entry.bucketKey === "codex");
+  if (!bucket) {
+    const label = width < 32
+      ? quota.status === "stale" ? "Codex stale · no bucket" : "Codex · no Codex bucket"
+      : `Codex quota · no codex-labeled bucket${quota.status === "stale" ? " · stale" : ""}`;
+    return `${label}${quota.watcher === "manual" ? " · r refresh" : ""}`;
+  }
   const window = (duration: number) => {
     const item = [bucket?.primary, bucket?.secondary].find(entry => entry?.windowDurationMins === duration);
     if (!item) return null;
@@ -492,8 +547,12 @@ function quotaLine(quota: ConsoleQuota | null): string {
 }
 
 export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | null, state: ConsoleState, width: number, height: number, quota: ConsoleQuota | null = null): string[] {
+  width = nonnegativeCells(width);
+  height = nonnegativeCells(height);
   if (width <= 0 || height <= 0) return [];
-  const lines = [styled(row(`opencode connect${error ? " · stale" : ""} · read-only`, width), BOLD)];
+  const connection = error ? "stale" : !snapshot ? "connecting" : snapshot.ready ? "" : "not ready";
+  const lines = [styled(row(`opencode connect${connection ? ` · ${connection}` : ""} · read-only`, width), BOLD)];
+  if (height === 1) return lines;
   const room = Math.max(0, height - 2);
   if (state.help) {
     for (const label of ["↑/↓ select/scroll · Enter open", "a active/all · Esc/b back", "Home start · End/G latest", "? close help · q exit"]) lines.push(row(label, width));
@@ -503,11 +562,20 @@ export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | nul
     const sessions = visibleSessions(snapshot, state.activeOnly);
     syncSelection(state, sessions);
     lines.push(styled(row(`${sessions.length} sessions · ${sessions.filter(session => session.running).length} running · ${snapshot?.pending.length ?? 0} pending`, width), TEXT));
-    if (quota) lines.push(styled(row(quotaLine(quota), width), quota.status !== "available" ? YELLOW : DIM));
     if (error) lines.push(styled(row(`Stale: ${error}`, width), RED));
     const selected = sessions[state.selected];
     if (selected) {
-      lines.push(styled(row(`> ${selected.runtime} · ${sessionStatus(selected)} · ${selected.title ?? "Untitled"}`, width), BOLD));
+      if (width < 32) {
+        lines.push(styled(row(`> ${selected.title ?? "Untitled"}`, width), BOLD));
+        lines.push(styled(row(`  ${selected.runtime} · ${sessionStatus(selected)}`, width), DIM));
+      } else {
+        lines.push(styled(row(`> ${selected.runtime} · ${sessionStatus(selected)} · ${selected.title ?? "Untitled"}`, width), BOLD));
+      }
+    } else {
+      lines.push(styled(row(state.activeOnly ? "No running sessions · a show all" : "No sessions observed yet", width), DIM));
+    }
+    if (quota) lines.push(styled(row(quotaLine(quota, width), width), quota.status !== "available" ? YELLOW : DIM));
+    if (selected) {
       lines.push(styled(row(`Model ${modelLabel(selected)}`, width), DIM));
       lines.push(styled(row(`Cwd ${pathLabel(selected.cwd, width - 4)}`, width), DIM));
     }
@@ -516,14 +584,16 @@ export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | nul
   }
   lines.length = Math.min(lines.length, height - 1);
   while (lines.length < height - 1) lines.push(row("", width));
-  const footer = state.view.kind === "session" && !state.help
-    ? `${state.follow ? "Latest" : "Paused · G latest"} · Esc back · ? help`
-    : "↑/↓ select · Enter open · ? help";
+  const footer = state.help ? "? / Esc close help"
+    : state.view.kind === "session" ? `${state.follow ? "Latest" : "Paused · G latest"} · Esc back · ? help`
+      : "↑/↓ select · Enter open · ? help";
   lines.push(styled(row(footer, width), DIM));
   return lines;
 }
 
 export function renderFrame(snapshot: ConsoleSnapshot | null, error: string | null, state: ConsoleState, width: number, height: number, quota: ConsoleQuota | null = null): string[] {
+  width = nonnegativeCells(width);
+  height = nonnegativeCells(height);
   const sessions = visibleSessions(snapshot, state.activeOnly);
   syncSelection(state, sessions);
   if (width < 44 || height < 14) return renderTiny(snapshot, error, state, width, height, quota);
@@ -559,7 +629,7 @@ export function renderFrame(snapshot: ConsoleSnapshot | null, error: string | nu
     // Place the independent Codex quota directly after native OpenCode usage.
     const quotaIndex = lines.findIndex(line => stripVTControlCharacters(line).includes(" Sessions"));
     if (quota && quotaIndex > 0 && stripVTControlCharacters(lines[quotaIndex - 1]).trim() === "") {
-      lines[quotaIndex - 1] = styled(row(` ${quotaLine(quota)}`, width), quota.status !== "available" ? YELLOW : DIM);
+      lines[quotaIndex - 1] = styled(row(` ${quotaLine(quota, width)}`, width), quota.status !== "available" ? YELLOW : DIM);
     }
   }
 
@@ -619,6 +689,8 @@ function renderDashboard(lines: string[], state: ConsoleState, snapshot: Console
   }
   const selected = sessions[state.selected];
   const detail: string[] = selected ? [
+    ...(selected.runtime === "codex" && selected.running === null
+      ? [styled(row(" Codex · execution outcome unverified", width), YELLOW)] : []),
     styled(row(` Model  ${modelLabel(selected)}`, width), TEXT),
     styled(rowLeftRight(` Agent  ${selected.agent ?? "<unset>"}`, `${shortId(selected.id)} `, width), DIM),
     styled(row(` Cwd    ${pathLabel(selected.cwd, width - 8)}`, width), DIM),
@@ -658,13 +730,18 @@ function renderSessionView(lines: string[], state: ConsoleState, snapshot: Conso
     : "";
   lines.push(styled(rowLeftRight(` ${runtime} · ${session?.title ?? (state.view.kind === "session" ? state.view.sessionId : "?")}`, live ? `running · live${phase} ` : `${session ? sessionStatus(session) : "unavailable"}${running && !fresh ? " · stale" : ""} `, width), BOLD));
   if (runtime === "codex") lines.push(styled(row(" Bounded history previews · no live deltas", width), DIM));
+  if (!compact && runtime === "codex" && session?.running === null) {
+    lines.push(styled(row(" Codex · execution outcome unverified", width), YELLOW));
+  }
   if (session) {
     lines.push(styled(row(` ${modelLabel(session)}${compact ? "" : ` · agent ${session.agent ?? "<unset>"}`}`, width), DIM));
     if (!compact) lines.push(styled(row(` Cwd ${pathLabel(session.cwd, width - 5)}`, width), DIM));
   }
   const pending = (snapshot?.pending ?? []).filter((action) => session && action.runtime === session.runtime && action.sessionId === session.id);
   if (pending.length) lines.push(styled(row(` Pending ${pending.length} · ${pending[0].kind}: ${pending[0].label}`, width), YELLOW));
-  if (state.transcriptError) lines.push(styled(row(` Transcript stale: ${oneLine(state.transcriptError)}`, width), RED));
+  if (state.transcriptError) {
+    lines.push(styled(row(` Transcript ${state.transcript?.length ? "stale" : "unavailable"}: ${oneLine(state.transcriptError)}`, width), RED));
+  }
   if (!compact) lines.push(styled(rule(width), DIM));
   const rendered = transcriptLines(state.transcript ?? [], width, live, session?.agent ?? null, runtime);
   const room = Math.max(0, height - (lines.length - start));
@@ -674,7 +751,9 @@ function renderSessionView(lines: string[], state: ConsoleState, snapshot: Conso
   state.pageSize = Math.max(1, room);
   const shown = rendered.slice(offset, offset + room);
   if (shown.length === 0) {
-    lines.push(styled(row(state.transcript === null ? " Loading transcript…" : " No messages recorded yet.", width), DIM));
+    if (!state.transcriptError) {
+      lines.push(styled(row(state.transcript === null ? " Loading transcript…" : " No messages recorded yet.", width), DIM));
+    }
   } else {
     for (const line of shown) {
       lines.push(line + " ".repeat(Math.max(0, width - displayWidth(line))));

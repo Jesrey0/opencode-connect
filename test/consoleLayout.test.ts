@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { stripVTControlCharacters } from "node:util";
 import {
-  BOLD, CYAN, TEXT, displayWidth, elide, emptyState, handleKey,
+  BOLD, CYAN, TEXT, InputDecoder, displayWidth, elide, emptyState, handleKey,
   oneLine, pathLabel, renderFrame, row, rowLeftRight, transcriptLines,
   type ConsoleSnapshot, type ConsoleState, type TranscriptEntry,
 } from "../src/consoleView.js";
@@ -15,7 +15,7 @@ function snapshot(): ConsoleSnapshot {
       { runtime: "opencode", id: "s2", title: "Verify the parser", running: false, outcome: "succeeded", agent: "build", model: "openai/gpt-6.1-sol", variant: null, cwd: "/home/operator/projects/parser", updatedMs: 2 },
       { runtime: "opencode", id: "s3", title: "Review native events", running: false, outcome: "failed", agent: "review", model: "anthropic/claude-sonnet-4-6", variant: null, cwd: "/home/operator/projects/events", updatedMs: 1 },
     ],
-    pending: [{ runtime: "opencode", kind: "permission", sessionId: "s1", id: "p1", label: "write · src/consoleView.ts" }],
+    pending: [{ runtime: "opencode", kind: "permission", sessionId: "s1", id: "p1", label: "native permission request" }],
     usage: { sessions: 12, prompts: 48, steps: 136, tokensTotal: 234500, costUsd: 2.34, activeDays: 4, streak: 3,
       models: ["openai/gpt-6.1-sol", "anthropic/claude-sonnet-4-6", "google/gemini-3.1-pro"] },
   };
@@ -53,7 +53,7 @@ for (const [width, height] of [[80, 24], [120, 32]]) {
       rule(width),
       splitRow(" 1 running · 1 pending", "opencode 2.0.24 · pid 7 ", width),
       " Codex · recent + supervised",
-      " Needs 0xOperator · permission: write · src/consoleView.ts",
+      " Needs 0xOperator · permission: native permission request",
       splitRow(" Usage  234.5k tokens · $2.34 · 48 prompts · 136 steps", "4 days · 3 streak ", width),
       " Models openai/gpt-6.1-sol, anthropic/claude-sonnet-4-6, google/gemini-3.1-pro",
       "",
@@ -93,6 +93,115 @@ test("40x10 tiny dashboard keeps status, selected context and navigation", () =>
   assert.ok(plain(renderFrame(snapshot(), null, state, 40, 10)).some(line => line.startsWith("> opencode · succeeded · Verify")));
 });
 
+test("empty inventory navigation keeps a valid selection", () => {
+  const state = emptyState();
+  for (const key of [{ kind: "down" }, { kind: "pageDown" }, { kind: "char", value: "j" }] as const) {
+    handleKey(state, null, key);
+    assert.equal(state.selected, 0);
+  }
+  const snap = snapshot();
+  snap.sessions = [];
+  state.selected = -4;
+  assertFrame(renderFrame(snap, null, state, 80, 24), 80, 24);
+  assert.equal(state.selected, 0);
+});
+
+test("bracketed paste ignores shortcuts and recognizes split end markers", () => {
+  const decoder = new InputDecoder();
+  const feed = (chunk: string) => [...Buffer.from(chunk)].flatMap(byte => decoder.push(byte));
+  // Pasted bytes, including shortcut characters and line breaks, are never
+  // emitted as keys. The end marker may be split across stdin chunks, and a
+  // near-miss marker such as ESC[201x stays paste content.
+  assert.deepEqual(feed("\x1b[200~qra?\r\n\x1b[201x"), []);
+  assert.deepEqual(feed("\x1b[20"), []);
+  // A paste in progress holds no escape sequence, so nothing is ever pending
+  // for the caller's flush timer to reinterpret as a key.
+  assert.equal(decoder.pendingEscape(), false);
+  assert.deepEqual(decoder.flushEscape(), []);
+  assert.deepEqual(feed("1~j"), [{ kind: "char", value: "j" }]);
+  assert.deepEqual(feed("\x1b[200~\x1b[201~q"), [{ kind: "char", value: "q" }]);
+});
+
+test("a truncated escape sequence is flushed instead of swallowing later keys", () => {
+  const decoder = new InputDecoder();
+  const feed = (chunk: string) => [...Buffer.from(chunk)].flatMap(byte => decoder.push(byte));
+  // Any incomplete sequence counts as pending so the caller arms its flush
+  // timer; a longer pending buffer is not a standalone escape.
+  assert.deepEqual(feed("\x1b[20"), []);
+  assert.equal(decoder.pendingEscape(), true);
+  assert.deepEqual(decoder.flushEscape(), []);
+  assert.equal(decoder.pendingEscape(), false);
+  // The stale bytes must not go on consuming keys.
+  assert.deepEqual(feed("q"), [{ kind: "char", value: "q" }]);
+  assert.deepEqual(feed("\x1b["), []);
+  assert.equal(decoder.pendingEscape(), true);
+  assert.deepEqual(decoder.flushEscape(), []);
+  assert.deepEqual(feed("q"), [{ kind: "char", value: "q" }]);
+  // Flushing with nothing pending stays inert.
+  assert.deepEqual(decoder.flushEscape(), []);
+});
+
+test("Ctrl-C recovers a paste whose end marker never arrives", () => {
+  const decoder = new InputDecoder();
+  const feed = (chunk: string) => [...Buffer.from(chunk)].flatMap(byte => decoder.push(byte));
+  assert.deepEqual(feed("\x1b[200~qqq"), []);
+  assert.deepEqual(feed("jk\r\n?"), []);
+  // Ctrl-C is the operator recovery path: it cancels the paste without leaking
+  // a key, and no pasted shortcut ever reached the view.
+  assert.deepEqual(feed("\x03"), []);
+  assert.deepEqual(feed("q"), [{ kind: "char", value: "q" }]);
+  // Match state is reset, so a later paste still ends on its own marker.
+  assert.deepEqual(feed("\x1b[200~z"), []);
+  assert.deepEqual(feed("\x1b[201~"), []);
+  assert.deepEqual(feed("q"), [{ kind: "char", value: "q" }]);
+  // Outside a paste Ctrl-C remains inert rather than becoming a shortcut key.
+  assert.deepEqual(feed("\x03"), []);
+  assert.deepEqual(feed("q"), [{ kind: "char", value: "q" }]);
+});
+
+test("invalid and fractional terminal dimensions cannot break frame rendering", () => {
+  for (const [width, height] of [[NaN, 10], [Infinity, 10], [44, Infinity], [44, NaN], [-1, 10], [44, -1], [0, 10]]) {
+    assert.deepEqual(renderFrame(snapshot(), null, emptyState(), width, height), []);
+  }
+  assertFrame(renderFrame(snapshot(), null, emptyState(), 40.9, 8.9), 40, 8);
+  assert.equal(row("text", Infinity), "");
+  assert.equal(rowLeftRight("left", "right", NaN), "");
+});
+
+test("tiny startup and not-ready frames disclose connection state", () => {
+  const connecting = plain(renderFrame(null, null, emptyState(), 40, 10));
+  assert.match(connecting[0], /connecting/);
+  assert.ok(connecting.some(line => line.includes("No sessions observed yet")));
+  assert.match(plain(renderFrame(null, null, emptyState(), 40, 1))[0], /connecting/);
+  const snap = snapshot();
+  snap.ready = false;
+  assert.match(plain(renderFrame(snap, null, emptyState(), 40, 10))[0], /not ready/);
+  const help = emptyState();
+  help.help = true;
+  assert.match(plain(renderFrame(snap, null, help, 24, 3)).at(-1)!, /close help/);
+});
+
+test("Codex rows and details identify unverified execution outcomes", () => {
+  const snap = snapshot();
+  snap.pending = [];
+  snap.sessions = [{ ...snap.sessions[0], runtime: "codex", title: "Historical Codex", running: null, outcome: null }];
+  const dashboard = plain(renderFrame(snap, null, emptyState(), 80, 24));
+  assert.match(dashboard.join("\n"), /> codex\s+unverified\s+Historical Codex/);
+  assert.ok(dashboard.some(line => line.includes("Codex · execution outcome unverified")));
+  const tiny = plain(renderFrame(snap, null, emptyState(), 40, 10));
+  assert.ok(tiny.some(line => line.includes("codex · unverified")));
+  const narrow = plain(renderFrame(snap, null, emptyState(), 24, 8));
+  assert.ok(narrow.some(line => line.startsWith("> Historical Codex")));
+  assert.ok(narrow.some(line => line.includes("codex · unverified")));
+  const degraded = plain(renderFrame(snap, "Disconnected", emptyState(), 24, 6, { status: "connecting", usage: null }));
+  assert.ok(degraded.some(line => line.startsWith("> Historical Codex")));
+  assert.ok(degraded.some(line => line.includes("codex · unverified")));
+  assert.ok(degraded.some(line => line.includes("Stale: Disconnected")));
+  const detail = sessionState([]);
+  detail.view = { kind: "session", runtime: "codex", sessionId: "s1" };
+  assert.ok(plain(renderFrame(snap, null, detail, 80, 24)).some(line => line.includes("Codex · execution outcome unverified")));
+});
+
 test("the dashboard renders sanitized Codex quota windows and labels retained data stale", () => {
   const quota = {
     status: "stale" as const,
@@ -108,6 +217,14 @@ test("the dashboard renders sanitized Codex quota windows and labels retained da
   assert.equal(frame.length, 24);
 });
 
+test("unavailable Codex quota always offers the working manual retry", () => {
+  for (const watcher of ["watching", "manual"] as const) {
+    const frame = plain(renderFrame(snapshot(), null, emptyState(), 80, 24,
+      { status: "unavailable", usage: null, watcher }));
+    assert.ok(frame.some(line => line.includes("Codex quota · unavailable · press r to retry")));
+  }
+});
+
 test("combined dashboard quota never attributes another bucket to Codex", () => {
   for (const [width, height] of [[24, 8], [40, 10], [44, 14], [80, 24], [120, 32]]) {
     for (const bucketKey of ["other", null, "codex"]) {
@@ -118,10 +235,9 @@ test("combined dashboard quota never attributes another bucket to Codex", () => 
       const frame = renderFrame(snapshot(), null, emptyState(), width, height, quota);
       assertFrame(frame, width, height);
       const text = plain(frame).join("\n");
-      assert.match(text, /Codex · 5h/);
-      if (bucketKey === "codex") assert.match(text, /5h 31%/);
+      if (bucketKey === "codex") assert.match(text, /Codex · 5h 31%/);
       else {
-        assert.match(text, /5h unavail/);
+        assert.match(text, width < 32 ? /Codex · no Codex bucket/ : /Codex quota · no codex-labeled bucket/);
         assert.doesNotMatch(text, /31%|72%/);
       }
       if (width >= 44) assert.match(text, /Usage/);
@@ -241,6 +357,22 @@ test("stale or not-ready snapshots never advertise live generation, including ti
     assert.doesNotMatch(plain(renderFrame(snap, null, state, width, height)).join("\n"), /\blive\b/);
     snap.ready = true;
   }
+});
+
+test("failed transcript without cached messages reports unavailable rather than loading", () => {
+  for (const [width, height] of [[80, 24], [40, 10]]) {
+    const state = sessionState([]);
+    state.transcript = null;
+    state.transcriptError = "Read failed";
+    const frame = plain(renderFrame(snapshot(), null, state, width, height)).join("\n");
+    assert.match(frame, /Transcript unavailable: Read failed/);
+    assert.doesNotMatch(frame, /Loading transcript|No messages recorded/);
+  }
+  const cached = sessionState([{ role: "assistant", text: "Cached answer", completed: true }]);
+  cached.transcriptError = "Read failed";
+  const frame = plain(renderFrame(snapshot(), null, cached, 80, 24)).join("\n");
+  assert.match(frame, /Transcript stale: Read failed/);
+  assert.match(frame, /Cached answer/);
 });
 
 test("long model summaries disclose overflow instead of cutting off the last model silently", () => {

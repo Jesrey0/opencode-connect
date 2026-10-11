@@ -751,7 +751,11 @@ Native worktree branch is an existing Git reference, not a new branch name. Omit
 The read-only terminal console shows both OpenCode and Codex native inventories,
 with runtime-labeled rows and runtime-specific detail routing. Codex combines one
 native history page with supervised workers, including workers absent from that
-page. History-only execution status and models remain unknown. Unsupported or
+page. History-only execution outcomes display as `unverified` and models remain
+unknown: the native history page provides no outcome evidence. A previously
+verified supervised outcome also becomes unverified after the plugin releases
+that in-memory record or restarts; the console does not infer the current turn's
+result from historical messages. Unsupported or
 disconnected Codex RPC leaves OpenCode visible and marks partial visibility;
 history and supervised-status failures are independent. Codex supervised status uses the five-second fallback cadence, while
 expensive native Codex history discovery is cached for five minutes (including
@@ -761,6 +765,10 @@ releases metadata-read ownership on cancellation. Codex detail shows the latest 
 message previews (up to 512 characters each, with truncation markers), replaces
 each history snapshot, and never advertises live deltas. No quota reads or
 session mutations are performed by this inventory view.
+
+The console also resolves active OpenCode sessions missing from the bounded
+recent page. Pending permissions show only a generic request label; native
+resource strings and tool-call titles are not displayed.
 
 For OpenCode, the console streams assistant text while a selected session is
 followed. Tool-only steps show tool names and status, excluding their inputs,

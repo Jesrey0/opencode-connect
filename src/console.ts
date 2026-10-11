@@ -30,6 +30,9 @@ const REFRESH_FALLBACK_MS = 5000;
 const CODEX_HISTORY_REFRESH_MS = 5 * 60 * 1000;
 // Codex history opens a native ACP metadata session. A live cold read can take >3s.
 const CODEX_HISTORY_TIMEOUT_MS = 12_000;
+const NATIVE_READ_TIMEOUT_MS = 10_000;
+const OPTIONAL_READ_TIMEOUT_MS = 3_000;
+const CONNECT_TIMEOUT_MS = 15_000;
 const RECENT_LIMIT = 25;
 const TRANSCRIPT_LIMIT = 25;
 // One payload-free admission order for both overlays. Never evict an unflushed
@@ -38,7 +41,7 @@ const LIVE_MESSAGE_LIMIT = 128;
 const REASONING_PART_LIMIT = 64;
 
 type LiveMessage = {
-  text?: { parts: Map<number, string>; revision: number };
+  text?: { parts: Map<number, string>; ended: Set<number>; revision: number };
   reasoning: Map<number, { status: "active" | "ended"; created: number; revision: number }>;
 };
 
@@ -64,33 +67,53 @@ export async function observeCodex(client: OpenCodeClient, readHistory = () => c
   if (supervised.status === "fulfilled") {
     for (const entry of supervised.value) {
       const previous = sessions.get(entry.sessionId);
+      const terminalWithoutOutcome = entry.executionKnown && entry.status !== "idle" && entry.status !== "inProgress" && entry.outcome === "unknown";
       sessions.set(entry.sessionId, {
         runtime: "codex", id: entry.sessionId, title: entry.title ?? previous?.title ?? null,
-        running: entry.executionKnown ? entry.status === "inProgress" : null,
+        running: entry.executionKnown && !terminalWithoutOutcome ? entry.status === "inProgress" : null,
         outcome: entry.executionKnown && entry.outcome !== "unknown" ? entry.outcome : null,
         agent: "codex", model: null, variant: null, cwd: entry.cwd,
         updatedMs: previous?.updatedMs ?? null,
       });
       for (const action of entry.pendingActions) pending.push({
         runtime: "codex", kind: "permission", sessionId: entry.sessionId,
-        id: action.requestId, label: action.action ?? "native permission request",
+        id: action.requestId, label: "native permission request",
       });
     }
   } else gaps.push("supervised status unavailable");
   return { sessions: [...sessions.values()], pending,
     visibility: gaps.length === 2 && history.status === "rejected" && supervised.status === "rejected"
-      ? "unavailable · partial visibility" : gaps.length ? `partial · ${gaps.join("; ")}` : "recent + supervised · history status may be unknown" };
+      ? "unavailable · partial visibility" : gaps.length ? `partial · ${gaps.join("; ")}` : "recent + supervised · history outcomes unverified" };
 }
 
-export async function observe(client: OpenCodeClient, readCodex = () => observeCodex(client)): Promise<ConsoleSnapshot> {
-  const [info, active, list, stats, codex] = await Promise.all([
-    client.server.info(),
-    client.session.active(),
-    client.session.list({ limit: RECENT_LIMIT, order: "desc" }),
-    client.session.stats().catch(() => null),
-    readCodex().catch(() => ({ sessions: [], pending: [], visibility: "unavailable · partial visibility" })),
+export async function observe(client: OpenCodeClient, readCodex = () => observeCodex(client), signal?: AbortSignal): Promise<ConsoleSnapshot> {
+  const nativeSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(NATIVE_READ_TIMEOUT_MS)]) : AbortSignal.timeout(NATIVE_READ_TIMEOUT_MS);
+  const statsSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(OPTIONAL_READ_TIMEOUT_MS)]) : AbortSignal.timeout(OPTIONAL_READ_TIMEOUT_MS);
+  const codexRead = Promise.resolve().then(readCodex).catch(() => ({ sessions: [], pending: [], visibility: "unavailable · partial visibility" }));
+  const [info, active, list, stats] = await Promise.all([
+    client.server.info({ signal: nativeSignal }),
+    client.session.active({ signal: nativeSignal }),
+    client.session.list({ limit: RECENT_LIMIT, order: "desc" }, { signal: nativeSignal }),
+    client.session.stats(undefined, { signal: statsSignal }).catch(() => null),
   ]);
-  const sessions: ConsoleSession[] = list.data
+  nativeSignal.throwIfAborted();
+  const optionalSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(OPTIONAL_READ_TIMEOUT_MS)]) : AbortSignal.timeout(OPTIONAL_READ_TIMEOUT_MS);
+  const recentIds = new Set(list.data.map(session => session.id));
+  const missingActiveIds = Object.keys(active).filter(id => !recentIds.has(id));
+  const missingActive = new Map<string, typeof list.data[number]>();
+  // The recent page is capped, while the native active inventory is not.
+  // Resolve only missing identities and keep one bad metadata read from
+  // blanking every other session on the dashboard.
+  for (let index = 0; index < missingActiveIds.length && !optionalSignal.aborted; index += 8) {
+    const ids = missingActiveIds.slice(index, index + 8);
+    const batch = await Promise.allSettled(ids
+      .map(sessionID => client.session.get({ sessionID }, { signal: optionalSignal })));
+    for (let item = 0; item < batch.length; item++) {
+      const result = batch[item];
+      if (result.status === "fulfilled" && result.value.id === ids[item]) missingActive.set(ids[item], result.value);
+    }
+  }
+  const sessions: ConsoleSession[] = [...list.data, ...missingActive.values()]
     .map((session) => ({
       id: session.id,
       runtime: "opencode" as const,
@@ -103,15 +126,19 @@ export async function observe(client: OpenCodeClient, readCodex = () => observeC
       cwd: session.location.directory,
       updatedMs: session.time.updated,
     }));
+  for (const id of missingActiveIds) if (!missingActive.has(id)) sessions.push({
+    runtime: "opencode", id, title: `${id} · metadata unavailable`, running: true,
+    outcome: null, agent: null, model: null, variant: null, cwd: "<unavailable>", updatedMs: null,
+  });
   const pending: ConsolePending[] = [];
-  for (const session of sessions.filter((entry) => entry.running)) {
+  for (const session of sessions.filter((entry) => entry.running && !optionalSignal.aborted)) {
     try {
       const [permissions, forms] = await Promise.all([
-        client.permission.list({ sessionID: session.id }),
-        client.session.form.list({ sessionID: session.id }),
+        client.permission.list({ sessionID: session.id }, { signal: optionalSignal }),
+        client.session.form.list({ sessionID: session.id }, { signal: optionalSignal }),
       ]);
-      for (const permission of permissions) pending.push({ runtime: "opencode", kind: "permission", sessionId: session.id, id: permission.id, label: `${permission.action} · ${permission.resources.join(", ")}` });
-      for (const form of forms) pending.push({ runtime: "opencode", kind: "form", sessionId: session.id, id: form.id, label: form.title });
+      for (const permission of permissions) pending.push({ runtime: "opencode", kind: "permission", sessionId: session.id, id: permission.id, label: "native permission request" });
+      for (const form of forms) pending.push({ runtime: "opencode", kind: "form", sessionId: session.id, id: form.id, label: "native form request" });
     } catch {
       // Pending-action evidence is best-effort; a disconnected session must not
       // blank the whole dashboard.
@@ -131,6 +158,10 @@ export async function observe(client: OpenCodeClient, readCodex = () => observeC
       models: top.slice(0, 4),
     };
   }
+  signal?.throwIfAborted();
+  const nativeObservedAtMs = Date.now();
+  const codex = await codexRead;
+  signal?.throwIfAborted();
   sessions.push(...codex.sessions);
   sessions.sort((a, b) => (b.updatedMs ?? -Infinity) - (a.updatedMs ?? -Infinity));
   const ordered = sessions.filter((entry) => entry.running);
@@ -144,7 +175,7 @@ export async function observe(client: OpenCodeClient, readCodex = () => observeC
     if (codexRecent[index]) ordered.push(codexRecent[index]);
   }
   pending.push(...codex.pending);
-  return { ready: true, release: info.version, pid: info.pid, sessions: ordered, pending, usage, codexVisibility: codex.visibility, observedAtMs: Date.now() };
+  return { ready: true, release: info.version, pid: info.pid, sessions: ordered, pending, usage, codexVisibility: codex.visibility, observedAtMs: nativeObservedAtMs };
 }
 
 export function messageToEntry(message: SessionMessageInfo): TranscriptEntry | null {
@@ -160,14 +191,16 @@ export function messageToEntry(message: SessionMessageInfo): TranscriptEntry | n
   return null;
 }
 
-export async function fetchTranscript(client: OpenCodeClient, sessionId: string, includePrompt = true): Promise<TranscriptEntry[]> {
+export async function fetchTranscript(client: OpenCodeClient, sessionId: string, includePrompt = true, signal?: AbortSignal): Promise<TranscriptEntry[]> {
+  const nativeSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(NATIVE_READ_TIMEOUT_MS)]) : AbortSignal.timeout(NATIVE_READ_TIMEOUT_MS);
   const messages: SessionMessageInfo[] = [];
   const cursors = new Set<string>();
   let cursor: string | undefined;
   // Only opening a view looks back to its operator prompt. Following refreshes
   // read one recent page and merge it with the history already loaded.
   for (let page = 0; page < 20; page += 1) {
-    const response = await client.message.list({ sessionID: sessionId, limit: TRANSCRIPT_LIMIT, ...(cursor ? { cursor } : { order: "desc" as const }) });
+    const response = await client.message.list({ sessionID: sessionId, limit: TRANSCRIPT_LIMIT, ...(cursor ? { cursor } : { order: "desc" as const }) }, { signal: nativeSignal });
+    nativeSignal.throwIfAborted();
     messages.push(...response.data);
     if (!includePrompt || messages.some(message => message.type === "user") || !response.cursor.next) break;
     cursor = response.cursor.next;
@@ -196,12 +229,14 @@ export async function fetchTranscript(client: OpenCodeClient, sessionId: string,
       } : {}),
     };
   }).filter((entry): entry is TranscriptEntry => entry !== null);
+  nativeSignal.throwIfAborted();
   return entries.reverse();
 }
 
-export async function fetchRuntimeTranscript(client: OpenCodeClient, runtime: Runtime, sessionId: string, includePrompt = true): Promise<TranscriptEntry[]> {
-  if (runtime === "opencode") return fetchTranscript(client, sessionId, includePrompt);
-  const history = await codexQuery(client, { type: "messages", sessionId, limit: TRANSCRIPT_LIMIT }, AbortSignal.timeout(3000));
+export async function fetchRuntimeTranscript(client: OpenCodeClient, runtime: Runtime, sessionId: string, includePrompt = true, signal?: AbortSignal): Promise<TranscriptEntry[]> {
+  if (runtime === "opencode") return fetchTranscript(client, sessionId, includePrompt, signal);
+  const querySignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(3000)]) : AbortSignal.timeout(3000);
+  const history = await codexQuery(client, { type: "messages", sessionId, limit: TRANSCRIPT_LIMIT }, querySignal);
   if (!("data" in history)) throw new ConnectorError("Codex history unavailable");
   // Native messages are bounded previews, not live activity or completion evidence.
   return history.data.map((entry): TranscriptEntry => {
@@ -215,8 +250,8 @@ export async function fetchRuntimeTranscript(client: OpenCodeClient, runtime: Ru
 }
 
 export type ConsoleReads = {
-  snapshot: (refreshHistory?: boolean) => Promise<ConsoleSnapshot>;
-  transcript: (sessionId: string, includePrompt: boolean, runtime: Runtime) => Promise<TranscriptEntry[]>;
+  snapshot: (refreshHistory?: boolean, signal?: AbortSignal) => Promise<ConsoleSnapshot>;
+  transcript: (sessionId: string, includePrompt: boolean, runtime: Runtime, signal?: AbortSignal) => Promise<TranscriptEntry[]>;
 };
 
 // OpenCode events may refresh the dashboard frequently. Codex has no event API:
@@ -224,8 +259,8 @@ export type ConsoleReads = {
 // reuses both successful and failed reads for longer, unless manually refreshed.
 export function consoleReads(client: OpenCodeClient, now = Date.now): ConsoleReads {
   let history: { readAt: number; result: ReturnType<typeof codexQuery> } | undefined;
-  let inventory: { readAt: number; result: Promise<CodexInventory> } | undefined;
-  let transcript: { sessionId: string; readAt: number; result: Promise<TranscriptEntry[]> } | undefined;
+  let inventory: { readAt: number; result: Promise<CodexInventory>; settled: boolean } | undefined;
+  let transcript: { sessionId: string; readAt: number; result: Promise<TranscriptEntry[]>; signal?: AbortSignal } | undefined;
   const readHistory = () => {
     if (!history || now() - history.readAt >= CODEX_HISTORY_REFRESH_MS) {
       history = { readAt: now(), result: codexQuery(client, { type: "sessions" }, AbortSignal.timeout(CODEX_HISTORY_TIMEOUT_MS)) };
@@ -233,20 +268,24 @@ export function consoleReads(client: OpenCodeClient, now = Date.now): ConsoleRea
     return history.result;
   };
   const readCodex = () => {
-    if (!inventory || now() - inventory.readAt >= REFRESH_FALLBACK_MS) {
-      inventory = { readAt: now(), result: observeCodex(client, readHistory) };
+    if (!inventory || (inventory.settled && now() - inventory.readAt >= REFRESH_FALLBACK_MS)) {
+      const current = { readAt: now(), result: observeCodex(client, readHistory), settled: false };
+      inventory = current;
+      void current.result.then(() => { current.settled = true; }, () => { current.settled = true; });
     }
     return inventory.result;
   };
   return {
-    snapshot: (refreshHistory = false) => {
+    snapshot: (refreshHistory = false, signal) => {
       if (refreshHistory) { history = undefined; inventory = undefined; }
-      return observe(client, readCodex);
+      return observe(client, readCodex, signal);
     },
-    transcript: (sessionId, includePrompt, runtime) => {
-      if (runtime === "opencode") return fetchTranscript(client, sessionId, includePrompt);
-      if (!transcript || transcript.sessionId !== sessionId || now() - transcript.readAt >= REFRESH_FALLBACK_MS) {
-        transcript = { sessionId, readAt: now(), result: fetchRuntimeTranscript(client, runtime, sessionId, includePrompt) };
+    transcript: (sessionId, includePrompt, runtime, signal) => {
+      if (runtime === "opencode") return fetchTranscript(client, sessionId, includePrompt, signal);
+      if (!transcript || transcript.signal?.aborted || transcript.sessionId !== sessionId || now() - transcript.readAt >= REFRESH_FALLBACK_MS) {
+        const result = fetchRuntimeTranscript(client, runtime, sessionId, includePrompt, signal);
+        transcript = { sessionId, readAt: now(), result, signal };
+        void result.catch(() => { if (signal?.aborted && transcript?.result === result) transcript = undefined; });
       }
       return transcript.result;
     },
@@ -258,6 +297,7 @@ export function consoleReads(client: OpenCodeClient, now = Date.now): ConsoleRea
 export class ConsoleObserver {
   snapshot: ConsoleSnapshot | null = null;
   error: string | null = null;
+  streamError: string | null = null;
   private refreshing: Promise<void> | undefined;
   private trailingRefresh: ReturnType<typeof setTimeout> | undefined;
   private refreshQueued = false;
@@ -268,6 +308,8 @@ export class ConsoleObserver {
   private liveMessages = new Map<string, LiveMessage>();
   private eventRevision = 0;
   private seenEvents = new Set<string>();
+  private readonly abort = new AbortController();
+  private transcriptAbort = new AbortController();
 
   constructor(
     private readonly state: ConsoleState,
@@ -275,8 +317,14 @@ export class ConsoleObserver {
     private readonly redraw: () => void,
   ) {}
 
+  get displayError(): string | null {
+    return this.error ?? this.streamError;
+  }
+
   private syncTranscriptView(): void {
     if (this.transcriptView === this.state.view) return;
+    this.transcriptAbort.abort();
+    this.transcriptAbort = new AbortController();
     this.transcriptView = this.state.view;
     this.transcriptBase = this.state.transcript;
     this.messageOrder.clear();
@@ -367,16 +415,22 @@ export class ConsoleObserver {
     if (this.seenEvents.size > 2048) this.seenEvents.delete(this.seenEvents.values().next().value!);
     if (event.type === "session.reasoning.started" || event.type === "session.reasoning.delta" || event.type === "session.reasoning.ended") return this.applyReasoningEvent(event);
     const { assistantMessageID, ordinal } = event.data;
+    const saved = this.transcriptBase?.find(entry => entry.messageId === assistantMessageID);
+    if (saved?.completed) return false;
+    // A native snapshot may contain a partial text block. Only ignore a
+    // redundant start; subsequent deltas and the authoritative end still apply.
+    if (event.type === "session.text.started" && saved?.textParts?.some(part => part.ordinal === ordinal && part.text.length > 0)) return false;
     const message = this.liveMessage(assistantMessageID);
     if (!message) return false;
     let live = message.text;
     if (!live) {
-      live = { parts: new Map(), revision: 0 };
+      live = { parts: new Map(), ended: new Set(), revision: 0 };
       message.text = live;
     }
+    if (live.ended.has(ordinal) || (event.type === "session.text.started" && live.parts.has(ordinal))) return false;
     live.revision = ++this.eventRevision;
     if (event.type === "session.text.started") live.parts.set(ordinal, "");
-    else if (event.type === "session.text.ended") live.parts.set(ordinal, event.data.text);
+    else if (event.type === "session.text.ended") { live.parts.set(ordinal, event.data.text); live.ended.add(ordinal); }
     else {
       const saved = this.transcriptBase?.find((entry) => entry.messageId === assistantMessageID)?.textParts?.find((part) => part.ordinal === ordinal)?.text ?? "";
       live.parts.set(ordinal, (live.parts.get(ordinal) ?? saved) + event.data.delta);
@@ -405,6 +459,14 @@ export class ConsoleObserver {
     return this.refreshing;
   }
 
+  stop(): void {
+    this.abort.abort();
+    this.transcriptAbort.abort();
+    this.refreshQueued = false;
+    if (this.trailingRefresh) clearTimeout(this.trailingRefresh);
+    this.trailingRefresh = undefined;
+  }
+
   private async drain(): Promise<void> {
     // One read plus one coalesced follow-up. Never wait for an event stream to
     // become quiet: callers must settle even if the second read queues more.
@@ -419,9 +481,14 @@ export class ConsoleObserver {
     try {
       const refreshHistory = this.refreshHistory;
       this.refreshHistory = false;
-      const snapshot = await this.reads.snapshot(refreshHistory);
+      const snapshot = await this.reads.snapshot(refreshHistory, this.abort.signal);
       if (this.state.quit) return;
+      const selected = visibleSessions(this.snapshot, this.state.activeOnly)[this.state.selected];
       this.snapshot = snapshot;
+      const visible = visibleSessions(snapshot, this.state.activeOnly);
+      const selectedIndex = selected && visible.findIndex(session => session.runtime === selected.runtime && session.id === selected.id);
+      if (selectedIndex !== undefined && selectedIndex >= 0) this.state.selected = selectedIndex;
+      else syncSelection(this.state, visible);
       this.error = null;
     } catch (cause) {
       if (this.state.quit) return;
@@ -432,7 +499,8 @@ export class ConsoleObserver {
     if (view.kind === "session" && (this.state.follow || this.state.transcript === null || this.state.transcriptError !== null)) {
       try {
         const readRevision = this.eventRevision;
-        const entries = await this.reads.transcript(view.sessionId, this.transcriptBase === null, view.runtime);
+        const transcriptSignal = AbortSignal.any([this.abort.signal, this.transcriptAbort.signal]);
+        const entries = await this.reads.transcript(view.sessionId, this.transcriptBase === null, view.runtime, transcriptSignal);
         if (!this.state.quit && this.state.view === view) {
           if (view.runtime === "codex") {
             // Replace each bounded snapshot: null message IDs cannot be merged
@@ -517,7 +585,7 @@ export class ConsoleObserver {
     let changed = false;
     let manualRefresh = false;
     for (const key of keys) {
-      if (this.state.view.kind === "dashboard" && key.kind === "char" && key.value.toLowerCase() === "r") {
+      if (!this.state.help && this.state.view.kind === "dashboard" && key.kind === "char" && key.value.toLowerCase() === "r") {
         this.refreshHistory = true;
         manualRefresh = true;
       }
@@ -562,11 +630,40 @@ export async function run(): Promise<void> {
   if (!process.stdout.isTTY || !process.stdin.isTTY) {
     throw new ConnectorError("the console requires an interactive terminal");
   }
-  const connection = await connectNative();
-  const client = connection.client;
   const screen = new ScreenGuard();
-  screen.enter();
   const state: ConsoleState = emptyState();
+  const paintConnecting = () => screen.draw(renderFrame(null, null, state,
+    process.stdout.columns ?? 80, process.stdout.rows ?? 24, { status: "connecting", usage: null }));
+  const removeStartupListeners = () => {
+    process.off("SIGINT", onStartupSigint);
+    process.stdout.off("resize", paintConnecting);
+  };
+  const onStartupSigint = () => {
+    removeStartupListeners();
+    screen.leave();
+    process.exit(130);
+  };
+  process.on("SIGINT", onStartupSigint);
+  process.stdout.on("resize", paintConnecting);
+  let connection: Awaited<ReturnType<typeof connectNative>>;
+  let connectTimer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    screen.enter();
+    paintConnecting();
+    connection = await Promise.race([
+      connectNative(),
+      new Promise<never>((_resolve, reject) => {
+        connectTimer = setTimeout(() => reject(new ConnectorError("native OpenCode connection timed out")), CONNECT_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (cause) {
+    removeStartupListeners();
+    screen.leave();
+    throw cause;
+  } finally {
+    if (connectTimer) clearTimeout(connectTimer);
+  }
+  const client = connection.client;
   let refreshTimer: ReturnType<typeof setTimeout> | undefined;
   let redrawTimer: ReturnType<typeof setTimeout> | undefined;
   const eventAbort = new AbortController();
@@ -576,14 +673,14 @@ export async function run(): Promise<void> {
   const redraw = () => {
     const columns = process.stdout.columns ?? 80;
     const rows = process.stdout.rows ?? 24;
-    screen.draw(renderFrame(observer.snapshot, observer.error, state, columns, rows, quota));
+    screen.draw(renderFrame(observer.snapshot, observer.displayError, state, columns, rows, quota));
   };
   const observer = new ConsoleObserver(state, consoleReads(client), redraw);
   // Paint before event/quota subscriptions or the first potentially slow read.
   redraw();
 
   const scheduleRefresh = () => {
-    if (refreshTimer) return;
+    if (state.quit || refreshTimer) return;
     refreshTimer = setTimeout(() => {
       refreshTimer = undefined;
       void observer.refresh();
@@ -606,14 +703,18 @@ export async function run(): Promise<void> {
       try {
         for await (const event of client.event.subscribe({ signal: eventAbort.signal })) {
           if (state.quit) break;
+          if (observer.streamError) {
+            observer.streamError = null;
+            redraw();
+          }
           if (observer.applyEvent(event)) scheduleRedraw();
           if (event.type !== "session.text.delta" && event.type !== "session.reasoning.delta" && event.type !== "session.tool.input.delta") scheduleRefresh();
         }
         if (state.quit) break;
-        observer.error = "event stream ended; reconnecting";
+        observer.streamError = "event stream ended; reconnecting";
       } catch (cause) {
         if (state.quit) break;
-        observer.error = safeError(cause);
+        observer.streamError = safeError(cause);
       }
       redraw();
       await new Promise((resolve) => setTimeout(resolve, RECONNECT_MS));
@@ -622,19 +723,28 @@ export async function run(): Promise<void> {
   void events.catch(() => {});
 
   const decoder = new InputDecoder();
-  process.stdin.setRawMode(true);
-  process.stdin.resume();
   let escapeTimer: ReturnType<typeof setTimeout> | undefined;
   const applyKeys = (keys: InputKey[]) => {
-    if (state.view.kind === "dashboard" && keys.some(key => key.kind === "char" && key.value.toLowerCase() === "r")) void quotaObserver?.refresh();
-    const needsRefresh = observer.applyKeys(keys);
+    let needsRefresh = false;
+    let refreshQuota = false;
+    for (const key of keys) {
+      if (!state.help && state.view.kind === "dashboard" && key.kind === "char" && key.value.toLowerCase() === "r") refreshQuota = true;
+      needsRefresh = observer.applyKeys([key]) || needsRefresh;
+      if (state.quit) break;
+    }
+    if (refreshQuota) void quotaObserver?.refresh();
     if (state.quit) {
       void shutdown(0);
+      return;
     }
     if (needsRefresh) scheduleRefresh();
   };
+  let cleaned = false;
   const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     state.quit = true;
+    observer.stop();
     eventAbort.abort();
     if (refreshTimer) clearTimeout(refreshTimer);
     if (redrawTimer) clearTimeout(redrawTimer);
@@ -653,6 +763,7 @@ export async function run(): Promise<void> {
     process.exit(code);
   };
   const onSigint = () => { void shutdown(130); };
+  removeStartupListeners();
   process.on("SIGINT", onSigint);
   process.stdout.on("resize", redraw);
 
@@ -668,6 +779,8 @@ export async function run(): Promise<void> {
   process.stdin.on("data", onInput);
 
   try {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
     quotaObserver = observeCodexQuota({
       onChange: (next) => {
         quota = next;

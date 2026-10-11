@@ -40,6 +40,8 @@ export function observeCodexQuota({
   let staleTimer: ReturnType<typeof setTimeout> | undefined;
   let resetTimer: ReturnType<typeof setTimeout> | undefined;
   let inFlight: Promise<void> | undefined;
+  let closing: Promise<void> | undefined;
+  let lastReadAtMs: number | null = null;
   let queued = false;
   let stopped = false;
   const controller = new AbortController();
@@ -50,7 +52,8 @@ export function observeCodexQuota({
   const scheduleReset = () => {
     clear(resetTimer);
     if (stopped) return;
-    const resets = (state.usage?.buckets ?? []).flatMap(bucket => [bucket.primary?.resetsAt, bucket.secondary?.resetsAt])
+    const bucket = state.usage?.buckets.find(entry => entry.bucketKey === "codex");
+    const resets = [bucket?.primary?.resetsAt, bucket?.secondary?.resetsAt]
       .filter((value): value is number => value !== null && value !== undefined && Number.isFinite(value * 1000) && value * 1000 > now());
     if (!resets.length) return;
     const delayMs = Math.max(0, Math.min(...resets) * 1000 - now());
@@ -63,34 +66,44 @@ export function observeCodexQuota({
   };
   const refresh = (): Promise<void> => {
     if (stopped) return Promise.resolve();
+    clear(debounceTimer);
+    debounceTimer = undefined;
     if (inFlight) { queued = true; return inFlight; }
     inFlight = (async () => {
-      do {
-        queued = false;
-        try {
-          const usage = await readUsage(controller.signal);
-          if (stopped) return;
-          const observedAtMs = now();
-          publish({ status: "available", usage, observedAtMs, watcher: watcher ? "watching" : "manual" });
-          clear(staleTimer);
-          staleTimer = setTimeout(() => {
-            staleTimer = undefined;
-            if (!stopped && state.observedAtMs === observedAtMs) publish({ ...state, status: "stale" });
-          }, STALE_AFTER_MS);
-          staleTimer.unref?.();
-          scheduleReset();
-        } catch {
-          if (stopped) return;
-          publish({ ...state, status: state.usage ? "stale" : "unavailable", watcher: watcher ? "watching" : "manual" });
-        }
-      } while (queued && !stopped);
-    })().finally(() => { inFlight = undefined; });
+      try {
+        do {
+          queued = false;
+          try {
+            lastReadAtMs = now();
+            // Always cross an async boundary before invoking the reader. A
+            // synchronous throw must not finish before `inFlight` is assigned.
+            const usage = await Promise.resolve().then(() => {
+              controller.signal.throwIfAborted();
+              return readUsage(controller.signal);
+            });
+            if (stopped) return;
+            const observedAtMs = now();
+            publish({ status: "available", usage, observedAtMs, watcher: watcher ? "watching" : "manual" });
+            clear(staleTimer);
+            staleTimer = setTimeout(() => {
+              staleTimer = undefined;
+              if (!stopped && state.observedAtMs === observedAtMs) publish({ ...state, status: "stale" });
+            }, STALE_AFTER_MS);
+            staleTimer.unref?.();
+            scheduleReset();
+          } catch {
+            if (stopped) return;
+            publish({ ...state, status: state.usage ? "stale" : "unavailable", watcher: watcher ? "watching" : "manual" });
+          }
+        } while (queued && !stopped);
+      } finally { inFlight = undefined; }
+    })();
     return inFlight;
   };
   function invalidate() {
     if (stopped) return;
     if (debounceTimer) return;
-    const elapsed = state.observedAtMs === null ? Infinity : now() - state.observedAtMs;
+    const elapsed = lastReadAtMs === null ? Infinity : now() - lastReadAtMs;
     const delayMs = Math.max(debounceMs, minReadGapMs - elapsed);
     debounceTimer = setTimeout(() => { debounceTimer = undefined; void refresh(); }, delayMs);
     debounceTimer.unref?.();
@@ -100,8 +113,10 @@ export function observeCodexQuota({
     watcher = watch(sessionsPath);
     watcher.on("change", (_event: unknown, filename: string | Buffer | null) => { if (isCodexRolloutFilename(filename)) invalidate(); });
     watcher.on("error", () => {
-      watcher?.close();
+      if (stopped || !watcher) return;
+      const failedWatcher = watcher;
       watcher = undefined;
+      try { failedWatcher.close(); } catch {}
       publish({ ...state, status: state.usage ? "stale" : "unavailable", watcher: "manual" });
     });
   } catch {
@@ -111,13 +126,17 @@ export function observeCodexQuota({
   return {
     snapshot: () => ({ ...state }),
     refresh,
-    async close() {
-      if (stopped) return;
+    close() {
+      if (closing) return closing;
       stopped = true;
-      clear(debounceTimer); clear(staleTimer); clear(resetTimer);
-      watcher?.close(); watcher = undefined;
-      controller.abort();
-      await inFlight;
+      closing = (async () => {
+        clear(debounceTimer); clear(staleTimer); clear(resetTimer);
+        try { watcher?.close(); } catch {}
+        watcher = undefined;
+        controller.abort();
+        await inFlight?.catch(() => {});
+      })();
+      return closing;
     },
   };
 }

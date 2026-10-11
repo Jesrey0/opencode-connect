@@ -106,7 +106,7 @@ test("console includes Codex history and active worker omitted by native listing
   assert.equal(worker.model, null);
   assert.equal(worker.outcome, null);
   assert.equal(worker.updatedMs, null);
-  assert.equal(sessionStatus(history), "unknown");
+  assert.equal(sessionStatus(history), "unverified");
   assert.deepEqual(visibleSessions(snapshot, true).map(entry => entry.id), ["worker"]);
   assert.match(snapshot.codexVisibility, /partial.*more history/);
   assert.deepEqual(native.requests.filter(request => request.path.includes("/rpc/")).map(request => request.body), [{ input: {} }, { input: {} }]);
@@ -197,7 +197,7 @@ test("Codex list and supervised failures remain independent and replay is never 
     });
     const snapshot = await observe(native.client);
     assert.equal(snapshot.sessions.length, 2);
-    assert.equal(sessionStatus(snapshot.sessions.find(entry => entry.runtime === "codex")!), "unknown");
+    assert.equal(sessionStatus(snapshot.sessions.find(entry => entry.runtime === "codex")!), "unverified");
     assert.match(snapshot.codexVisibility, new RegExp(`partial.*${failed === "list" ? "history" : "supervised status"} unavailable`));
   }
 });
@@ -263,6 +263,30 @@ test("history lists every five minutes while supervised execution and approvals 
   assert.equal(native.requests.filter(request => request.path.endsWith("/status")).length, 60);
   await reads.snapshot();
   assert.equal(native.requests.filter(request => request.path.endsWith("/list")).length, 2);
+});
+
+test("reopening Codex transcript after cancellation does not reuse an aborted cache", async () => {
+  let reads = 0;
+  let began!: () => void;
+  const started = new Promise<void>(resolve => { began = resolve; });
+  const native = fixture(request => {
+    if (!request.path.endsWith("/messages")) return { output: { sessions: [] } };
+    reads++;
+    if (reads === 1) return new Promise((_resolve, reject) => {
+      request.signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true });
+      began();
+    });
+    return { output: { sessionId: "worker", messages: [{ id: null, role: "assistant", text: "NEW_VIEW" }], historyComplete: true } };
+  });
+  const view = consoleReads(native.client);
+  const oldSignal = new AbortController();
+  const first = view.transcript("worker", true, "codex", oldSignal.signal);
+  await started;
+  oldSignal.abort();
+  await assert.rejects(first);
+  const second = await view.transcript("worker", true, "codex", new AbortController().signal);
+  assert.equal(second[0].text, "NEW_VIEW");
+  assert.equal(reads, 2);
 });
 
 test("dashboard r immediately refreshes cached history and supervised status", async () => {

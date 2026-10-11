@@ -67,6 +67,39 @@ test("text ordinals, absolute end events and persisted completion avoid duplicat
   assert.equal(plain(transcriptLines(state.transcript, 80)).includes("PRIVATE_REASONING"), false);
 });
 
+test("streaming continues from a persisted partial text block through authoritative end", async () => {
+  const { state, observer } = observerFor(async () => [
+    { role: "assistant", messageId: "a", text: "PAR", textParts: [{ ordinal: 0, text: "PAR" }], completed: false },
+  ]);
+  await observer.refresh();
+  assert.equal(observer.applyEvent(textEvent("started")), false);
+  assert.equal(observer.applyEvent(textEvent("delta", "TIAL")), true);
+  assert.equal(state.transcript?.[0].text, "PARTIAL");
+  assert.equal(observer.applyEvent(textEvent("ended", "COMPLETE")), true);
+  assert.equal(state.transcript?.[0].text, "COMPLETE");
+  assert.equal(observer.applyEvent(textEvent("delta", " LATE")), false);
+});
+
+test("late text fragments cannot replace an ended or persisted assistant answer", async () => {
+  let completed = false;
+  const { state, observer } = observerFor(async () => completed
+    ? [{ role: "assistant", messageId: "a", text: "canonical", textParts: [{ ordinal: 0, text: "canonical" }], completed: true }]
+    : []);
+  await observer.refresh();
+  observer.applyEvent(textEvent("started"));
+  observer.applyEvent(textEvent("delta", "partial"));
+  observer.applyEvent(textEvent("ended", "final"));
+  assert.equal(state.transcript?.[0].text, "final");
+  assert.equal(observer.applyEvent(textEvent("delta", " delayed")), false);
+  assert.equal(observer.applyEvent(textEvent("started")), false);
+  assert.equal(state.transcript?.[0].text, "final");
+  completed = true;
+  await observer.refresh();
+  assert.equal(state.transcript?.[0].text, "canonical");
+  assert.equal(observer.applyEvent(textEvent("delta", " replayed")), false);
+  assert.equal(state.transcript?.[0].text, "canonical");
+});
+
 test("a stale completed read cannot erase text events received during that read", async () => {
   let release!: (entries: TranscriptEntry[]) => void;
   let started!: () => void;

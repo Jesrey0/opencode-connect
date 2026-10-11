@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { handleKey, emptyState, renderFrame, renderTiny, visibleSessions, InputDecoder, sessionStatus, modelLabel, transcriptLines, type ConsoleSnapshot, type ConsoleState } from "../src/consoleView.js";
-import { observe, messageToEntry, fetchTranscript, ConsoleObserver } from "../src/console.js";
+import { observe, observeCodex, messageToEntry, fetchTranscript, ConsoleObserver } from "../src/console.js";
 import { nativeFixture, session, assistant, user } from "./native-fixture.js";
 
 function snapshot(): ConsoleSnapshot {
@@ -161,6 +161,74 @@ test("observe projects sessions, pending actions, and usage from the native clie
   assert.equal(observed.pending.length, 0);
 });
 
+test("observe includes active OpenCode sessions outside the recent page", async () => {
+  const recent = Array.from({ length: 25 }, (_, index) => ({ ...session(), id: `recent-${index}`, time: { created: 1, updated: 100 - index } }));
+  const olderActive = { ...session(), id: "older-active", title: "Long running task", time: { created: 1, updated: 1 } };
+  const native = nativeFixture(request => {
+    if (request.path === "/api/info") return { version: "2.0.24", pid: 3, urls: [], paths: { tmp: "/tmp" } };
+    if (request.path === "/api/session/active") return { data: { "recent-0": { type: "running" }, "older-active": { type: "running" } } };
+    if (request.path === "/api/session") return { data: recent, cursor: { next: "older" } };
+    if (request.path === "/api/session/older-active") return { data: olderActive };
+    if (request.path.includes("/permission") || request.path.includes("/form")) return { data: [] };
+    return undefined;
+  });
+  const observed = await observe(native.client, async () => ({ sessions: [], pending: [], visibility: "recent + supervised" }));
+  assert.deepEqual(observed.sessions.filter(entry => entry.running).map(entry => entry.id), ["recent-0", "older-active"]);
+  assert.equal(observed.sessions.find(entry => entry.id === "older-active")?.title, "Long running task");
+  assert.equal(native.requests.filter(request => request.path === "/api/session/older-active").length, 1);
+  assert.equal(native.requests.filter(request => request.path === "/api/session/recent-0").length, 0);
+});
+
+test("failed metadata read retains an active ID beside known recent sessions", async () => {
+  const native = nativeFixture(request => {
+    if (request.path === "/api/info") return { version: "2.0.24", pid: 3, urls: [], paths: { tmp: "/tmp" } };
+    if (request.path === "/api/session/active") return { data: { missing: { type: "running" } } };
+    if (request.path === "/api/session") return { data: [session()], cursor: { next: null } };
+    if (request.path === "/api/session/missing") return Response.json({ message: "private failure" }, { status: 404 });
+    if (request.path.includes("/permission") || request.path.includes("/form")) return { data: [] };
+    return undefined;
+  });
+  const observed = await observe(native.client, async () => ({ sessions: [], pending: [], visibility: "recent + supervised" }));
+  assert.deepEqual(observed.sessions.map(entry => entry.id), ["missing", "s"]);
+  const missing = observed.sessions[0];
+  assert.equal(missing.running, true);
+  assert.equal(missing.updatedMs, null);
+  assert.match(missing.title!, /metadata unavailable/);
+  assert.equal(missing.cwd, "<unavailable>");
+  assert.doesNotMatch(renderFrame(observed, null, emptyState(), 80, 24).join("\n"), /private failure/);
+});
+
+test("pending permission labels omit native action and resource payloads", async () => {
+  const native = nativeFixture(request => {
+    if (request.path === "/api/info") return { version: "2.0.24", pid: 3, urls: [], paths: { tmp: "/tmp" } };
+    if (request.path === "/api/session/active") return { data: { s: { type: "running" } } };
+    if (request.path === "/api/session") return { data: [session()], cursor: { next: null } };
+    if (request.path.includes("/permission")) return { data: [{ id: "p", sessionID: "s", action: "PRIVATE_ACTION", resources: ["PRIVATE_RESOURCE"] }] };
+    if (request.path.includes("/form")) return { data: [] };
+    return undefined;
+  });
+  const observed = await observe(native.client, async () => ({ sessions: [], pending: [], visibility: "recent + supervised" }));
+  assert.deepEqual(observed.pending, [{ runtime: "opencode", kind: "permission", sessionId: "s", id: "p", label: "native permission request" }]);
+  assert.doesNotMatch(renderFrame(observed, null, emptyState(), 80, 24).join("\n"), /PRIVATE_/);
+});
+
+test("observed Codex terminal status without an outcome remains unverified", async () => {
+  const native = nativeFixture(request => {
+    if (request.path.endsWith("/list")) return { output: { sessions: [], nextCursor: null } };
+    if (request.path.endsWith("/status")) return { output: { sessions: [{
+      sessionId: "worker", cwd: "/tmp", title: "Worker", status: "completed", outcome: "unknown",
+      executionKnown: true, output: "", capabilities: { permissions: "operator-selected", modes: [], defaultMode: null }, mode: null,
+      pendingActions: [{ requestId: "approval", sessionId: "worker", action: "PRIVATE_COMMAND", resources: ["PRIVATE_RESOURCE"], options: [], details: { locations: [], truncatedFields: [] } }],
+    }] } };
+    return undefined;
+  });
+  const inventory = await observeCodex(native.client);
+  assert.equal(inventory.sessions[0].running, null);
+  assert.equal(inventory.sessions[0].outcome, null);
+  assert.equal(inventory.pending[0].label, "native permission request");
+  assert.doesNotMatch(JSON.stringify(inventory.pending), /PRIVATE_/);
+});
+
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -179,6 +247,45 @@ test("fetchTranscript reads recent native messages in chronological order", asyn
     { role: "user", text: "task" },
     { role: "assistant", text: "done" },
   ]);
+});
+
+test("native transcript reads stop when their view is cancelled", async () => {
+  const started = deferred<void>();
+  const controller = new AbortController();
+  let requestSignal: AbortSignal | undefined;
+  const native = nativeFixture(request => {
+    requestSignal = request.signal;
+    started.resolve();
+    return new Promise((_resolve, reject) => request.signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+  });
+  const read = fetchTranscript(native.client, "s", true, controller.signal);
+  await started.promise;
+  controller.abort();
+  await assert.rejects(read);
+  assert.equal(requestSignal?.aborted, true);
+});
+
+test("cancelled native dashboard reads settle while Codex observation starts concurrently", async () => {
+  const started = deferred<void>();
+  const controller = new AbortController();
+  let codexReads = 0;
+  let requestSignal: AbortSignal | undefined;
+  const native = nativeFixture(request => {
+    if (request.path === "/api/info") {
+      requestSignal = request.signal;
+      started.resolve();
+      return new Promise((_resolve, reject) => request.signal?.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }));
+    }
+    if (request.path === "/api/session/active") return { data: {} };
+    if (request.path === "/api/session") return { data: [], cursor: { next: null } };
+    return undefined;
+  });
+  const read = observe(native.client, async () => { codexReads++; return { sessions: [], pending: [], visibility: "recent + supervised" }; }, controller.signal);
+  await started.promise;
+  controller.abort();
+  await assert.rejects(read);
+  assert.equal(requestSignal?.aborted, true);
+  assert.equal(codexReads, 1);
 });
 
 test("console refresh coalesces events without overlapping native reads", async () => {
@@ -209,6 +316,76 @@ test("console refresh coalesces events without overlapping native reads", async 
   await first;
   assert.equal(reads, 2);
   assert.equal(maximum, 1);
+});
+
+test("refresh keeps the selected session when the inventory reorders", async () => {
+  const state = emptyState();
+  state.selected = 1;
+  let moved = false;
+  const observer = new ConsoleObserver(state, {
+    snapshot: async () => {
+      const initial = snapshot();
+      return { ...initial, sessions: moved ? [initial.sessions[1], initial.sessions[0], initial.sessions[2]] : initial.sessions };
+    },
+    transcript: async () => [],
+  }, () => {});
+  await observer.refresh();
+  moved = true;
+  await observer.refresh();
+  assert.equal(state.selected, 0);
+  observer.applyKeys([{ kind: "enter" }]);
+  assert.deepEqual(state.view, { kind: "session", runtime: "opencode", sessionId: "s2" });
+});
+
+test("stream outage remains visible after a successful snapshot and suppresses live mode", async () => {
+  const state = emptyState();
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
+  const observer = new ConsoleObserver(state, { snapshot: async () => snapshot(), transcript: async () => [] }, () => {});
+  observer.streamError = "event stream ended; reconnecting";
+  await observer.refresh();
+  assert.equal(observer.error, null);
+  assert.equal(observer.displayError, "event stream ended; reconnecting");
+  const degraded = renderFrame(observer.snapshot, observer.displayError, state, 80, 24).join("\n");
+  assert.doesNotMatch(degraded, /running · live/);
+  assert.match(degraded, /stale/);
+  observer.streamError = null;
+  assert.match(renderFrame(observer.snapshot, observer.displayError, state, 80, 24).join("\n"), /running · live/);
+});
+
+test("dashboard help swallows r without scheduling a history refresh", async () => {
+  const state = emptyState();
+  const historyFlags: boolean[] = [];
+  const observer = new ConsoleObserver(state, {
+    snapshot: async (refreshHistory) => { historyFlags.push(Boolean(refreshHistory)); return snapshot(); },
+    transcript: async () => [],
+  }, () => {});
+  await observer.refresh();
+  assert.equal(observer.applyKeys([{ kind: "char", value: "?" }, { kind: "char", value: "r" }]), false);
+  await observer.refresh();
+  assert.deepEqual(historyFlags, [false, false]);
+});
+
+test("opening another session cancels the previous transcript read", async () => {
+  const state = emptyState();
+  state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
+  const started = deferred<void>();
+  let aborted = false;
+  const observer = new ConsoleObserver(state, {
+    snapshot: async () => snapshot(),
+    transcript: async (id, _includePrompt, _runtime, signal) => {
+      if (id === "s2") return [{ role: "assistant", text: "second session" }];
+      started.resolve();
+      return new Promise((_resolve, reject) => signal?.addEventListener("abort", () => { aborted = true; reject(new Error("cancelled")); }, { once: true }));
+    },
+  }, () => {});
+  const first = observer.refresh();
+  await started.promise;
+  assert.equal(observer.applyKeys([{ kind: "escape" }, { kind: "down" }, { kind: "enter" }]), true);
+  void observer.refresh();
+  await first;
+  assert.equal(aborted, true);
+  assert.deepEqual(state.view, { kind: "session", runtime: "opencode", sessionId: "s2" });
+  assert.deepEqual(state.transcript, [{ role: "assistant", text: "second session" }]);
 });
 
 test("continuous refresh requests settle each bounded batch and retain a delayed trailing read", { timeout: 5000 }, async (t) => {
@@ -284,6 +461,78 @@ test("console paints a connecting first frame even when startup observers never 
   assert.match(result.stdout, /\x1b\[\?1049h/);
   assert.match(result.stdout, /opencode connect/);
   assert.match(result.stdout, /connecting/);
+});
+
+test("console paints and restores the terminal if interrupted during native connection", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+    import { registerHooks } from "node:module";
+    registerHooks({ load(url, context, nextLoad) {
+      if (url.endsWith("/src/native.ts")) return {
+        format: "module", shortCircuit: true,
+        source: 'export async function connectNative() { return new Promise(() => {}); }',
+      };
+      return nextLoad(url, context);
+    } });
+    Object.defineProperty(process.stdout, "isTTY", { value: true });
+    Object.defineProperty(process.stdin, "isTTY", { value: true });
+    process.stdin.setRawMode = () => {};
+    const { run } = await import("./src/console.ts");
+    void run();
+    setTimeout(() => process.kill(process.pid, "SIGINT"), 100);
+  `], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  assert.equal(result.status, 130, result.stderr);
+  assert.match(result.stdout, /\x1b\[\?1049h/);
+  assert.match(result.stdout, /connecting/);
+  assert.match(result.stdout, /\x1b\[\?1049l/);
+});
+
+test("console restores the terminal when raw input setup fails", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+    import { registerHooks } from "node:module";
+    registerHooks({ load(url, context, nextLoad) {
+      if (url.endsWith("/src/native.ts")) return {
+        format: "module", shortCircuit: true,
+        source: 'export async function connectNative() { return { client: { event: { subscribe: async function* () {} } } }; }',
+      };
+      return nextLoad(url, context);
+    } });
+    Object.defineProperty(process.stdout, "isTTY", { value: true });
+    Object.defineProperty(process.stdin, "isTTY", { value: true });
+    process.stdin.setRawMode = () => { throw new Error("raw mode unavailable"); };
+    const { run } = await import("./src/console.ts");
+    try { await run(); } catch (cause) { if (cause.message !== "raw mode unavailable") process.exit(2); }
+    process.exit(0);
+  `], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\x1b\[\?1049h/);
+  assert.match(result.stdout, /\x1b\[\?1049l/);
+});
+
+test("help overlay blocks dashboard r from refreshing quota", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+    import { registerHooks } from "node:module";
+    registerHooks({ load(url, context, nextLoad) {
+      if (url.endsWith("/src/native.ts")) return {
+        format: "module", shortCircuit: true,
+        source: 'export async function connectNative() { return { client: { server: { info: async () => ({ version: "2.0.24", pid: 1 }) }, session: { active: async () => ({}), list: async () => ({ data: [], cursor: { next: null } }), stats: async () => null }, event: { subscribe: async function* () { await new Promise(() => {}); } } } }; }',
+      };
+      if (url.endsWith("/src/codexQuota.ts")) return {
+        format: "module", shortCircuit: true,
+        source: 'export function observeCodexQuota() { return { refresh() { process.stdout.write("QUOTA_REFRESH"); }, async close() {} }; }',
+      };
+      return nextLoad(url, context);
+    } });
+    Object.defineProperty(process.stdout, "isTTY", { value: true });
+    Object.defineProperty(process.stdin, "isTTY", { value: true });
+    process.stdin.setRawMode = () => {};
+    const { run } = await import("./src/console.ts");
+    void run();
+    setTimeout(() => process.stdin.emit("data", Buffer.from("?r")), 200);
+    setTimeout(() => process.stdin.emit("data", Buffer.from("?q")), 350);
+  `], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /QUOTA_REFRESH/);
+  assert.match(result.stdout, /\x1b\[\?1049l/);
 });
 
 for (const fails of [false, true]) {

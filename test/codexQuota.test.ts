@@ -118,6 +118,137 @@ test("remote quota resets use bounded timers and re-arm without an early read", 
   await monitor.close();
 });
 
+test("only the displayed Codex bucket schedules a quota reset read", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  let reads = 0;
+  let ready!: () => void;
+  const firstRead = new Promise<void>(resolve => { ready = resolve; });
+  const monitor = observeCodexQuota({
+    onChange: state => { if (state.status === "available") ready(); }, watch: () => { throw new Error("manual"); },
+    readUsage: async () => {
+      reads++;
+      return { buckets: [
+        { bucketKey: "another-limit", primary: { usedPercent: 2, resetsAt: 1, windowDurationMins: 300 }, secondary: null },
+        { bucketKey: "codex", primary: { usedPercent: 10, resetsAt: 20, windowDurationMins: 300 }, secondary: null },
+      ] };
+    },
+    debounceMs: 5, minReadGapMs: 0,
+  });
+  await firstRead;
+  assert.equal(reads, 1);
+  t.mock.timers.tick(1_000);
+  t.mock.timers.tick(5);
+  await Promise.resolve();
+  assert.equal(reads, 1);
+  t.mock.timers.tick(18_995);
+  t.mock.timers.tick(5);
+  await Promise.resolve();
+  assert.equal(reads, 2);
+  await monitor.close();
+});
+
+test("failed quota reads respect the read gap during rollout event bursts", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const watcher = new EventEmitter() as EventEmitter & { close: () => void };
+  watcher.close = () => {};
+  let reads = 0;
+  const monitor = observeCodexQuota({
+    onChange: () => {}, watch: () => watcher as unknown as QuotaWatcher,
+    readUsage: async () => { reads++; throw new Error("unavailable"); },
+    debounceMs: 5, minReadGapMs: 100,
+  });
+  await Promise.resolve();
+  assert.equal(reads, 1);
+  for (let elapsed = 0; elapsed < 100; elapsed += 5) {
+    watcher.emit("change", "rename", "rollout-busy.jsonl");
+    t.mock.timers.tick(5);
+    await Promise.resolve();
+  }
+  assert.equal(reads, 2);
+  await monitor.close();
+});
+
+test("a synchronous quota reader failure does not block later refreshes", async () => {
+  let reads = 0;
+  const monitor = observeCodexQuota({
+    onChange: () => {}, watch: () => { throw new Error("manual"); },
+    readUsage: () => { reads++; throw new Error("reader failed"); },
+  });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(reads, 1);
+  await monitor.refresh();
+  assert.equal(reads, 2);
+  await monitor.close();
+});
+
+test("manual quota refresh supersedes a pending watcher refresh", async t => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+  const watcher = new EventEmitter() as EventEmitter & { close: () => void };
+  watcher.close = () => {};
+  let reads = 0;
+  const monitor = observeCodexQuota({
+    onChange: () => {}, watch: () => watcher as unknown as QuotaWatcher,
+    readUsage: async () => { reads++; return usage; },
+    debounceMs: 10, minReadGapMs: 100,
+  });
+  await Promise.resolve();
+  watcher.emit("change", "change", "rollout-new.jsonl");
+  t.mock.timers.tick(50);
+  await monitor.refresh();
+  t.mock.timers.tick(50);
+  await Promise.resolve();
+  assert.equal(reads, 2);
+  await monitor.close();
+});
+
+test("simultaneous close calls both await the active quota reader", async () => {
+  let release!: () => void;
+  const pending = new Promise<void>(resolve => { release = resolve; });
+  const monitor = observeCodexQuota({
+    onChange: () => {}, watch: () => { throw new Error("manual"); },
+    readUsage: async () => { await pending; return usage; },
+  });
+  let firstSettled = false;
+  let secondSettled = false;
+  const first = monitor.close().then(() => { firstSettled = true; });
+  const second = monitor.close().then(() => { secondSettled = true; });
+  await Promise.resolve();
+  assert.equal(firstSettled, false);
+  assert.equal(secondSettled, false);
+  release();
+  await Promise.all([first, second]);
+  assert.equal(firstSettled, true);
+  assert.equal(secondSettled, true);
+});
+
+test("immediate close does not launch a quota reader after cancellation", async () => {
+  let reads = 0;
+  const monitor = observeCodexQuota({
+    onChange: () => {}, watch: () => { throw new Error("manual"); },
+    readUsage: async () => { reads++; return usage; },
+  });
+  await monitor.close();
+  assert.equal(reads, 0);
+});
+
+test("a watcher close failure cannot prevent quota reader cancellation", async () => {
+  let aborted = false;
+  const watcher = new EventEmitter() as EventEmitter & { close: () => void };
+  watcher.close = () => { throw new Error("watcher close failed"); };
+  const monitor = observeCodexQuota({
+    onChange: () => {}, watch: () => watcher as unknown as QuotaWatcher,
+    readUsage: signal => new Promise((_resolve, reject) => {
+      signal?.addEventListener("abort", () => {
+        aborted = true;
+        reject(new Error("cancelled"));
+      }, { once: true });
+    }),
+  });
+  await Promise.resolve(); // Allow the reader to subscribe before cancellation.
+  await monitor.close();
+  assert.equal(aborted, true);
+});
+
 test("a quota read resolving after close cannot publish success or restore timers", async t => {
   const timers = t.mock.method(globalThis, "setTimeout");
   let resolve!: (value: typeof usage) => void;
@@ -127,6 +258,7 @@ test("a quota read resolving after close cannot publish success or restore timer
     watch: () => { throw new Error("manual"); },
     readUsage: () => new Promise(done => { resolve = done; }),
   });
+  await Promise.resolve(); // The reader must have started before its late resolution is tested.
   const closing = monitor.close();
   resolve(usage);
   await closing;
