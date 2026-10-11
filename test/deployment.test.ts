@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
@@ -118,6 +118,72 @@ test("release source hashing and staging include native build scripts", async ()
   }
 });
 
+test("plugin sources participate in build identity and release staging", async () => {
+  const source = await fakeSource({
+    "src/a.ts": "export const a = 1;\n",
+    "packages/codex-plugin/package.json": JSON.stringify({ name: "opencode-codex-subagent", version: "0.3.1" }),
+    "packages/codex-plugin/index.js": "export * from './src/index.js';\n",
+    "packages/codex-plugin/src/index.js": "export const plugin = 'v1';\n",
+    "packages/codex-plugin/src/usage.js": "export const quota = 1;\n",
+    "packages/codex-plugin/src/runtime-data.json": "{\"quota\":1}\n",
+    "packages/codex-plugin/test/fixture.js": "not shipped or hashed",
+  });
+  const destination = await tempDir("opencode-deploy-plugin-");
+  try {
+    const before = await hashSourceTree(source);
+    assert.ok(before.files.includes("packages/codex-plugin/src/index.js"));
+    assert.ok(before.files.includes("packages/codex-plugin/src/usage.js"));
+    assert.ok(before.files.includes("packages/codex-plugin/package.json"));
+    assert.ok(before.files.includes("packages/codex-plugin/src/runtime-data.json"));
+    assert.equal(before.files.includes("packages/codex-plugin/test/fixture.js"), false);
+    await copySourceTree(source, destination);
+    assert.equal((await hashSourceTree(destination)).buildId, before.buildId);
+    assert.equal(
+      await readFile(path.join(destination, "packages/codex-plugin/src/usage.js"), "utf8"),
+      "export const quota = 1;\n",
+    );
+    await assert.rejects(stat(path.join(destination, "packages/codex-plugin/test")));
+    await writeFile(path.join(source, "packages/codex-plugin/src/usage.js"), "export const quota = 2;\n");
+    assert.notEqual((await hashSourceTree(source)).buildId, before.buildId);
+  } finally {
+    await Promise.all([rm(source, { recursive: true, force: true }), rm(destination, { recursive: true, force: true })]);
+  }
+});
+
+test("declared workspace packages cannot be silently omitted or partially staged", async () => {
+  const source = await fakeSource({
+    "package.json": JSON.stringify({ name: "x", version: "1", workspaces: ["packages/codex-plugin"] }),
+    "src/a.ts": "export const a = 1;",
+  });
+  const destination = await tempDir("opencode-deploy-missing-plugin-");
+  try {
+    await assert.rejects(copySourceTree(source, destination), /incomplete Codex workspace.*package.json/);
+    await mkdir(path.join(source, "packages/codex-plugin"), { recursive: true });
+    await writeFile(path.join(source, "packages/codex-plugin/package.json"), "{}");
+    await assert.rejects(hashSourceTree(source), /incomplete Codex workspace.*index.js/);
+  } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(destination, { recursive: true, force: true })]); }
+});
+
+test("workspace build validation rejects missing plugin code before any service action", async () => {
+  const base = await tempDir("opencode-deploy-incomplete-plugin-");
+  try {
+    const build = await seedBuild(base, "aaaaaaaaaaaaaaaa");
+    await writeFile(path.join(build, "package.json"), JSON.stringify({ workspaces: ["packages/codex-plugin"] }));
+    await assert.rejects(activateBuild("aaaaaaaaaaaaaaaa", { baseDir: base, systemctl: async () => { assert.fail("service must not be touched"); } }), /incomplete Codex workspace/);
+  } finally { await rm(base, { recursive: true, force: true }); }
+});
+
+test("build tooling cannot mutate source inputs under an unchanged release identity", async () => {
+  const source = await fakeSource({ "src/a.ts": "export const a = 1;" });
+  const base = await tempDir("opencode-deploy-source-race-");
+  try {
+    await assert.rejects(prepareBuild({ sourceDir: source, baseDir: base, exec: async (_cmd, args, cwd) => {
+      if (args[0] === "run") await writeFile(path.join(cwd, "src/a.ts"), "export const a = 2;");
+    } }), /release inputs changed during build/);
+    assert.equal(await readLinkState(deploymentPaths(base).currentLink), null);
+  } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
+});
+
 test("copy carries runtime sources without checkout node_modules/dist", async () => {
   const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
   const stage = await tempDir("opencode-deploy-stage-");
@@ -135,6 +201,21 @@ test("copy carries runtime sources without checkout node_modules/dist", async ()
   } finally {
     await Promise.all([rm(src, { recursive: true, force: true }), rm(stage, { recursive: true, force: true })]);
   }
+});
+
+test("release inputs reject file and directory symlinks instead of copying unhashed external state", async () => {
+  const source = await fakeSource({ "src/a.ts": "export const a = 1;" });
+  try {
+    await symlink("a.ts", path.join(source, "src/link.ts"));
+    await assert.rejects(hashSourceTree(source), /regular file or directory/);
+    await rm(path.join(source, "src/link.ts"));
+    await symlink("src", path.join(source, "scripts"));
+    await assert.rejects(hashSourceTree(source), /regular directory/);
+    await rm(path.join(source, "scripts"));
+    await rm(path.join(source, "tsconfig.json"));
+    await symlink("package.json", path.join(source, "tsconfig.json"));
+    await assert.rejects(hashSourceTree(source), /regular file/);
+  } finally { await rm(source, { recursive: true, force: true }); }
 });
 
 test("symlink switch is atomic and link state round-trips", async () => {

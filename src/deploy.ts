@@ -10,7 +10,8 @@ function usage(): string {
     "  status [--base <dir>] [--json]            show current/previous, service, live health, source",
     "",
     "Release identity is the 16-hex content hash of package.json,",
-    "package-lock.json, tsconfig.json and src/**/*.ts. Dirty work is allowed;",
+    "package-lock.json, tsconfig.json, src/, scripts/, and Codex plugin runtime inputs.",
+    "Dirty work is allowed; plugin loading/reload is a separate operator action;",
     "commit/dirty metadata stays observability-only in build.json.",
   ].join("\n");
 }

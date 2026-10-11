@@ -2,12 +2,12 @@ import * as z from "zod/v4";
 import type { OpenCodeClient } from "@opencode/client";
 import { AdmissionError, ConnectorError, page, textPage, type PageInput } from "./bounds.js";
 import { pageNextCall } from "./continuation.js";
+import { CodexSessionsDefinition } from "./codexRpc.js";
+export { CodexSessionsDefinition } from "./codexRpc.js";
 
 export type Runtime = "opencode" | "codex";
 export const CODEX_MODES = ["read-only", "workspace-write", "agent", "agent-full-access"] as const;
 export type CodexMode = typeof CODEX_MODES[number];
-const RPC_ID = "codex-sessions";
-const definition = { id: RPC_ID, methods: Object.fromEntries(["start", "inspect", "wait", "interrupt", "delete", "messages", "list", "status", "permissions", "respondPermission"].map(method => [method, { input: z.unknown(), output: z.unknown() }])), events: {} };
 const CONTROL = /[\x00-\x1f\x7f]/;
 const statuses = new Set(["idle", "inProgress", "completed", "failed", "interrupted"]);
 const outcomes = new Set(["unknown", "completed", "failed", "incomplete"]);
@@ -25,7 +25,7 @@ function errorType(error: any): string | null {
 async function call(client: OpenCodeClient, method: string, input: object, signal?: AbortSignal) {
   try {
     const bound = AbortSignal.timeout(45_000);
-    return record(await (client.rpc(definition) as any)[method](input, { signal: signal ? AbortSignal.any([bound, signal]) : bound }));
+    return record(await (client.rpc(CodexSessionsDefinition) as any)[method](input, { signal: signal ? AbortSignal.any([bound, signal]) : bound }));
   } catch (error: any) {
     if (error instanceof ConnectorError) throw error;
     const type = errorType(error);
@@ -47,8 +47,24 @@ function capabilities(value: unknown) {
     const m = record(raw);
     return { id: mode(m.id), name: id(m.name), sandboxPolicy: id(m.sandboxPolicy), approvalPolicy: id(m.approvalPolicy), approvalsReviewer: id(m.approvalsReviewer) };
   });
-  return { continuation: native.continuation === true, exactPromptWait: false, modelSelection: false, permissions: "operator-selected" as const, modes, defaultMode: mode(native.defaultMode), events: false, filesystemClient: false, terminalClient: false };
+  return { continuation: native.continuation === true, exactPromptWait: false, modelSelection: false, permissions: "operator-selected" as const, modes, defaultMode: mode(native.defaultMode), events: false, filesystemClient: false, terminalClient: false, ...(native.usageQuota === "codex-app-server" ? { usageQuota: "codex-app-server" as const } : {}) };
 }
+// Validate and strip unknown fields at the RPC boundary too: an older or
+// misconfigured installed plugin must not turn a quota read into identity data.
+const quotaLabel = (max: number) => z.string().max(max).nullable();
+const quotaWindow = z.object({ usedPercent: z.number(), resetsAt: z.number().nullable(), windowDurationMins: z.number().nullable() }).nullable();
+const quotaSnapshot = z.object({
+  source: z.literal("codex-app-server"), scope: z.literal("chatgpt-codex-usage-quota"), readAtMs: z.number(), ordinaryUsageAllowed: z.boolean().nullable(),
+  account: z.object({ type: quotaLabel(64), planType: quotaLabel(64), requiresOpenaiAuth: z.boolean().nullable() }),
+  buckets: z.array(z.object({
+    bucketKey: quotaLabel(128), limitId: quotaLabel(128), limitName: quotaLabel(128), planType: quotaLabel(64), primary: quotaWindow, secondary: quotaWindow,
+    credits: z.object({ hasCredits: z.boolean().nullable(), unlimited: z.boolean().nullable(), balance: quotaLabel(64) }).nullable(),
+    individualLimit: z.object({ limit: quotaLabel(64), used: quotaLabel(64), remainingPercent: z.number().nullable(), resetsAt: z.number().nullable() }).nullable(),
+    spendControlReached: z.boolean().nullable(), rateLimitReachedType: quotaLabel(128),
+  }).refine(bucket => bucket.primary !== null || bucket.secondary !== null)).min(1).max(64),
+  resetCredits: z.object({ available: z.number() }).nullable(),
+  refusedServerRequests: z.array(z.string().max(128).nullable()).max(16).optional(),
+});
 function pending(value: unknown, sessionId: string) {
   if (!Array.isArray(value) || value.length > 8) throw new ConnectorError("Codex returned invalid pending permissions");
   return value.map(raw => {
@@ -115,7 +131,15 @@ export async function codexStatus(client: OpenCodeClient) {
   if (!Array.isArray(value.sessions) || value.sessions.length > 64) throw new ConnectorError("Codex returned an invalid supervised session inventory");
   return value.sessions.map(entry => ({ ...project(record(entry)), pendingActions: pending(record(entry).pendingActions, id(record(entry).sessionId)), retry: null, retryReadError: null, outcomeEvidence: { basis: record(entry).executionKnown ? "nativePromptResponse" : "historyReplay" }, nextCall: null }));
 }
-export async function codexQuery(client: OpenCodeClient, input: { type: string; sessionId?: string; messageId?: string; cwd?: string; cursor?: string; order?: "asc" | "desc"; searchTerm?: string; textOffset?: number; textLimit?: number; textFingerprint?: string; section?: string; field?: string } & PageInput) {
+export async function codexQuery(client: OpenCodeClient, input: { type: string; sessionId?: string; messageId?: string; cwd?: string; cursor?: string; order?: "asc" | "desc"; searchTerm?: string; textOffset?: number; textLimit?: number; textFingerprint?: string; section?: string; field?: string } & PageInput, signal?: AbortSignal) {
+  if (input.type === "usage") {
+    // The native Codex plugin owns App Server quota collection and redaction.
+    // These quota windows are not OpenCode token totals or General Chat limits.
+    const value = await call(client, "usage", {}, signal);
+    const parsed = quotaSnapshot.safeParse(value);
+    if (!parsed.success) throw new ConnectorError("Codex returned an unusable quota snapshot; details omitted");
+    return { ...parsed.data, runtime: "codex" as const, capabilities: capabilities(value.capabilities) };
+  }
   if (input.type === "sessions") {
     if (input.offset !== undefined || input.fingerprint !== undefined) throw new ConnectorError("Codex session listing uses its native cursor");
     if (input.limit !== undefined || input.order !== undefined || input.searchTerm !== undefined) throw new ConnectorError("Codex session listing uses native page size and ordering; search is unsupported");

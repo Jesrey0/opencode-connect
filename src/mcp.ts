@@ -305,13 +305,13 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("opencode.query", {
     title: "Query OpenCode State",
-    description: "Batch read native catalogs, ordered permissions, sessions, messages, inbox and tool evidence. Agents default to compact effective catalog with hidden entries excluded. Message pages return 512-unit previews with canonical IDs and bounded tool counts; recover full text via type:message. Session tokens are cumulative totals, not context occupancy. runtime selects the native session backend; Codex supports session inventories, history, native mode selection, pending permission requests and capabilities. Unsupported operations fail explicitly. Continue using fingerprints/native cursors; selected text may contain secrets.",
+    description: "Batch read native catalogs, ordered permissions, sessions, messages, inbox and tool evidence. Agents default to compact effective catalog with hidden entries excluded. Message pages return 512-unit previews with canonical IDs and bounded tool counts; recover full text via type:message. Session tokens are cumulative totals, not context occupancy. runtime selects the native session backend; Codex supports session inventories, history, native mode selection, pending permission requests, capabilities, and read-only ChatGPT Codex rate-limit windows via runtime: codex, type: usage. OpenCode usage remains cumulative token activity, not quota. General Chat Plus limits are not exposed. Unsupported operations fail explicitly. Continue using fingerprints/native cursors; selected text may contain secrets.",
     inputSchema: z.object({
       queries: z.array(querySchema).min(1).max(10),
     }).strict(),
     outputSchema: outputSchemas.query,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
-  }, async ({ queries }) => structuredResult(await backend.query(queries)));
+  }, async ({ queries }, context) => structuredResult(await backend.query(queries, context.mcpReq.signal)));
 
   registerTool("opencode.act", {
     title: "Act on OpenCode State",

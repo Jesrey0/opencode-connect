@@ -181,6 +181,30 @@ test("HTTP disconnect cancels the wait observer promptly without interrupting th
   } finally { request.destroy(); await http.close(); }
 });
 
+test("HTTP disconnect cancels the Codex quota RPC rather than leaving its reader running", { timeout: 5_000 }, async () => {
+  let started!: () => void, cancelled!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
+  const stopped = new Promise<void>(resolve => { cancelled = resolve; });
+  const native = nativeFixture(request => {
+    assert.equal(request.path, "/api/rpc/codex-sessions/usage");
+    started();
+    return new Promise((_resolve, reject) => {
+      request.signal!.addEventListener("abort", () => { cancelled(); reject(request.signal!.reason); }, { once: true });
+    });
+  });
+  const http = await httpFixture(native);
+  const request = httpRequest(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "opencode.query" } });
+  request.on("error", () => {});
+  try {
+    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: meta, name: "opencode.query", arguments: { queries: [{ runtime: "codex", type: "usage" }] } } }));
+    await ready;
+    request.destroy();
+    await stopped;
+    assert.equal(native.requests.length, 1);
+    assert.equal(native.requests[0].signal?.aborted, true);
+  } finally { request.destroy(); await http.close(); }
+});
+
 test("all HTTP tools publish output schemas; existing tools return canonical structured objects", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "opencode-protocol-tools-"));
   let bytes = Buffer.from("persisted");

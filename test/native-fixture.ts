@@ -1,13 +1,13 @@
 import { OpenCode, type SessionInfo, type SessionMessageInfo } from "@opencode/client";
 import type { Connection } from "../src/native.js";
 
-export type NativeRequest = { path: string; method: string; query: URLSearchParams; body: Record<string, unknown>; bytes?: Uint8Array };
+export type NativeRequest = { path: string; method: string; query: URLSearchParams; body: Record<string, unknown>; bytes?: Uint8Array; signal?: AbortSignal };
 export function nativeFixture(handler: (request: NativeRequest) => unknown | Promise<unknown>) {
   const requests: NativeRequest[] = [];
   const client = OpenCode.make({ baseUrl: "http://native.invalid", fetch: async (input, options) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const binary = options?.body instanceof Uint8Array;
-    const request = { path: url.pathname, method: options?.method ?? "GET", query: url.searchParams, body: options?.body && !binary ? JSON.parse(String(options.body)) : {}, ...(binary ? { bytes: options.body as Uint8Array } : {}) };
+    const request = { path: url.pathname, method: options?.method ?? "GET", query: url.searchParams, body: options?.body && !binary ? JSON.parse(String(options.body)) : {}, ...(binary ? { bytes: options.body as Uint8Array } : {}), signal: options?.signal ?? (input instanceof Request ? input.signal : undefined) };
     requests.push(request);
     const value = await handler(request);
     if (value instanceof Response) return value;

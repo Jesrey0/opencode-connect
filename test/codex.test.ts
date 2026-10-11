@@ -6,9 +6,15 @@ import { createServer } from "../src/mcp.js";
 import { OpenCodeBackend } from "../src/opencode.js";
 import { HostBackend } from "../src/host.js";
 import { outputSchemas } from "../src/results.js";
+import { CodexSessionsDefinition } from "../src/codex.js";
+// Native plugin sources and their injection harness are intentionally JavaScript.
+// @ts-expect-error no declaration file for the native JS workspace
+import { CodexSessionsRpc, projectUsage } from "opencode-codex-subagent";
+// @ts-expect-error JS plugin test harness
+import { createHarness } from "../packages/codex-plugin/test/harness.js";
 import { nativeFixture, type NativeRequest } from "./native-fixture.js";
 
-const capabilities = { continuation: true, exactPromptWait: false, modelSelection: false, permissions: "operator-selected", events: false, defaultMode: "agent", modes: [
+const capabilities = { continuation: true, exactPromptWait: false, modelSelection: false, permissions: "operator-selected", events: false, usageQuota: "codex-app-server", defaultMode: "agent", modes: [
   { id: "read-only", name: "Read-only", sandboxPolicy: "readOnly", approvalPolicy: "on-request", approvalsReviewer: "user" },
   { id: "workspace-write", name: "Workspace access", sandboxPolicy: "workspaceWrite", approvalPolicy: "on-request", approvalsReviewer: "user" },
   { id: "agent", name: "Auto review", sandboxPolicy: "workspaceWrite", approvalPolicy: "on-request", approvalsReviewer: "auto_review" },
@@ -86,6 +92,53 @@ test("MCP removes job actions and enforces OpenCode prompt identity requirements
     ] as const) assert.equal((await client.callTool({ name, arguments: args })).isError, true);
     assert.equal(f.requests.length, before);
   } finally { await client.close(); await server.close(); }
+});
+
+test("Codex quota queries use the direct plugin RPC without opening a model turn", async () => {
+  const quota = projectUsage({ rateLimits: { limitId: "codex", primary: { usedPercent: 37, windowDurationMins: 300, resetsAt: 1791700000 } } }, {});
+  const f = fixture(request => request.path.endsWith("/usage") ? { output: { ...quota, capabilities, accountId: "SECRET", account: { ...quota.account, email: "SECRET" }, config: { token: "SECRET" } } } : undefined);
+  const backend = new OpenCodeBackend(f.connect);
+  const response = await backend.query([{ runtime: "codex", type: "usage" }]);
+  const result = response.results[0] as any;
+  assert.equal(result.result.runtime, "codex");
+  assert.equal(result.result.buckets[0].primary.usedPercent, 37);
+  assert.equal(result.result.capabilities.usageQuota, "codex-app-server");
+  assert.equal(JSON.stringify(result).includes("SECRET"), false);
+  assert.equal(f.requests.length, 1);
+  assert.ok(f.requests[0].path.endsWith("/usage"));
+});
+
+test("installed workspace RPC and connector definitions agree and usage crosses the real client boundary", async () => {
+  assert.equal(CodexSessionsDefinition.id, CodexSessionsRpc.id);
+  assert.deepEqual(Object.keys(CodexSessionsDefinition.methods).sort(), Object.keys(CodexSessionsRpc.methods).sort());
+  const harness = await createHarness({ internals: { direct: { readUsage: async () => projectUsage({ rateLimits: { primary: { usedPercent: 7 } } }, {}) } } });
+  const f = fixture(async request => ({ output: await harness.rpcCall("codex-sessions", request.path.split("/").at(-1), (request.body as any).input) }));
+  const server = createServer(new OpenCodeBackend(f.connect), new HostBackend(f.connect));
+  const client = new Client({ name: "workspace-rpc-contract", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
+  try {
+    const response = await client.callTool({ name: "opencode.query", arguments: { queries: [{ runtime: "codex", type: "usage" }] } });
+    assert.notEqual(response.isError, true);
+    const result = (response.structuredContent as any).results[0];
+    assert.equal(result.result.buckets[0].primary.usedPercent, 7);
+    assert.equal(result.result.nextCall, null);
+    assert.deepEqual(harness.rpcCalls.map((call: any) => call.method), ["codex-sessions.usage"]);
+    assert.deepEqual(harness.nativeCalls, []);
+  } finally { await client.close(); await server.close(); }
+});
+
+test("malformed quota RPC records and unavailable plugins fail without falling back to OpenCode usage", async () => {
+  for (const output of [{}, { source: "codex-app-server", buckets: Array(65).fill({}) }]) {
+    const f = fixture(() => ({ output }));
+    const result = (await new OpenCodeBackend(f.connect).query([{ runtime: "codex", type: "usage" }])).results[0];
+    assert.match(result.error!, /unusable quota/);
+    assert.equal(f.requests.length, 1);
+  }
+  const f = fixture(() => new Response(JSON.stringify({ _tag: "RpcError", type: "rpc.not_found", message: "SECRET" }), { status: 404, headers: { "content-type": "application/json" } }));
+  const result = (await new OpenCodeBackend(f.connect).query([{ runtime: "codex", type: "usage" }])).results[0];
+  assert.match(result.error!, /details omitted/);
+  assert.equal(result.error!.includes("SECRET"), false);
+  assert.equal(f.requests.length, 1);
 });
 
 const permission = {

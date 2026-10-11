@@ -3,7 +3,7 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.9.0** projects native OpenCode HostPlane operations
+OpenCode Connect **0.10.0** projects native OpenCode HostPlane operations
 and the canonical WorkerPlane
 into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**.
 
@@ -30,10 +30,25 @@ build identity, service readiness, and ChatGPT tool discovery independently.
 OpenCode owns its sessions, messages, inbox, agents, permissions and model catalog.
 Codex owns its native ACP sessions, execution, history and sandbox. The existing
 session tools select the backend with `runtime` (`opencode` by default, or `codex`).
-Codex calls use the separately maintained `codex-sessions` plugin RPC directly;
-no intermediary OpenCode model turn or OpenCode transcript is created. Native
+Codex calls use the workspace-owned `codex-sessions` plugin RPC directly;
+no intermediary OpenCode model turn or OpenCode transcript is created.
+
+Codex quota: call opencode.query with queries: [{runtime: "codex", type: "usage"}].
+This reads a sanitized, read-only App Server quota snapshot via the Codex plugin RPC;
+it does not admit a model turn. Codex quota windows and reset timestamps are
+separate from OpenCode token activity and General Chat Plus message limits. Native
 identities remain qualified by their runtime. OpenCode prompt admission returns
 a canonical user `messageId`; Codex admission returns `messageId: null`.
+
+## Repository guide
+
+The Codex plugin and connector now share one npm-workspace repository, with two distinct runtime owners.
+- Root (src/): MCP endpoint, OpenCode runtime, HostPlane, events, deployment.
+- packages/codex-plugin/: native OpenCode plugin, Codex ACP sessions and quota reader.
+- AGENTS.md: first-stop map for coding agents.
+- docs/architecture.md: package boundaries, test commands and coordinated deployment.
+
+From the root, use npm run check:all and npm run test:all; the production release must be separately prepared and activated. OpenCode global configuration changes are not automatic.
 
 ## HostPlane
 
@@ -622,8 +637,10 @@ repository owns only the OpenCode Connect backend; account plugins are independe
 versioned and published.
 
 ```bash
-npm test
-npm run check
+npm ci --include=dev
+npm run test:all
+npm run check:all
+npm run verify:integration
 npm run build
 git diff --check
 ```
@@ -724,7 +741,9 @@ States stay distinct: **source** (Git checkout) is never executed live;
 `current` symlink target; **live** is what `/health` reports.
 
 Build identity is the 16-hex SHA-256 over `package.json`,
-`package-lock.json`, `tsconfig.json` and `src/**/*.ts`. A dirty tree is
+`package-lock.json`, `tsconfig.json`, all regular files under `src/` and
+`scripts/`, and the Codex workspace manifest, directory entry and `src/`.
+Hashing and staging use the same inventory. A dirty tree is
 allowed; commit/branch/dirty metadata is observability-only in `build.json`.
 Identical content reuses the existing build directory and never rebuilds.
 
@@ -745,6 +764,12 @@ locked toolchain, compiles there, prunes development-only dependencies, writes
 exact `buildId` matches. On verification failure it restores the old target
 and unit state when possible and reports rollback failure separately.
 `rollback` swaps `current`/`previous` so a second rollback restores.
+These operations manage the connector only. They do not migrate global OpenCode
+plugin configuration or verify/reload the loaded Codex plugin. Record and restore
+the matching plugin configuration separately; older rollback targets may contain
+no workspace plugin. See [architecture](docs/architecture.md) for coordinated
+acceptance and immutable plugin-path guidance. A matching `/health` build ID is
+not proof of Codex RPC/quota readiness.
 
 `/health` reports `{ version, buildId, build }` alongside `upstream`.
 Deployed releases report their content hash; source runs (`npm run dev`,

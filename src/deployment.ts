@@ -10,6 +10,29 @@ const execFileAsync = promisify(execFile);
 export const SERVICE_NAME = "opencode-connect.service";
 export const BUILD_ID_RE = /^[0-9a-f]{16}$/;
 const FIXED_SOURCE_FILES = ["package.json", "package-lock.json", "tsconfig.json"];
+const CODEX_PLUGIN_DIR = path.join("packages", "codex-plugin");
+const CODEX_PLUGIN_FILES = ["package.json", "index.js", "src/index.js", "src/codex.js", "src/direct.js", "src/permissions.js", "src/usage.js", "src/stdio.js"];
+
+async function hasCodexWorkspace(sourceDir: string): Promise<boolean> {
+  try {
+    const manifest = JSON.parse(await fs.readFile(path.join(sourceDir, "package.json"), "utf8"));
+    return manifest.workspaces?.includes("packages/codex-plugin") === true;
+  } catch (error: unknown) {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function assertWorkspacePlugin(sourceDir: string): Promise<void> {
+  if (!await hasCodexWorkspace(sourceDir)) return;
+  for (const name of CODEX_PLUGIN_FILES) {
+    try {
+      if (!(await fs.lstat(path.join(sourceDir, CODEX_PLUGIN_DIR, name))).isFile()) throw new Error();
+    } catch {
+      throw new Error(`incomplete Codex workspace: missing ${CODEX_PLUGIN_DIR}/${name}`);
+    }
+  }
+}
 
 export type SourceMeta = {
   available: boolean;
@@ -111,32 +134,60 @@ export async function getSourceMeta(sourceDir: string): Promise<SourceMeta> {
 }
 
 async function collectSourceFiles(sourceDir: string): Promise<string[]> {
+  await assertWorkspacePlugin(sourceDir);
   const found: string[] = [];
   for (const name of FIXED_SOURCE_FILES) {
     try {
-      const stat = await fs.stat(path.join(sourceDir, name));
+      const stat = await fs.lstat(path.join(sourceDir, name));
+      if (stat.isSymbolicLink()) throw new Error(`release source must be a regular file: ${name}`);
       if (stat.isFile()) found.push(name);
-    } catch {
+    } catch (error: unknown) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
       // missing fixed file: hashing still proceeds; prepare validates later
     }
   }
-  // Build-time scripts are part of the release source contract, even though
-  // they are not compiled into dist. Hash them to prevent stale-build reuse.
-  const stack: string[] = [path.join(sourceDir, "src"), path.join(sourceDir, "scripts")];
+  // Build-time scripts and the native Codex plugin are release inputs, not
+  // development-only files. The plugin must match the connector RPC build.
+  const codexPlugin = path.join(sourceDir, CODEX_PLUGIN_DIR);
+  for (const dir of [path.join(sourceDir, "packages"), codexPlugin]) {
+    try {
+      if (!(await fs.lstat(dir)).isDirectory()) throw new Error(`release source must be a regular directory: ${path.relative(sourceDir, dir)}`);
+    } catch (error: unknown) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+    }
+  }
+  for (const name of ["package.json", "index.js"]) {
+    try {
+      const full = path.join(codexPlugin, name);
+      const stat = await fs.lstat(full);
+      if (stat.isSymbolicLink()) throw new Error(`release source must be a regular file: ${path.relative(sourceDir, full)}`);
+      if (stat.isFile()) found.push(path.relative(sourceDir, full));
+    } catch (error: unknown) {
+      if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+      // Historical fixture and connector-only trees have no plugin package.
+    }
+  }
+  const stack: string[] = [
+    path.join(sourceDir, "src"),
+    path.join(sourceDir, "scripts"),
+    path.join(codexPlugin, "src"),
+  ];
   while (stack.length > 0) {
     const dir = stack.pop()!;
     let entries;
     try {
+      if (!(await fs.lstat(dir)).isDirectory()) throw new Error(`release source must be a regular directory: ${path.relative(sourceDir, dir)}`);
       entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      continue;
+    } catch (error: unknown) {
+      if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") continue;
+      throw error;
     }
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) stack.push(full);
-      else if (entry.isFile() && (entry.name.endsWith(".ts") || entry.name.endsWith(".mjs"))) {
+      else if (entry.isFile()) {
         found.push(path.relative(sourceDir, full));
-      }
+      } else throw new Error(`release source must be a regular file or directory: ${path.relative(sourceDir, full)}`);
     }
   }
   return [...new Set(found)].sort();
@@ -244,6 +295,7 @@ export async function loadBuildRecord(buildDir: string): Promise<BuildRecord> {
 
 async function assertRunnableBuild(buildDir: string, buildId: string): Promise<void> {
   await loadBuildRecord(buildDir);
+  await assertWorkspacePlugin(buildDir);
   try {
     const stat = await fs.stat(path.join(buildDir, "dist", "src", "server.js"));
     if (!stat.isFile()) throw new Error();
@@ -260,15 +312,16 @@ async function assertRunnableBuild(buildDir: string, buildId: string): Promise<v
 
 export async function copySourceTree(sourceDir: string, stageDir: string): Promise<void> {
   await fs.mkdir(stageDir, { recursive: true });
+  // Use the same inventory for hashing and copying, including runtime assets.
+  // A file cannot be shipped without participating in release identity.
+  const files = await collectSourceFiles(sourceDir);
   for (const name of FIXED_SOURCE_FILES) {
-    await fs.copyFile(path.join(sourceDir, name), path.join(stageDir, name));
+    if (!files.includes(name)) throw new Error(`missing release source: ${name}`);
   }
-  await fs.cp(path.join(sourceDir, "src"), path.join(stageDir, "src"), { recursive: true });
-  // Historical/fixture source trees may not have build-time scripts.
-  try {
-    await fs.cp(path.join(sourceDir, "scripts"), path.join(stageDir, "scripts"), { recursive: true });
-  } catch (error: unknown) {
-    if (!(error && typeof error === "object" && "code" in error && error.code === "ENOENT")) throw error;
+  for (const name of files) {
+    const target = path.join(stageDir, name);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.copyFile(path.join(sourceDir, name), target);
   }
 }
 
@@ -322,18 +375,21 @@ export async function prepareBuild(options: {
     }
   }
   const meta = await getSourceMeta(sourceDir);
-  const version = await readSourceVersion(sourceDir);
   const stage = path.join(paths.buildsDir, `.stage-${buildId}-${process.pid}`);
   await fs.rm(stage, { recursive: true, force: true });
   try {
     await fs.mkdir(paths.buildsDir, { recursive: true });
     await copySourceTree(sourceDir, stage);
+    if ((await hashSourceTree(stage)).buildId !== buildId) throw new Error("source changed during staging; retry from a stable source snapshot");
+    const version = await readSourceVersion(stage);
     // Build in the isolated release tree with the full locked toolchain, then
     // prune development-only dependencies so the installed release remains
     // self-contained without depending on the checkout's node_modules.
     await exec("npm", ["ci", "--include=dev"], stage);
     await exec("npm", ["run", "build"], stage);
     await exec("npm", ["prune", "--omit=dev"], stage);
+    if (await hasCodexWorkspace(stage)) await exec("node", ["scripts/verify-integration.mjs"], stage);
+    if ((await hashSourceTree(stage)).buildId !== buildId) throw new Error("release inputs changed during build; refusing mismatched build identity");
     const record: BuildRecord = {
       buildId,
       version,

@@ -1,24 +1,36 @@
 import {
-  isAgentNotFoundError,
   type AgentInfo,
-  type FormInfo,
   type ModelInfo,
-  type PermissionRequest,
   type SessionInfo,
-  type SessionMessageInfo,
-  type SkillInfo,
-  type V2Event,
   type OpenCodeClient,
   type PermissionRule,
   type SessionPromptInput,
-  type SessionInboxInfo,
 } from "@opencode/client";
 import { connectNative, OPENCODE_RELEASE, type Connect } from "./native.js";
 import { codexStart, codexInspect, codexWait, codexAct, codexQuery, codexStatus, type Runtime, type CodexMode } from "./codex.js";
-import { page, textPage, type PageInput, integer, fingerprint, checkFingerprint, safeError, AdmissionError, CatalogError, TEXT_LIMIT, MESSAGE_PREVIEW_LIMIT, COMPACTION_PREVIEW_LIMIT, MESSAGE_TOOL_PREVIEW_LIMIT } from "./bounds.js";
-import { nextCall, pageNextCall, queryNextCall } from "./continuation.js";
-import { compactAgent, contextualPage, permissionSummary } from "./catalog.js";
+import { safeError, AdmissionError, CatalogError, MESSAGE_PREVIEW_LIMIT } from "./bounds.js";
+import { nextCall, queryNextCall } from "./continuation.js";
+import { resolveNativeQuery, type QueryCatalogs, type NativeQueryInput } from "./runtime/query.js";
+import { latestResult, resultEvidence, type ResultSelectionInput } from "./runtime/result.js";
+import {
+  modelKey,
+  parseModelRef,
+  projectMessage,
+  projectSession,
+  projectWorker,
+  projectPermission,
+  projectForm,
+  projectInbox,
+  currentRetry,
+  unknownEvidence,
+  eventSessionId,
+  eventLocationDirectory,
+  catalogLocation,
+} from "./runtime/projection.js";
+// Public surface is unchanged: these symbols keep their original module path.
 export { OPENCODE_RELEASE } from "./native.js";
+export { parseModelRef, isZeroCostModel, projectMessage, projectAgent } from "./runtime/projection.js";
+export { latestResult } from "./runtime/result.js";
 import { stat } from "node:fs/promises";
 import { ConnectorError as Error } from "./bounds.js";
 
@@ -31,15 +43,6 @@ const RECENT_SESSION_LIMIT = 8;
 type Client = OpenCodeClient;
 type AgentCatalogEntry = Awaited<ReturnType<Client["agent"]["list"]>>["data"][number];
 type ProviderCatalogEntry = Awaited<ReturnType<Client["provider"]["list"]>>["data"][number];
-type SessionState = "inProgress" | "completed" | "failed" | "interrupted" | "idle";
-
-async function readAgent(client: Client, agentId: string, cwd?: string) {
-  try { return await client.agent.get({ agentID: agentId, ...(cwd ? { location: { directory: cwd } } : {}) }); }
-  catch (error) {
-    if (isAgentNotFoundError(error)) throw new CatalogError(agentId);
-    throw error;
-  }
-}
 
 export type StartInput = {
   runtime?: Runtime;
@@ -56,40 +59,10 @@ export type StartInput = {
   variant?: string;
 } & PromptAttachments;
 export type PromptAttachments = Pick<SessionPromptInput, "files" | "agents" | "skills">;
-type TextInput = { textOffset?: number; textLimit?: number; textFingerprint?: string };
+export type InspectInput = ResultSelectionInput & { runtime?: Runtime };
 
-export type InspectInput = {
-  runtime?: Runtime;
-  sessionId: string;
-  messageId?: string;
-  detail?: "semantic" | "result";
-  selectionCursor?: string;
-  selectionFingerprint?: string;
-  candidateAssistantMessageId?: string;
-  textOffset?: number;
-  textLimit?: number;
-  textFingerprint?: string;
-};
-
-export type QueryInput = (
-  | ({ type: "sessionDiff"; sessionId: string; from?: string; to?: string; context?: number; file?: string } & PageInput & TextInput)
-  | ({ type: "inbox"; sessionId: string; inboxId?: string } & PageInput & TextInput)
-  | ({ type: "skill"; cwd?: string; skillId: string } & TextInput)
-  | ({ type: "tools"; sessionId: string; messageId: string } & PageInput)
-  | ({ type: "tool"; sessionId: string; messageId: string; toolId: string; field: "input" | "content" | "error"; contentIndex?: number } & TextInput)
-  | ({ type: "models"; cwd?: string; view?: "compact" | "full" } & PageInput)
-  | ({ type: "agents"; cwd?: string; view?: "compact" | "full"; includeHidden?: boolean; includePermissionsSummary?: boolean } & PageInput)
-  | ({ type: "agent"; cwd?: string; agentId: string; field?: "system" | "description" | "permissions" | "permissionSummary"; textOffset?: number; textLimit?: number; textFingerprint?: string } & PageInput)
-  | ({ type: "messages"; sessionId: string; cursor?: string; order?: "asc" | "desc" } & PageInput)
-  | { type: "message"; sessionId: string; messageId: string; field?: "summary" | "recent"; textOffset?: number; textLimit?: number; textFingerprint?: string }
-  | ({ type: "permissions"; sessionId: string; section?: "rules" | "pending" | "summary" } & PageInput)
-  | ({ type: "savedApprovals"; sessionId: string } & PageInput)
-  | ({ type: "runtime"; cwd: string } & PageInput)
-  | ({ type: "skills"; cwd?: string } & PageInput)
-  | ({ type: "providers"; cwd?: string } & PageInput)
-  | { type: "usage" }
-  | { type: "sessions"; cursor?: string; limit?: number; cwd?: string; searchTerm?: string }
-  | { type: "session"; sessionId: string }) & { runtime?: Runtime };
+// The query contract is declared where it is resolved; re-exported unchanged.
+export type QueryInput = NativeQueryInput & { runtime?: Runtime };
 
 export type ActInput = (
   | ({ action: "steer"; sessionId: string; instruction: string } & PromptAttachments)
@@ -117,222 +90,10 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function parseModelRef(value: string): { providerID: string; id: string } {
-  const slash = value.indexOf("/");
-  if (slash <= 0 || slash === value.length - 1) {
-    throw new Error("model must use the canonical provider/model form");
-  }
-  return { providerID: value.slice(0, slash), id: value.slice(slash + 1) };
-}
-
-function modelKey(model: { providerID: string; id: string }): string {
-  return `${model.providerID}/${model.id}`;
-}
-
-export function isZeroCostModel(model: Pick<ModelInfo, "cost">): boolean {
-  return Array.isArray(model.cost) && model.cost.length > 0 && model.cost.every((tier) =>
-    tier?.input === 0 &&
-    tier?.output === 0 &&
-    tier?.cache?.read === 0 &&
-    tier?.cache?.write === 0
-  );
-}
-
 async function assertDirectory(cwd: string): Promise<void> {
   if (!cwd.startsWith("/")) throw new Error("cwd must be an absolute path");
   const info = await stat(cwd);
   if (!info.isDirectory()) throw new Error("cwd must point to a directory");
-}
-
-function sessionState(session: SessionInfo, active: Record<string, unknown>): SessionState {
-  if (active[session.id]) return "inProgress";
-  if (session.outcome === "succeeded") return "completed";
-  if (session.outcome === "failed") return "failed";
-  if (session.outcome === "interrupted") return "interrupted";
-  return "idle";
-}
-
-type ResultOutcome = "completed" | "failed" | "incomplete" | "unknown";
-type OutcomeEvidence = { basis: "selectedAssistantMessage"; outcome: ResultOutcome; assistantMessageId: string | null; finish: string | null; error: { type: string; status: number | null; messageOmitted: boolean } | null; selectionComplete: boolean; terminal: boolean; completedAtMs: number | null; unavailable: boolean; readError: string | null };
-
-function projectRetry(message: Extract<SessionMessageInfo, { type: "assistant" }>) {
-  const retry = message.retry;
-  return retry ? {
-    assistantMessageId: message.id,
-    attempt: retry.attempt,
-    nextAttemptAtMs: retry.at,
-    error: { type: retry.error.type, status: retry.error.status ?? null, messageOmitted: true as const },
-  } : null;
-}
-
-// Descending native history only: never borrow retry state from an older prompt
-// or assistant. The native projector clears retry when the next step starts.
-function currentRetry(messages: SessionMessageInfo[]) {
-  for (const message of messages) {
-    if (message.type === "user" || message.type === "idle") break;
-    if (message.type === "assistant") return projectRetry(message);
-  }
-  return null;
-}
-
-function projectSession(session: SessionInfo, active: Record<string, unknown>, evidence?: Pick<OutcomeEvidence, "outcome">) {
-  return {
-    sessionId: session.id,
-    parentSessionId: session.parentID ?? null,
-    forkedFromSessionId: session.fork?.sessionID ?? null,
-    cwd: session.location.directory,
-    title: session.title ?? null,
-    status: sessionState(session, active),
-    executionOutcome: session.outcome ?? null,
-    outcome: evidence?.outcome ?? "unknown",
-    outcomeBasis: "selectedAssistantMessage",
-    model: session.model ? modelKey(session.model) : null,
-    agent: session.agent ?? null,
-    modelVariant: session.model?.variant ?? null,
-    permissionsConfigured: session.permissions !== undefined,
-    permissionRuleCount: session.permissions?.length ?? 0,
-    createdAtMs: session.time.created,
-    updatedAtMs: session.time.updated,
-    idleAtMs: session.time.idle ?? null,
-    cost: session.cost,
-    tokens: session.tokens,
-    usageBasis: "cumulativeSessionTotals" as const,
-    contextOccupancy: "unknown" as const,
-  };
-}
-
-function projectWorker(session: SessionInfo, active: Record<string, unknown>, evidence: OutcomeEvidence, continuation?: ReturnType<typeof nextCall> | null) {
-  const status = sessionState(session, active);
-  return {
-    sessionId: session.id,
-    cwd: session.location.directory,
-    status,
-    executionOutcome: session.outcome ?? null,
-    outcome: evidence.outcome,
-    outcomeBasis: evidence.basis,
-    outcomeEvidence: evidence,
-    nextCall: continuation ?? nextCall("opencode.inspect", { sessionId: session.id, detail: "result" }),
-    title: session.title ?? null,
-    model: session.model ? modelKey(session.model) : null,
-    modelVariant: session.model?.variant ?? null,
-    agent: session.agent ?? null,
-    terminalAtMs: (status === "inProgress" || status === "idle") ? null : (session.time.idle ?? session.time.updated),
-    lastActivityAtMs: session.time.updated,
-  };
-}
-
-function projectPermission(request: PermissionRequest) {
-  return {
-    type: "permission" as const,
-    requestId: request.id,
-    sessionId: request.sessionID,
-    action: request.action,
-    resources: request.resources,
-    message: request.message ?? null,
-  };
-}
-
-function projectForm(form: FormInfo) {
-  return {
-    type: "form" as const,
-    formId: form.id,
-    sessionId: form.sessionID,
-    title: form.title,
-    fields: form.fields,
-  };
-}
-
-function assistantText(message: Extract<SessionMessageInfo, { type: "assistant" }>): string {
-  return message.content
-    .filter((part): part is Extract<typeof part, { type: "text" }> => part.type === "text")
-    .map((part) => part.text)
-    .join("\n")
-    .trim();
-}
-
-export function projectMessage(message: SessionMessageInfo, offset?: number, limit?: number, expected?: string, sessionId?: string, preview = false) {
-  const text = message.type === "user" ? message.text : message.type === "assistant" ? assistantText(message) : null;
-  const paged = text === null ? null : textPage(text, offset, limit, expected);
-  // Inventory previews page the remainder at the full on-demand width so a long
-  // message recovers in few roundtrips; an explicit type:message textLimit is
-  // preserved instead.
-  const continuation = paged && sessionId ? pageNextCall("opencode.query", { type: "message", sessionId, messageId: message.id, ...(preview ? { textLimit: TEXT_LIMIT } : limit === undefined ? {} : { textLimit: limit }) }, paged) : null;
-  if (message.type === "user") {
-    return { id: message.id, type: message.type, createdAtMs: message.time.created, ...paged, nextCall: continuation };
-  }
-  if (message.type === "assistant") {
-    const toolCount = message.content.filter((part) => part.type === "tool").length;
-    return {
-      id: message.id,
-      type: message.type,
-      createdAtMs: message.time.created,
-      completedAtMs: message.time.completed ?? null,
-      agent: message.agent,
-      model: modelKey(message.model),
-      finish: message.finish ?? null,
-      retry: projectRetry(message),
-      ...paged, nextCall: continuation,
-      error: message.error ? { type: message.error.type, status: message.error.status ?? null, messageOmitted: true } : null,
-      requestTokens: message.tokens ?? null,
-      requestCost: message.cost ?? null,
-      requestUsageBasis: message.tokens ? "nativeAssistantRequest" as const : "unavailable" as const,
-      contextOccupancy: "unknown" as const,
-      tools: message.content
-        .filter((part) => part.type === "tool")
-        .slice(0, MESSAGE_TOOL_PREVIEW_LIMIT).map((part) => ({ id: part.id, name: part.name, status: part.state.status })),
-      toolCount,
-      toolsTruncated: toolCount > MESSAGE_TOOL_PREVIEW_LIMIT,
-    };
-  }
-  if (message.type === "idle") {
-    return { id: message.id, type: message.type, createdAtMs: message.time.created, outcome: message.outcome };
-  }
-  if (message.type === "compaction") {
-    const summary = "summary" in message ? textPage(message.summary, 0, COMPACTION_PREVIEW_LIMIT) : null;
-    const recent = "recent" in message ? textPage(message.recent, 0, COMPACTION_PREVIEW_LIMIT) : null;
-    return {
-      id: message.id,
-      type: message.type,
-      createdAtMs: message.time.created,
-      status: message.status,
-      reason: message.reason,
-      error: "error" in message && message.error ? { type: message.error.type, messageOmitted: true } : null,
-      model: "model" in message && message.model ? modelKey(message.model) : null,
-      ...("summary" in message ? { summaryPreview: summary, summaryFingerprint: fingerprint(message.summary), summarySize: message.summary.length } : {}),
-      ...("recent" in message ? { recentPreview: recent, recentFingerprint: fingerprint(message.recent), recentSize: message.recent.length } : {}),
-      summaryNextCall: summary && sessionId ? pageNextCall("opencode.query", { type: "message", sessionId, messageId: message.id, field: "summary", textLimit: TEXT_LIMIT }, summary) : null,
-      recentNextCall: recent && sessionId ? pageNextCall("opencode.query", { type: "message", sessionId, messageId: message.id, field: "recent", textLimit: TEXT_LIMIT }, recent) : null,
-      requestTokens: "tokens" in message ? (message.tokens ?? null) : null,
-      requestCost: "cost" in message ? (message.cost ?? null) : null,
-      requestUsageBasis: ("tokens" in message && message.tokens ? "nativeCompactionRequest" : "unavailable") as "nativeCompactionRequest" | "unavailable",
-      inboxCorrelationSupported: true as const,
-    };
-  }
-  return {
-    id: message.id,
-    type: message.type,
-    createdAtMs: message.time.created,
-  };
-}
-
-function eventSessionId(event: V2Event): string | undefined {
-  if (!("data" in event) || !event.data || typeof event.data !== "object") return undefined;
-  if ("sessionID" in event.data && typeof event.data.sessionID === "string") return event.data.sessionID;
-  if ("form" in event.data && event.data.form && typeof event.data.form === "object" && "sessionID" in event.data.form && typeof event.data.form.sessionID === "string") {
-    return event.data.form.sessionID;
-  }
-  return undefined;
-}
-
-function eventLocationDirectory(event: V2Event): string | undefined {
-  const location = (event as unknown as { location?: { directory?: unknown } }).location;
-  return typeof location?.directory === "string" ? location.directory : undefined;
-}
-
-function catalogLocation(value: unknown): string | undefined {
-  if (!value || typeof value !== "object" || !("location" in value)) return undefined;
-  const location = (value as { location?: { directory?: unknown } }).location;
-  return typeof location?.directory === "string" ? location.directory : undefined;
 }
 
 async function currentActions(client: Client, sessionId: string, signal?: AbortSignal) {
@@ -344,93 +105,6 @@ async function currentActions(client: Client, sessionId: string, signal?: AbortS
     ...permissions.map(projectPermission),
     ...forms.map(projectForm),
   ];
-}
-
-export async function latestResult(client: Client, input: InspectInput, terminal: boolean, signal?: AbortSignal) {
-  const { sessionId, messageId } = input;
-  if (input.selectionCursor && !messageId) throw new Error("selectionCursor requires the original user messageId");
-  if (input.candidateAssistantMessageId && !input.selectionCursor) throw new Error("candidate requires selectionCursor");
-  if (messageId) {
-    const target = await client.session.message.get({ sessionID: sessionId, messageID: messageId }, { signal });
-    if (target.type !== "user") throw new Error("result messageId must identify a canonical user prompt");
-  }
-  const initialSession = await client.session.get({ sessionID: sessionId }, { signal });
-  const selectionFingerprint = fingerprint({ id: initialSession.id, time: initialSession.time, outcome: initialSession.outcome });
-  checkFingerprint(selectionFingerprint, input.selectionFingerprint, input.selectionCursor ? 1 : 0);
-  let assistant: Extract<SessionMessageInfo, { type: "assistant" }> | undefined;
-  if (input.candidateAssistantMessageId) {
-    const candidate = await client.session.message.get({ sessionID: sessionId, messageID: input.candidateAssistantMessageId }, { signal });
-    if (candidate.type !== "assistant") throw new Error("candidate must be an assistant message");
-    assistant = candidate;
-  }
-  let cursor = input.selectionCursor;
-  let found = !messageId;
-  let exhausted = false;
-  let scanned = 0;
-  let latestUserBoundary = false;
-  // Bounded native pagination, with caller-retained continuation rather than local result state.
-  for (let count = 0; count < 10; count += 1) {
-    signal?.throwIfAborted();
-    const response = await client.message.list({ sessionID: sessionId, limit: 50, ...(cursor ? { cursor } : { order: "desc" as const }) }, { signal });
-    scanned += response.data.length;
-    if (response.data.length === 0) { exhausted = true; cursor = undefined; break; }
-    for (const message of response.data) {
-      if (!messageId && message.type === "user") { latestUserBoundary = true; break; }
-      if (message.id === messageId) { found = true; break; }
-      if (message.type === "user" && messageId) assistant = undefined;
-      if (message.type === "assistant" && !assistant) assistant = message;
-      if (!messageId && assistant) break;
-    }
-    if (latestUserBoundary || (found && (messageId || assistant))) { cursor = undefined; break; }
-    const next = response.cursor.next ?? undefined;
-    if (!next) { exhausted = true; cursor = undefined; break; }
-    if (next === cursor) throw new Error("native message pagination did not advance");
-    cursor = next;
-  }
-  const finalSession = await client.session.get({ sessionID: sessionId }, { signal });
-  const finalActive = await client.session.active({ signal });
-  terminal = terminal && !finalActive[sessionId];
-  if (fingerprint({ id: finalSession.id, time: finalSession.time, outcome: finalSession.outcome }) !== selectionFingerprint) throw new Error("session changed during result selection; restart pagination");
-  if (messageId && exhausted && !found) throw new Error("canonical user target is absent from paginated history");
-  const selected = found && !cursor;
-  const text = selected && assistant ? assistantText(assistant) : "";
-  const selectionComplete = selected && terminal;
-  const outcome: ResultOutcome = !selectionComplete || !assistant ? "unknown"
-    : assistant.error || assistant.finish === "error" ? "failed"
-    : assistant.time.completed === undefined || assistant.finish !== "stop" ? "incomplete" : "completed";
-  const paged = textPage(text, input.textOffset, input.textLimit, input.textFingerprint);
-  const continuation = cursor && messageId ? nextCall("opencode.inspect", { sessionId, messageId, detail: "result", selectionCursor: cursor, selectionFingerprint, ...(assistant ? { candidateAssistantMessageId: assistant.id } : {}), ...(input.textLimit === undefined ? {} : { textLimit: input.textLimit }) })
-    : cursor ? nextCall("opencode.query", { queries: [{ type: "messages", sessionId, cursor, limit: 50 }] }) : null;
-  const textNextCall = selectionComplete && assistant ? pageNextCall("opencode.query", { type: "message", sessionId, messageId: assistant.id, ...(input.textLimit === undefined ? {} : { textLimit: input.textLimit }) }, paged) : null;
-  return {
-    outcomeBasis: "selectedAssistantMessage" as const,
-    outcome,
-    messageId: messageId ?? null,
-    assistantMessageId: selected ? assistant?.id ?? null : null,
-    selectionComplete,
-    selectionCursor: cursor ?? null,
-    selectionFingerprint,
-    candidateAssistantMessageId: cursor ? assistant?.id ?? null : null,
-    scannedMessages: scanned,
-    targetFound: found,
-    exhausted,
-    terminal,
-    ...paged,
-    nextCall: continuation,
-    textNextCall,
-    completedAtMs: selected ? assistant?.time.completed ?? null : null,
-    finish: selected ? assistant?.finish ?? null : null,
-    retry: selected && assistant ? projectRetry(assistant) : null,
-    error: selected && assistant?.error ? { type: assistant.error.type, status: assistant.error.status ?? null, messageOmitted: true } : null,
-  };
-}
-
-function unknownEvidence(terminal: boolean, readError: string | null = null): OutcomeEvidence {
-  return { basis: "selectedAssistantMessage", outcome: "unknown", assistantMessageId: null, finish: null, error: null, selectionComplete: false, terminal, completedAtMs: null, unavailable: readError !== null, readError };
-}
-
-function resultEvidence(result: Awaited<ReturnType<typeof latestResult>>): OutcomeEvidence {
-  return { basis: "selectedAssistantMessage", outcome: result.outcome, assistantMessageId: result.assistantMessageId, finish: result.finish, error: result.error, selectionComplete: result.selectionComplete, terminal: result.terminal, completedAtMs: result.completedAtMs, unavailable: false, readError: null };
 }
 
 export class OpenCodeBackend {
@@ -853,204 +527,27 @@ export class OpenCodeBackend {
     return { sessionId, messageId, state: "active" as const, wakeReason: "timeout" as const, ...final.semantic };
   }
 
-  async query(queries: QueryInput[]) {
+  // Request envelope only: runtime dispatch, per-entry error capture, and
+  // continuation attachment. Each query type resolves in runtime/query.ts.
+  async query(queries: QueryInput[], signal?: AbortSignal) {
+    signal?.throwIfAborted();
     const { client } = await this.connect();
-    const results = [];
+    const catalogs: QueryCatalogs = {
+      stableModels: (target, cwd) => this.stableModels(target, cwd),
+      stableAgentCatalog: (target, cwd, allowEmptyAfterTimeout) => this.stableAgentCatalog(target, cwd, allowEmptyAfterTimeout),
+      stableProviders: (target, cwd, allowEmptyAfterTimeout) => this.stableProviders(target, cwd, allowEmptyAfterTimeout),
+    };
+    const results: Array<{ index: number; type: QueryInput["type"]; result?: unknown; error?: string; errorCode?: string | null; agentId?: string | null }> = [];
     for (let index = 0; index < queries.length; index += 1) {
+      signal?.throwIfAborted();
       const query = queries[index];
       try {
-        if (query.runtime === "codex") {
-          results.push({ index, type: query.type, result: await codexQuery(client, query) });
-          continue;
-        }
-        if (query.type === "skill") {
-          const skills = (await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined)).data;
-          const skill = skills.find((entry) => entry.id === query.skillId);
-          if (!skill) throw new Error("canonical skill absent from catalog");
-          results.push({ index, type: query.type, result: { ...projectSkill(skill), ...textPage(skill.content, query.textOffset, query.textLimit, query.textFingerprint) } });
-          continue;
-        }
-        if (query.type === "sessionDiff") {
-          const session = await client.session.get({ sessionID: query.sessionId });
-          for (const id of [query.from, query.to]) if (id) await client.session.message.get({ sessionID: session.id, messageID: id });
-          const diff = await client.session.diff({ sessionID: session.id, from: query.from, to: query.to, context: integer(query.context, 3, 1000) });
-          const file = query.file ? diff.find((entry) => entry.file === query.file) : undefined;
-          if (query.file && !file) throw new Error("file absent from native session diff");
-          results.push({ index, type: query.type, result: { sessionId: session.id, from: query.from ?? null, to: query.to ?? null, ...(file ? { file: file.file, additions: file.additions, deletions: file.deletions, status: file.status, ...textPage(file.patch, query.textOffset, query.textLimit, query.textFingerprint) } : page(diff.map(({ patch, ...entry }) => ({ ...entry, patchSize: patch.length, patchFingerprint: fingerprint(patch) })), query)) } });
-          continue;
-        }
-        if (query.type === "inbox") {
-          await client.session.get({ sessionID: query.sessionId });
-          const inbox = await client.session.inbox.list({ sessionID: query.sessionId });
-          const selected = query.inboxId ? inbox.find((entry) => entry.id === query.inboxId) : undefined;
-          if (query.inboxId && !selected) throw new Error("inbox entry not pending in targeted session");
-          results.push({ index, type: query.type, result: selected ? { ...projectInbox(selected), ...textPage("text" in selected.payload ? selected.payload.text : "", query.textOffset, query.textLimit, query.textFingerprint) } : page(inbox.map(projectInbox), query) });
-          continue;
-        }
-        if (query.type === "tools" || query.type === "tool") {
-          const message = await client.session.message.get({ sessionID: query.sessionId, messageID: query.messageId });
-          if (message.type !== "assistant") throw new Error("tool evidence requires canonical assistant message");
-          const tools = message.content.filter((part) => part.type === "tool");
-          const identity = { sessionId: query.sessionId, messageId: message.id };
-          if (query.type === "tools") results.push({ index, type: query.type, result: { ...identity, ...page(tools.map((part) => ({ id: part.id, name: part.name, status: part.state.status, time: part.time, executed: part.executed ?? null })), query) } });
-          else {
-            const tool = tools.find((entry) => entry.id === query.toolId);
-            if (!tool) throw new Error("canonical tool absent from targeted message");
-            const state = tool.state;
-            let text = "";
-            let contentType: string | null = null;
-            let contentTotal = 0;
-            let file: { mime: string; name: string | null; encoding: string; uriOmitted: boolean } | null = null;
-            if (query.field === "input") text = typeof state.input === "string" ? state.input : JSON.stringify(secretProjection(state.input));
-            if (query.field === "error" && state.status === "error") text = JSON.stringify({ type: state.error.type, status: state.error.status ?? null, messageOmitted: true });
-            if (query.field === "content") {
-              const content = "content" in state ? state.content ?? [] : [];
-              contentTotal = content.length;
-              const selected = content[integer(query.contentIndex, 0, Number.MAX_SAFE_INTEGER)];
-              if (!selected) throw new Error("tool content index absent");
-              contentType = selected.type;
-              if (selected.type === "text") text = selected.text;
-              else {
-                const projected = projectToolFile(selected);
-                text = projected.text;
-                file = projected.file;
-              }
-            }
-            results.push({ index, type: query.type, result: { ...identity, toolId: tool.id, name: tool.name, status: state.status, time: tool.time, executed: tool.executed ?? null, field: query.field, contentType, contentTotal, contentIndex: query.contentIndex ?? 0, file, ...textPage(text, query.textOffset, query.textLimit, query.textFingerprint) } });
-          }
-          continue;
-        }
-        if (query.type === "models") {
-          const models = await this.stableModels(client, query.cwd);
-          const data = models.map((model) => ({
-            id: modelKey(model),
-            free: isZeroCostModel(model),
-            enabled: model.enabled,
-            modalities: model.capabilities.input,
-            variants: model.variants.map((variant) => variant.id),
-            ...(query.view === "compact" ? {} : {
-            name: model.name,
-            providerId: model.providerID,
-            family: model.family ?? null,
-            canonical: model.canonical ?? null,
-            status: model.status,
-            capabilities: model.capabilities,
-            compatibility: model.compatibility ?? null,
-            releasedAtMs: model.time.released,
-            contextWindow: model.limit.context,
-            inputLimit: model.limit.input ?? null,
-            outputLimit: model.limit.output,
-            }),
-          }));
-          results.push({ index, type: query.type, result: { view: query.view ?? "full", ...page(data, query) } });
-          continue;
-        }
-        if (query.type === "agents") {
-          const response = await this.stableAgentCatalog(client, query.cwd, true);
-          const location = response.location;
-          const view = query.view ?? "compact";
-          const includeHidden = query.includeHidden ?? false;
-          const agents = response.data.filter((agent) => includeHidden || !agent.hidden);
-          const data = agents.map((agent) => {
-            const summary = query.includePermissionsSummary ? permissionSummary(agent.permissions, { type: "agent", agentId: agent.id, location }) : undefined;
-            return view === "full" ? { ...projectAgent(agent), ...(summary ? { permissionSummary: summary } : {}) } : compactAgent(agent, summary);
-          });
-          results.push({ index, type: query.type, result: {
-            location, catalog: "effective", provenanceAvailable: false, view, includesBuiltins: true, includesHidden: includeHidden,
-            hiddenCount: response.data.filter((agent) => agent.hidden).length,
-            ...contextualPage(data, query, { location, view, includeHidden, includePermissionsSummary: query.includePermissionsSummary ?? false }),
-          } });
-          continue;
-        }
-        if (query.type === "skills") {
-          const response = await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
-          results.push({ index, type: query.type, result: page(response.data.map(projectSkill), query) });
-          continue;
-        }
-        if (query.type === "providers") {
-          const response = await this.stableProviders(client, query.cwd, true);
-          results.push({ index, type: query.type, result: page(response.data.map((provider) => ({ id: provider.id, name: provider.name, activation: provider.activation })), query) });
-          continue;
-        }
-        if (query.type === "usage") {
-          results.push({ index, type: query.type, result: await client.session.stats() });
-          continue;
-        }
-        if (query.type === "sessions") {
-          const [response, active] = await Promise.all([
-            client.session.list({ limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: "desc" as const }), directory: query.cwd, search: query.searchTerm }),
-            client.session.active(),
-          ]);
-          results.push({ index, type: query.type, result: { sessions: response.data.map((session) => projectSession(session, active)), cursor: response.cursor } });
-          continue;
-        }
-        if (query.type === "agent") {
-          const response = await readAgent(client, query.agentId, query.cwd);
-          const agent = response.data;
-          const field = query.field ?? "system";
-          const context = { type: "agent" as const, agentId: agent.id, location: response.location };
-          results.push({ index, type: query.type, result: field === "permissionSummary"
-            ? { id: agent.id, location: response.location, field, permissionSummary: permissionSummary(agent.permissions, context, query) }
-            : { ...projectAgent(agent), location: response.location, field, ...(field === "permissions" ? { permissions: page(agent.permissions, query) } : textPage(agent[field] ?? "", query.textOffset, query.textLimit, query.textFingerprint)) } });
-          continue;
-        }
-        if (query.type === "messages") {
-          if (query.cursor && query.order) throw new Error("native message cursor cannot be combined with order");
-          const response = await client.message.list({ sessionID: query.sessionId, limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: query.order ?? "desc" }) });
-          results.push({ index, type: query.type, result: { messages: response.data.map((message) => projectMessage(message, 0, MESSAGE_PREVIEW_LIMIT, undefined, query.sessionId, true)), cursor: response.cursor } });
-          continue;
-        }
-        if (query.type === "message") {
-          const message = await client.session.message.get({ sessionID: query.sessionId, messageID: query.messageId });
-          if (query.field) {
-            if (message.type !== "compaction") throw new Error("field recovery requires a canonical compaction message");
-            const full = query.field === "summary" && "summary" in message ? message.summary
-              : query.field === "recent" && "recent" in message ? message.recent : null;
-            if (full === null) throw new Error("compaction message has no such native text field");
-            const paged = textPage(full, query.textOffset, query.textLimit, query.textFingerprint);
-            results.push({ index, type: query.type, result: { id: message.id, type: message.type, createdAtMs: message.time.created, status: message.status, reason: message.reason, field: query.field, ...paged, nextCall: pageNextCall("opencode.query", { type: "message", sessionId: query.sessionId, messageId: message.id, field: query.field, ...(query.textLimit === undefined ? {} : { textLimit: query.textLimit }) }, paged) } });
-            continue;
-          }
-          results.push({ index, type: query.type, result: projectMessage(message, query.textOffset, query.textLimit, query.textFingerprint, query.sessionId) });
-          continue;
-        }
-        if (query.type === "permissions") {
-          const session = await client.session.get({ sessionID: query.sessionId });
-          if (query.section === "summary") {
-            if (!session.agent) throw new Error("session has no persisted agent; cannot summarize its permission rules");
-            const agent = (await readAgent(client, session.agent, session.location.directory)).data;
-            results.push({ index, type: query.type, result: { sessionId: session.id, agentId: agent.id, location: session.location,
-              permissionSummary: permissionSummary([...agent.permissions, ...(session.permissions ?? [])], { type: "session", agentId: agent.id, sessionId: session.id, location: session.location }, query),
-            } });
-            continue;
-          }
-          const requests = query.section === "pending" ? await client.permission.list({ sessionID: session.id }) : [];
-          results.push({ index, type: query.type, result: { sessionId: session.id, defaultPolicyPreserved: session.permissions === undefined, section: query.section ?? "rules", ...((query.section ?? "rules") === "rules" ? { rules: page(session.permissions ?? [], query) } : { pending: page(requests.map(projectPermission), query) }), precedence: "session rules follow agent rules; omission preserves native default policy; explicit deny beats saved approval" } });
-          continue;
-        }
-        if (query.type === "savedApprovals") {
-          const session = await client.session.get({ sessionID: query.sessionId });
-          const saved = await client.permission.saved.list({ projectID: session.projectID });
-          results.push({ index, type: query.type, result: { projectId: session.projectID, ...page(saved, query) } });
-          continue;
-        }
-        if (query.type === "runtime") {
-          const location = { directory: query.cwd };
-          const [runtime, plugins, mcp, commands] = await Promise.all([client.location.get({ location }), client.plugin.list({ location }), client.mcp.list({ location }), client.command.list({ location })]);
-          const inventory = [
-            ...plugins.data.map((plugin) => ({ type: "plugin", id: plugin.id ?? null, sourceType: plugin.source.type, features: plugin.features, status: plugin.state.status })),
-            ...mcp.data.map((server) => ({ type: "mcp", name: server.name, status: server.status.status })),
-            ...commands.data.map((command) => ({ type: "command", name: command.name })),
-          ];
-          results.push({ index, type: query.type, result: { location: { directory: runtime.directory }, projectId: runtime.project.id, opencodeRelease: OPENCODE_RELEASE, ...page(inventory, query), capabilities: { files: true, fileWrite: true, worktrees: true, sessionDiff: true, inbox: true, toolEvidence: true, skillContent: true, modelVariant: true, promptAttachments: true, sessionCommands: true, skillInvoke: true, compactionAdmission: true, vcs: true, shells: true, pty: true, persistentPty: "experimental", terminalScreen: true, terminalSnapshot: true, contentSearch: "native shell rg", patch: "native shell git apply", liveLsp: false, symbols: false, formatter: false } } });
-          continue;
-        }
-        const [session, active] = await Promise.all([
-          client.session.get({ sessionID: query.sessionId }),
-          client.session.active(),
-        ]);
-        results.push({ index, type: query.type, result: projectSession(session, active) });
+        const result = query.runtime === "codex"
+          ? await codexQuery(client, query, signal)
+          : await resolveNativeQuery(client, query, catalogs);
+        results.push({ index, type: query.type, result });
       } catch (error) {
+        signal?.throwIfAborted();
         results.push({ index, type: query.type, error: safeError(error), errorCode: error instanceof CatalogError ? error.code : null, agentId: error instanceof CatalogError ? error.agentId : null });
       }
     }
@@ -1180,29 +677,6 @@ export class OpenCodeBackend {
   }
 }
 
-export function projectAgent(agent: AgentInfo) {
-  return {
-    id: agent.id,
-    name: agent.name,
-    mode: agent.mode,
-    hidden: agent.hidden,
-    description: textPage(agent.description ?? ""),
-    system: textPage(agent.system ?? ""),
-    steps: agent.steps ?? null,
-    permissions: page(agent.permissions),
-    model: agent.model ? modelKey(agent.model) : null,
-  };
-}
-
-function projectSkill(skill: SkillInfo) {
-  return {
-    id: skill.id,
-    name: skill.name,
-    description: textPage(skill.description ?? ""),
-    path: skill.path ?? null,
-  };
-}
-
 function attachments(input: PromptAttachments): PromptAttachments {
   return { files: input.files, agents: input.agents, skills: input.skills };
 }
@@ -1227,17 +701,4 @@ function checkPromptSize(text: string, input: PromptAttachments) {
       if (Buffer.from(data, "base64").length > 65_536) throw new Error("prompt file exceeds 64 KiB");
     }
   }
-}
-function projectInbox(inbox: SessionInboxInfo) {
-  return { inboxId: inbox.id, sessionId: inbox.sessionID, type: inbox.type, createdAtMs: inbox.time.created, delivery: inbox.delivery, status: "pending", ...( "text" in inbox.payload ? { preview: textPage(inbox.payload.text, 0, 512), textFingerprint: fingerprint(inbox.payload.text), textSize: inbox.payload.text.length } : {}) };
-}
-function projectToolFile(content: { uri: string; mime: string; name?: string | null }) {
-  const mime = content.mime.slice(0, 256);
-  const name = content.name == null ? null : content.name.slice(0, 4096);
-  return { text: "", file: { mime, name, metadataTruncated: mime !== content.mime || name !== (content.name ?? null), encoding: "metadataOnly", uriOmitted: true } };
-}
-function secretProjection(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(secretProjection);
-  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, /secret|token|password|credential|authorization|api.?key|cookie|provider.?state|request|config|env/i.test(key) ? "[omitted]" : secretProjection(entry)]));
-  return value;
 }
