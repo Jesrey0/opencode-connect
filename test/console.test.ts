@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
 import { handleKey, emptyState, renderFrame, renderTiny, visibleSessions, InputDecoder, sessionStatus, modelLabel, transcriptLines, type ConsoleSnapshot, type ConsoleState } from "../src/consoleView.js";
 import { observe, messageToEntry, fetchTranscript, ConsoleObserver } from "../src/console.js";
 import { nativeFixture, session, assistant, user } from "./native-fixture.js";
@@ -208,6 +209,81 @@ test("console refresh coalesces events without overlapping native reads", async 
   await first;
   assert.equal(reads, 2);
   assert.equal(maximum, 1);
+});
+
+test("continuous refresh requests settle each bounded batch and retain a delayed trailing read", { timeout: 5000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const state = emptyState();
+  let reads = 0;
+  let inFlight = 0;
+  let maximum = 0;
+  let churn = true;
+  let allowedReads = 2;
+  const unexpectedRead = deferred<ConsoleSnapshot>();
+  const frames: number[] = [];
+  const observer = new ConsoleObserver(state, {
+    snapshot: async () => {
+      reads++;
+      maximum = Math.max(maximum, ++inFlight);
+      try {
+        // A broken unbounded drain blocks here rather than spinning forever.
+        if (reads > allowedReads) return await unexpectedRead.promise;
+        // Every read, including the second, receives a burst of queued events.
+        await Promise.resolve();
+        if (churn) for (let event = 0; event < 10; event++) void observer.refresh();
+        return { ...snapshot(), pid: reads };
+      } finally { inFlight--; }
+    },
+    transcript: async () => [],
+  }, () => { frames.push(observer.snapshot!.pid); });
+  await observer.refresh();
+  assert.equal(reads, 2);
+  assert.deepEqual(frames, [1, 2]);
+  t.mock.timers.tick(749);
+  assert.equal(reads, 2);
+  allowedReads = 4;
+  t.mock.timers.tick(1);
+  await observer.refresh();
+  assert.equal(reads, 4);
+  assert.deepEqual(frames, [1, 2, 3, 4]);
+  churn = false;
+  allowedReads = 5;
+  t.mock.timers.tick(750);
+  // Let the scheduled read settle without requesting another refresh.
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(reads, 5);
+  t.mock.timers.tick(7500);
+  assert.equal(reads, 5);
+  assert.equal(maximum, 1);
+});
+
+test("console paints a connecting first frame even when startup observers never resolve", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+    import { registerHooks } from "node:module";
+    registerHooks({
+      load(url, context, nextLoad) {
+        if (url.endsWith("/src/native.ts")) return {
+          format: "module", shortCircuit: true,
+          source: 'export async function connectNative() { return { client: { server: { info: () => new Promise(() => {}) }, session: { active: () => new Promise(() => {}), list: () => new Promise(() => {}), stats: () => new Promise(() => {}) }, event: { subscribe: async function* () { await new Promise(() => {}); } } } }; }',
+        };
+        if (url.endsWith("/src/codexQuota.ts")) return {
+          format: "module", shortCircuit: true,
+          source: 'export function observeCodexQuota() { return { refresh() {}, async close() {} }; }',
+        };
+        return nextLoad(url, context);
+      },
+    });
+    Object.defineProperty(process.stdout, "isTTY", { value: true });
+    Object.defineProperty(process.stdin, "isTTY", { value: true });
+    process.stdin.setRawMode = () => {};
+    const { run } = await import("./src/console.ts");
+    void run();
+    setTimeout(() => process.exit(0), 100);
+  `], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /\x1b\[\?1049h/);
+  assert.match(result.stdout, /opencode connect/);
+  assert.match(result.stdout, /connecting/);
 });
 
 for (const fails of [false, true]) {

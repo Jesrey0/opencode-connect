@@ -247,6 +247,7 @@ export class ConsoleObserver {
   snapshot: ConsoleSnapshot | null = null;
   error: string | null = null;
   private refreshing: Promise<void> | undefined;
+  private trailingRefresh: ReturnType<typeof setTimeout> | undefined;
   private refreshQueued = false;
   private refreshHistory = false;
   private transcriptView: ConsoleState["view"] | undefined;
@@ -377,16 +378,29 @@ export class ConsoleObserver {
     if (this.state.quit) return Promise.resolve();
     this.refreshQueued = true;
     if (!this.refreshing) {
-      this.refreshing = this.drain().finally(() => { this.refreshing = undefined; });
+      if (this.trailingRefresh) clearTimeout(this.trailingRefresh);
+      this.trailingRefresh = undefined;
+      this.refreshing = this.drain().finally(() => {
+        this.refreshing = undefined;
+        if (this.refreshQueued && !this.state.quit) {
+          this.trailingRefresh = setTimeout(() => {
+            this.trailingRefresh = undefined;
+            void this.refresh();
+          }, REFRESH_THROTTLE_MS);
+        }
+      });
     }
     return this.refreshing;
   }
 
   private async drain(): Promise<void> {
-    do {
+    // One read plus one coalesced follow-up. Never wait for an event stream to
+    // become quiet: callers must settle even if the second read queues more.
+    // The delayed trailing batch yields to input/rendering and bounds read rate.
+    for (let pass = 0; pass < 2 && this.refreshQueued && !this.state.quit; pass++) {
       this.refreshQueued = false;
       await this.readOnce();
-    } while (this.refreshQueued && !this.state.quit);
+    }
   }
 
   private async readOnce(): Promise<void> {
@@ -553,6 +567,8 @@ export async function run(): Promise<void> {
     screen.draw(renderFrame(observer.snapshot, observer.error, state, columns, rows, quota));
   };
   const observer = new ConsoleObserver(state, consoleReads(client), redraw);
+  // Paint before event/quota subscriptions or the first potentially slow read.
+  redraw();
 
   const scheduleRefresh = () => {
     if (refreshTimer) return;
