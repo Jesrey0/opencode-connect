@@ -21,6 +21,16 @@ const cursorShape = { cursor: count, cursorUnit: z.enum(["bytes", "utf16CodeUnit
 const codexResult = z.object({ outcomeBasis: z.enum(["nativePromptResponse", "historyReplay"]), outcome, messageId: z.null(), assistantMessageId: id.nullable(), correlationSupported: z.literal(false), terminal: z.boolean(), finish: z.string().nullable(), completedAtMs: z.number().nullable(), error: nativeObject.nullable(), outputTruncated: z.boolean(), ...textShape, textNextCall: nextCall }).strict();
 const codexInspection = z.object({ session, result: codexResult, pendingActions: z.array(nativeObject) }).strict();
 
+// Connector-authored errors are structured results too. Publish their existing
+// envelope alongside success contracts; SDK input errors remain text-only.
+export const errorOutputSchema = z.object({
+  error: z.string(),
+  recovery: z.object({ sessionId: id, stage: z.string(), promptSubmitted: z.union([z.literal(false), z.null()]) }).strict().optional(),
+  errorCode: z.string().optional(),
+  reason: z.string().optional(),
+  mutationMayHaveOccurred: z.boolean().optional(),
+}).strict();
+
 export const outputSchemas = {
   status: z.object({ ready: z.literal(true), opencodeRelease: id, serverPid: z.number().int(), workers: z.array(z.object({ sessionId: id, cwd: id, status: session.shape.status, executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "historyReplay"]), outcomeEvidence: nativeObject, retry, retryReadError: z.string().nullable(), nextCall }).loose()), pendingActions: z.array(nativeObject), events: nativeObject.optional() }).strict(),
   hostInspect: z.discriminatedUnion("type", [

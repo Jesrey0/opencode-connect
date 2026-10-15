@@ -9,7 +9,7 @@ import { safeError, AdmissionError, ConnectorError, SessionDeleteError } from ".
 import { ProtocolErrorCode, ProtocolError } from "@modelcontextprotocol/server";
 import { Events, EVENT_NAME, eventArgumentsSchema } from "./events.js";
 import type { ServerContext, ContentBlock } from "@modelcontextprotocol/server";
-import { outputSchemas } from "./results.js";
+import { errorOutputSchema, outputSchemas } from "./results.js";
 import { CODEX_MODES } from "./codex.js";
 
 const runtimeSchema = z.enum(["opencode", "codex"]).optional().describe("Session runtime; omission selects OpenCode. Codex uses native ACP session IDs and advertises its narrower capabilities.");
@@ -131,6 +131,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   const capabilities = { tools: { listChanged: false }, ...(events ? { events: {} } : {}) };
   const server = new McpServer({ name: "opencode-connect", version: VERSION }, {
     capabilities, supportedProtocolVersions: ["2026-07-28"], inputRequired: { legacyShim: false },
+    instructions: "host.inspect uses type; command.start uses kind; host.worktree, command.control and opencode.act use action. Preserve native IDs and canonical cwd. Start commands with command.start, then read the saved handle/cursor with command.read. Use returned nextCall for read-only paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
   });
   if (events) {
     const authenticated = async (extra: ServerContext) => {
@@ -161,10 +162,13 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   }
   // Keep upstream exception bodies out of MCP errors as well as successful data.
   const register = server.registerTool.bind(server);
-  const registerTool = ((name: string, config: unknown, callback: (...args: unknown[]) => Promise<unknown>) => register(name, config as never, (async (...args: unknown[]) => {
-    try { return await callback(...args); }
-    catch (error) { return { ...structuredResult({ error: safeError(error), ...(error instanceof AdmissionError ? { recovery: error.recovery } : {}), ...(error instanceof SessionDeleteError ? { errorCode: error.code, reason: error.reason, mutationMayHaveOccurred: error.mutationMayHaveOccurred } : {}) }), isError: true }; }
-  }) as never)) as typeof server.registerTool;
+  const registerTool = ((name: string, config: unknown, callback: (...args: unknown[]) => Promise<unknown>) => {
+    const definition = config as Record<string, unknown> & { outputSchema: z.ZodType };
+    return register(name, { ...definition, outputSchema: z.union([definition.outputSchema, errorOutputSchema]) } as never, (async (...args: unknown[]) => {
+      try { return await callback(...args); }
+      catch (error) { return { ...structuredResult({ error: safeError(error), ...(error instanceof AdmissionError ? { recovery: error.recovery } : {}), ...(error instanceof SessionDeleteError ? { errorCode: error.code, reason: error.reason, mutationMayHaveOccurred: error.mutationMayHaveOccurred } : {}) }), isError: true }; }
+    }) as never);
+  }) as typeof server.registerTool;
 
   registerTool("status", {
     title: "Read OpenCode Connect Status",
@@ -176,7 +180,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("host.inspect", {
     title: "Inspect OpenCode Host",
-    description: "Read native files/images, filename search, VCS, command inventory or rendered terminal screens. Continue with fingerprints; direct host authority is independent of worker permissions.",
+    description: 'Use type (not action) to select a native read: {"type":"list","cwd":"/workspace"} or {"type":"read","cwd":"/workspace","path":"README.md","limit":2000}. Also filename search, VCS, command inventory and rendered screens. Follow returned nextCall for paging. Direct host authority is independent of worker permissions.',
     inputSchema: hostInspectSchema,
     outputSchema: outputSchemas.hostInspect,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -204,7 +208,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   }, async (input) => structuredResult(await host.worktree(input)));
   registerTool("command.start", {
     title: "Start Native OpenCode Command",
-    description: "Start a native shell or PTY. Save kind, id, canonical cwd and cursor; handles can expire and ordinary PTYs cannot replay after exit. Direct host authority.",
+    description: 'Use kind to start a native command: {"kind":"shell","cwd":"/workspace","command":"pwd"}. Then command.read with returned kind, id, canonical cwd and cursor. Handles can expire; ordinary PTYs cannot replay after exit. Direct host authority.',
     inputSchema: commandStartSchema,
     outputSchema: outputSchemas.commandStart,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },

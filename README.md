@@ -75,6 +75,13 @@ connect ticket is exported. Inventory uses explicit safe fields and excludes
 auth, environment, provider request objects, config, and raw plugin/MCP errors.
 Operator-chosen file contents and command output still require secret hygiene.
 
+`host.inspect` selects an operation with **`type`, not `action`**. For example:
+`{"type":"list","cwd":"/workspace"}` or
+`{"type":"read","cwd":"/workspace","path":"README.md","limit":2000}`.
+Replace `/workspace` with the authorized absolute directory. `command.start`
+instead uses `kind`; `host.worktree`, `command.control`, and `opencode.act` use
+`action`. Unknown fields remain rejected; they are not aliases.
+
 `find` is native filename search, bounded to 50 hits; `possiblyTruncated` is
 conservative because the API has no continuation. For content search, use a
 native shell command such as `rg --line-number --glob '*.ts' 'pattern' src`.
@@ -124,7 +131,9 @@ metadata, without duplicate base64 in text or structured data. SVG/HTML and
 oversized images fail. Object results return only MCP `structuredContent` with
 `content: []`; image reads instead carry one image block. All 12 tools publish
 explicit output schemas. Connector errors return structured `error` (and admission
-`recovery` where applicable) with `isError: true`; SDK input errors retain SDK formatting.
+`recovery` where applicable) with `isError: true`; their existing envelopes are
+included in each advertised output schema. SDK input errors retain SDK formatting;
+strict union errors omit arbitrary unknown field names rather than echoing them.
 The serialized `{ structuredContent }` projection has a repository-policy
 **256 KiB** ceiling, independent of the **1 MiB decoded image** allowance.
 Oversized JSON results fail explicitly; narrow the page or detail. OpenAI's
@@ -204,6 +213,9 @@ Client capabilities are required; client identity follows the SDK's current
 [protocol contract](https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle).
 Input/output discovery uses JSON Schema 2020-12. Strict discriminated
 unions own validation and publish model-visible properties plus variant restrictions.
+Discovery also includes concise server instructions for shared selector, command
+lifecycle and recovery rules. See the dated [ChatGPT MCP review](docs/chatgpt-mcp-review.md)
+for official OpenAI references, source checks and outstanding client acceptance.
 The SDK owns version/metadata/header validation and wire errors. Legacy requests
 and initialization are rejected with supported-version diagnostics; session
 GET/DELETE return 405 and no MCP session is allocated. The SDK acknowledges

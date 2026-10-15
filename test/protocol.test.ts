@@ -50,6 +50,10 @@ test("SDK rejects old sessions, versions, missing metadata, header mismatches an
     assert.deepEqual(discovery.reply.result.supportedVersions, [version]);
     assert.equal(discovery.reply.result.resultType, "complete");
     assert.ok(discovery.reply.result.capabilities.events);
+    const instructions = discovery.reply.result.instructions;
+    assert.equal(typeof instructions, "string");
+    assert.ok(instructions.length <= 512, "OpenAI recommends important cross-tool guidance in the first 512 characters");
+    for (const guidance of ["type", "kind", "action", "command.start", "command.read", "nextCall", "uncertain mutations"]) assert.ok(instructions.includes(guidance), guidance);
     assert.equal(discovery.headers.has("mcp-session-id"), false);
     for (const old of ["2025-06-18", "2025-11-25"]) {
       for (const method of ["server/discover", "tools/list", "initialize"]) {
@@ -282,6 +286,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     assert.equal(failed.reply.result.isError, true);
     assert.deepEqual(failed.reply.result.content, []);
     assert.match(failed.reply.result.structuredContent.error, /not available/);
+    assert.equal(validators.getValidator(tools.find(tool => tool.name === "opencode.start").outputSchema)(failed.reply.result.structuredContent).valid, true);
     const invalid = await http.send("tools/call", { name: "status", arguments: { alias: "old" } });
     assert.equal(invalid.reply.result.isError, true);
   } finally { await http.close(); await rm(cwd, { recursive: true, force: true }); }

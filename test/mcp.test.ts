@@ -11,7 +11,7 @@ import { createServer, permissionsSchema, commandStartSchema, querySchema, struc
 import { OpenCodeBackend } from "../src/opencode.js";
 import { HostBackend } from "../src/host.js";
 import { nativeFixture, session, assistant, user } from "./native-fixture.js";
-import { page } from "../src/bounds.js";
+import { AdmissionError, SessionDeleteError, page } from "../src/bounds.js";
 
 async function mcpFixture(fixture: ReturnType<typeof nativeFixture>, backend = new OpenCodeBackend(fixture.connect)) {
   const server = createServer(backend, new HostBackend(fixture.connect));
@@ -26,9 +26,26 @@ test("MCP discovery uses host/command groups and canonical worker names without 
   try {
     const { tools } = await fixture.client.listTools();
     assert.deepEqual(tools.map((t) => t.name).sort(), ["status", "opencode.start", "opencode.wait", "opencode.inspect", "opencode.query", "opencode.act", "host.inspect", "host.write", "host.worktree", "command.start", "command.read", "command.control"].sort());
-    for (const name of ["command.read", "host.write", "host.worktree"]) {
+    // OpenAI plugin reference/guidelines reviewed 2026-10-15; see
+    // docs/chatgpt-mcp-review.md for sources and behavior justifications.
+    for (const [name, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of [
+      ["status", true, false, false, true],
+      ["host.inspect", true, false, false, true],
+      ["host.write", false, true, false, false],
+      ["host.worktree", false, true, false, false],
+      ["command.start", false, true, true, false],
+      ["command.read", false, true, false, false],
+      ["command.control", false, true, true, false],
+      ["opencode.start", false, true, true, false],
+      ["opencode.wait", true, false, false, true],
+      ["opencode.inspect", true, false, false, true],
+      ["opencode.query", true, false, false, true],
+      ["opencode.act", false, true, true, false],
+    ] as const) {
+      const tool = tools.find((t) => t.name === name)!;
+      assert.ok(tool.title?.trim()); assert.ok(tool.description?.trim());
       const annotations = tools.find((t) => t.name === name)!.annotations!;
-      assert.equal(annotations.readOnlyHint, false); assert.equal(annotations.idempotentHint, false); assert.equal(annotations.destructiveHint, true);
+      assert.deepEqual(annotations, { readOnlyHint, destructiveHint, openWorldHint, idempotentHint }, name);
     }
     const start = tools.find((t) => t.name === "opencode.start")!.inputSchema;
     assert.equal("permissionMode" in start.properties!, false);
@@ -52,6 +69,56 @@ test("MCP image response contains safe metadata and one bounded image block, nev
     assert.equal(content[0].text, undefined);
     assert.equal(JSON.stringify(response.structuredContent).includes(png.toString("base64")), false);
   } finally { await fixture.close(); await rm(cwd, { recursive: true, force: true }); }
+});
+
+test("host discovery names selectors and publishes valid minimal examples without native access", async () => {
+  const native = nativeFixture(() => { throw new Error("discovery must not access runtime"); });
+  const fixture = await mcpFixture(native);
+  try {
+    const { tools } = await fixture.client.listTools();
+    const provider = new AjvJsonSchemaValidator();
+    for (const [name, selector, examples] of [
+      ["host.inspect", "type", [{ type: "list", cwd: "/workspace" }, { type: "read", cwd: "/workspace", path: "README.md", limit: 2000 }]],
+      ["command.start", "kind", [{ kind: "shell", cwd: "/workspace", command: "pwd" }]],
+    ] as const) {
+      const tool = tools.find(tool => tool.name === name)!;
+      assert.match(tool.description!, new RegExp(`Use ${selector}`));
+      const validate = provider.getValidator(tool.inputSchema as JsonSchemaType);
+      for (const example of examples) {
+        assert.ok(tool.description!.includes(JSON.stringify(example)), `${name} example is discoverable`);
+        assert.equal(validate(example).valid, true, `${name} example passes its published contract`);
+      }
+    }
+    assert.match(tools.find(tool => tool.name === "host.inspect")!.description!, /not action/);
+    assert.match(tools.find(tool => tool.name === "command.start")!.description!, /command.read/);
+    assert.equal(native.requests.length, 0);
+  } finally { await fixture.close(); }
+});
+
+test("strict union errors omit arbitrary unknown keys and reject wrong selectors before native access", async () => {
+  const native = nativeFixture(() => { throw new Error("invalid arguments must not reach runtime"); });
+  const fixture = await mcpFixture(native);
+  try {
+    for (const args of [{ action: "list", cwd: "/workspace" }, { type: "unknown", cwd: "/workspace" }]) {
+      const result = await fixture.client.callTool({ name: "host.inspect", arguments: args });
+      assert.equal(result.isError, true);
+      assert.match(JSON.stringify(result.content), /type/);
+    }
+    const keys = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`PRIVATE-KEY-${i}-${"x".repeat(1000)}`, "PRIVATE-VALUE"]));
+    for (const [name, args] of [
+      ["host.inspect", { type: "list", cwd: "/workspace", ...keys }],
+      ["command.start", { kind: "shell", cwd: "/workspace", command: "pwd", args: [], ...keys }],
+      ["opencode.query", { queries: [{ type: "agents", ...keys }] }],
+    ] as const) {
+      const result = await fixture.client.callTool({ name, arguments: args });
+      assert.equal(result.isError, true);
+      const json = JSON.stringify(result);
+      assert.ok(Buffer.byteLength(json) < 512, `${name} unknown-field error stays concise`);
+      assert.equal(json.includes("PRIVATE-"), false, "arbitrary argument keys and values are not echoed");
+      assert.match(json, /Unrecognized field/);
+    }
+    assert.equal(native.requests.length, 0);
+  } finally { await fixture.close(); }
 });
 
 test("real tools/list exposes object fields and discriminators; JSON Schema and runtime reject invalid variants", async () => {
@@ -145,6 +212,60 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       }
     }
     assert.equal(nativeCalls, 0);
+  } finally { await fixture.close(); }
+});
+
+test("discovered output schemas accept existing safe structured errors, including recovery and deletion", async () => {
+  class ErrorBackend extends OpenCodeBackend {
+    override async start(): Promise<never> { throw new AdmissionError("admission uncertain", { sessionId: "s", stage: "prompt", promptSubmitted: null }); }
+    override async act(): Promise<never> { throw new SessionDeleteError("DELETE_READBACK_FAILED", "readback failed", true); }
+  }
+  const native = nativeFixture(() => Response.json({ _tag: "ServiceUnavailableError", message: "PRIVATE-UPSTREAM" }, { status: 503 }));
+  const fixture = await mcpFixture(native, new ErrorBackend(native.connect));
+  try {
+    const { tools } = await fixture.client.listTools();
+    for (const [name, args] of [
+      ["host.inspect", { type: "vcs", cwd: "/workspace" }],
+      ["opencode.start", { cwd: "/workspace", model: "openai/a", task: "test" }],
+      ["opencode.act", { action: "delete", runtime: "opencode", sessionId: "s" }],
+    ] as const) {
+      const response = await fixture.client.callTool({ name, arguments: args });
+      assert.equal(response.isError, true);
+      assert.deepEqual(response.content, [], "no duplicate text payload");
+      assert.equal(JSON.stringify(response).includes("PRIVATE-UPSTREAM"), false);
+      const validate = new AjvJsonSchemaValidator().getValidator(tools.find(tool => tool.name === name)!.outputSchema! as JsonSchemaType);
+      assert.equal(validate(response.structuredContent).valid, true, name);
+      assert.equal(validate({ error: 1 }).valid, false, "error field stays typed");
+      assert.equal(validate({ error: "x", recovery: { sessionId: "s", stage: "prompt", promptSubmitted: true } }).valid, false);
+    }
+  } finally { await fixture.close(); }
+});
+
+test("MCP shell example retains separate native create, get and output calls with saved byte cursor", async () => {
+  const location = { directory: "/workspace" };
+  const shell = { id: "native-shell", cwd: location.directory, status: "exited", exit: 0, time: { started: 1, ended: 2 } };
+  const native = nativeFixture(r => {
+    if (r.path === "/api/location") return location;
+    if (r.path === "/api/shell" && r.method === "POST") return { location, data: shell };
+    if (r.path === "/api/shell/native-shell") return { location, data: shell };
+    if (r.path === "/api/shell/native-shell/output") return { location, data: { output: "pwd", cursor: 3, size: 3, truncated: false } };
+    throw new Error(`unexpected fixture call ${r.path}`);
+  });
+  const fixture = await mcpFixture(native);
+  try {
+    const started = await fixture.client.callTool({ name: "command.start", arguments: { kind: "shell", cwd: location.directory, command: "pwd" } });
+    assert.notEqual(started.isError, true);
+    assert.deepEqual(native.requests.map(r => [r.method, r.path]), [["GET", "/api/location"], ["POST", "/api/shell"]]);
+    assert.deepEqual(native.requests[1].body, { cwd: location.directory, command: "pwd", timeout: 120000 });
+    const handle = started.structuredContent as any;
+    assert.equal(handle.id, shell.id); assert.equal(handle.cursor, 0); assert.equal(handle.cursorUnit, "bytes");
+    const read = await fixture.client.callTool({ name: "command.read", arguments: { kind: handle.kind, cwd: handle.cwd, id: handle.id, cursor: handle.cursor, limit: 3 } });
+    assert.notEqual(read.isError, true);
+    assert.deepEqual(native.requests.slice(2).map(r => [r.method, r.path]), [["GET", "/api/location"], ["GET", "/api/shell/native-shell"], ["GET", "/api/shell/native-shell/output"]]);
+    assert.equal(native.requests.at(-1)!.query.get("cursor"), "0");
+    assert.equal(native.requests.at(-1)!.query.get("limit"), "3");
+    const result = read.structuredContent as Record<string, unknown>;
+    assert.equal(result.cursor, 3); assert.equal(result.drained, true);
   } finally { await fixture.close(); }
 });
 

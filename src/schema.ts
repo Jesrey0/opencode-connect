@@ -3,7 +3,15 @@ import * as z from "zod/v4";
 // Publish model-visible fields alongside the union's strict variant constraints.
 // Metadata only affects discovery; the discriminated union is the sole parser.
 export function exposedUnion<K extends string, O extends readonly [z.ZodObject, ...z.ZodObject[]]>(key: K, options: O) {
-  const variants = options.map((option) => option.strict().meta(option.meta() ?? {})) as unknown as O;
+  const variants = options.map((option) => {
+    const strict = option.strict();
+    const error = strict.def.error as z.core.$ZodErrorMap | undefined;
+    // Keep refinements and strict rejection, but do not echo arbitrary caller keys
+    // into SDK validation errors. Other field/bound errors retain their detail.
+    return strict.clone({ ...strict.def, error: (issue: z.core.$ZodRawIssue) => issue.code === "unrecognized_keys"
+      ? "Unrecognized field(s) for selected variant; use only its documented fields"
+      : error?.(issue) }).meta(option.meta() ?? {});
+  }) as unknown as O;
   const union = z.discriminatedUnion(key, variants);
   const oneOf = variants.map((variant) => {
     const { $schema, ...schema } = z.toJSONSchema(variant, { io: "input", target: "draft-2020-12" });
