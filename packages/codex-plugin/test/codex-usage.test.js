@@ -11,7 +11,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { test } from "node:test"
+import { after, test } from "node:test"
 
 import { createCodexSessions, installCodexSessionsRpc } from "../src/direct.js"
 import {
@@ -38,7 +38,14 @@ async function until(predicate, timeoutMs) {
   }
 }
 const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
-const scratch = (name) => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codex-usage-")), name)
+const fixtureDirs = new Set()
+after(() => { for (const dir of fixtureDirs) fs.rmSync(dir, { recursive: true, force: true }) })
+function fixtureDir(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  fixtureDirs.add(dir)
+  return dir
+}
+const scratch = (name) => path.join(fixtureDir("codex-usage-"), name)
 
 /**
  * An in-memory transport recording every method the client requests, so the
@@ -230,8 +237,6 @@ test("the read sends only initialize and the two account reads, in that order", 
   assert.deepEqual(transport.sent, ["initialize", "account/rateLimits/read", "account/read"])
   assert.equal(transport.closed, true)
   assert.equal(usage.buckets.length, 1)
-  // No turn method is ever reachable, so no quota can be spent by reading it.
-  for (const method of transport.sent) assert.equal(/^(thread|turn)\//.test(method), false)
 })
 
 test("the read is refused outright for any method outside the allowlist", async () => {
@@ -348,7 +353,7 @@ test("the transport is always closed, even when the read fails", async () => {
  * ignores, which is exactly how the real binary behaves.
  */
 function fixtureBinary() {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-usage-bin-"))
+  const dir = fixtureDir("codex-usage-bin-")
   const shim = path.join(dir, "codex")
   fs.writeFileSync(shim, `#!/bin/sh\nexec "${process.execPath}" "${FIXTURE}" "$@"\n`)
   fs.chmodSync(shim, 0o755)
@@ -359,7 +364,7 @@ function readThroughStdio(env = {}) {
   return readCodexUsage({ open: () => spawnCodexAppServer({ codexPath: fixtureBinary(), env: { ...process.env, ...env } }) })
 }
 
-test("a full snapshot runs over the real spawn + newline-delimited JSON-RPC path", async () => {
+test("a full stdio snapshot excludes identity and sends only the exact read-only methods", async () => {
   const trace = scratch("trace.txt")
   const usage = await readThroughStdio({ FAKE_RATE_LIMITS: "missing-windows", FAKE_TRACE: trace })
 
@@ -371,7 +376,11 @@ test("a full snapshot runs over the real spawn + newline-delimited JSON-RPC path
   assert.deepEqual(usage.account, { type: "chatgpt", planType: "plus", requiresOpenaiAuth: false })
 
   const sent = fs.readFileSync(trace, "utf8").split("\n").filter(Boolean)
+  // Exact wire methods also exclude every thread/turn mutation.
   assert.deepEqual(sent, ["initialize", "initialized", "account/rateLimits/read", "account/read"])
+  const serialized = JSON.stringify(usage)
+  for (const secret of ["acct_secret_123", "person@example.com", "chatgpt.com", "credit_secret", "buy more"])
+    assert.equal(serialized.includes(secret), false, `"${secret}" must not cross the transport`)
 })
 
 test("stdio handshake includes initialized and fixed non-refreshing parameters", async () => {
@@ -395,15 +404,6 @@ test("early app-server exit rejects pending reads promptly", async () => {
 test("an oversized unterminated stdio frame fails without retaining its body", async () => {
   await assert.rejects(readThroughStdio({ FAKE_RATE_LIMITS: "oversized" }), error =>
     error instanceof UsageUnavailableError && !error.message.includes("SECRET"))
-})
-
-test("the stdio path never sends a turn method, and identity never crosses it", async () => {
-  const trace = scratch("trace.txt")
-  const usage = await readThroughStdio({ FAKE_RATE_LIMITS: "missing-windows", FAKE_TRACE: trace })
-  const sent = fs.readFileSync(trace, "utf8")
-  assert.equal(/(^|\n)(thread|turn)\//.test(sent), false)
-  for (const secret of ["acct_secret_123", "person@example.com", "chatgpt.com", "credit_secret", "buy more"])
-    assert.equal(JSON.stringify(usage).includes(secret), false, `"${secret}" must not cross the transport`)
 })
 
 test("a server-initiated token refresh is refused over the real transport", async () => {
@@ -452,12 +452,21 @@ test("a server that never answers is bounded and reaped", async () => {
 
 test("a cooperative app-server exits on stdin EOF without ever being signalled", async (t) => {
   if (!POSIX) return t.skip("process-group termination is POSIX-only")
-  const transport = spawnCodexAppServer({ codexPath: fixtureBinary(), env: { ...process.env, FAKE_EXIT_MODE: "eof" } })
-  assert.equal(transport.isRunning(), true)
-  await transport.close()
-  assert.equal(transport.isRunning(), false)
-  // A second close is a no-op rather than an error.
-  await transport.close()
+  const marker = scratch("eof.txt")
+  const transport = spawnCodexAppServer({ codexPath: fixtureBinary(), env: { ...process.env, FAKE_EXIT_MODE: "eof", FAKE_EOF_TARGET: marker } })
+  try {
+    // The reply proves the fixture is ready before shutdown is requested.
+    await transport.request("initialize")
+    assert.equal(transport.isRunning(), true)
+    assert.equal(fs.existsSync(marker), false)
+    await transport.close()
+    assert.equal(fs.readFileSync(marker, "utf8"), "eof", "shutdown reached stdin EOF, not a signal")
+    assert.equal(transport.isRunning(), false)
+    // A second close is a no-op rather than an error.
+    await transport.close()
+  } finally {
+    await transport.close()
+  }
 })
 
 test("an uncooperative app-server is reaped through the owned process group", async (t) => {

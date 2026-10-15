@@ -45,6 +45,7 @@ function clientCallParams(method, sessionId) {
  * @param {string[]} [behavior.clientCalls] Client methods the fake invokes during the prompt.
  * @param {string[]} [behavior.chunks] Assistant text chunks streamed back.
  * @param {boolean} [behavior.hang] Hold the prompt open until cancelled (cancellation tests).
+ * @param {() => void} [behavior.onPrompt] Observe prompt admission before testing connection loss.
  * @param {string} [behavior.promptError] Reject the prompt with this message.
  * @param {string} [behavior.setModeError] Reject session/set_mode with this message.
  */
@@ -99,6 +100,7 @@ export function createFakeCodexAgent(behavior = {}) {
 
   agent.onRequest("session/prompt", async ({ params, client, signal }) => {
     calls.prompts.push(params)
+    behavior.onPrompt?.()
 
     if (promptError) throw new RequestError(-32000, promptError)
 

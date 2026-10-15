@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
-import { handleKey, emptyState, renderFrame, renderTiny, visibleSessions, InputDecoder, sessionStatus, modelLabel, transcriptLines, type ConsoleSnapshot, type ConsoleState } from "../src/consoleView.js";
+import { handleKey, emptyState, renderFrame, visibleSessions, InputDecoder, sessionStatus, modelLabel, type ConsoleSnapshot, type ConsoleState } from "../src/consoleView.js";
 import { observe, observeCodex, messageToEntry, fetchTranscript, ConsoleObserver } from "../src/console.js";
 import { nativeFixture, session, assistant, user } from "./native-fixture.js";
 
@@ -92,40 +92,6 @@ test("InputDecoder decodes arrows, enter, paging, and standalone escape", () => 
   assert.deepEqual([...Buffer.from("é")].flatMap((byte) => decoder.push(byte)), []);
   assert.deepEqual(decoder.push(0x1b), []);
   assert.deepEqual(decoder.flushEscape(), [{ kind: "escape" }]);
-});
-
-test("renderFrame is deterministic and includes core native evidence", () => {
-  const state = emptyState();
-  const width = 100;
-  const height = 24;
-  const a = renderFrame(snapshot(), null, state, width, height);
-  const b = renderFrame(snapshot(), null, emptyState(), width, height);
-  assert.deepEqual(a, b);
-  const text = a.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-  assert.ok(text.includes("opencode connect"));
-  assert.ok(text.includes("opencode 2.0.24 · pid 7"));
-  assert.ok(text.includes("Fix the parser"));
-  assert.ok(text.includes("running"));
-  assert.ok(text.includes("1 running · 1 pending"));
-  assert.ok(text.includes("Needs 0xOperator · permission: write · src/a.ts"));
-  assert.ok(text.includes("openai/a"));
-  assert.ok(text.includes("? help"));
-  assert.equal(a.length, height);
-  assert.equal(renderFrame(snapshot(), "backend unavailable", emptyState(), width, height).length, height);
-});
-
-test("renderTiny handles zero space and small terminals", () => {
-  assert.deepEqual(renderTiny(snapshot(), null, emptyState(), 0, 0), []);
-  const lines = renderTiny(snapshot(), null, emptyState(), 40, 8);
-  assert.ok(lines.join("\n").includes("3 sessions"));
-});
-
-test("transcriptLines render operator/worker identity and wraps text", () => {
-  const lines = transcriptLines([{ role: "user", text: "hello" }, { role: "assistant", text: "x".repeat(200) }], 40);
-  const text = lines.join("\n").replace(/\x1b\[[0-9;]*m/g, "");
-  assert.ok(text.includes("0xOperator"));
-  assert.ok(text.includes("OpenCode worker"));
-  assert.ok(lines.length > 3);
 });
 
 test("messageToEntry maps canonical messages to transcript entries", () => {

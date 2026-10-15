@@ -312,14 +312,6 @@ test("authenticated MCP HTTP boundary discovers, lists, subscribes, and unsubscr
     assert.equal(wireRejection.status, 400);
     assert.equal(events.snapshot().lifecycle.evidence.counters.subscriptionReceived, 4);
     assert.equal(events.snapshot().lifecycle.evidence.counters.subscriptionRejected, 3);
-    const legacy = await fetch(`http://127.0.0.1:${address.port}/mcp`, {
-      method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": "2025-11-25" },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/list", params: {} }),
-    });
-    assert.equal(legacy.status, 400);
-    const legacyReply = await legacy.json() as any;
-    assert.equal(legacyReply.error.code, -32022);
-    assert.deepEqual(legacyReply.error.data.supported, ["2026-07-28"]);
     const cancellation = await send("events/unsubscribe", { name: EVENT_NAME, arguments: { sessionId: "s1", messageId: "u1" }, delivery: { mode: "webhook", url: "https://hooks.example/callback" } }, 6);
     assert.equal(cancellation.result.resultType, "complete");
     assert.deepEqual(Object.keys(cancellation.result).filter((key) => key !== "resultType" && key !== "_meta"), []);

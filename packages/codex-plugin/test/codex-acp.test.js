@@ -213,8 +213,10 @@ test("an already-aborted signal never starts the prompt", async () => {
   assert.equal(transport.calls.prompts.length, 0)
 })
 
-test("a dead agent connection surfaces a bounded error, not a hang", async () => {
-  const transport = fakeTransport({ hang: true })
+test("a dead agent connection rejects an active prompt without falling back to timeout", async () => {
+  let started
+  const ready = new Promise(resolve => { started = resolve })
+  const transport = fakeTransport({ hang: true, onPrompt: () => started() })
 
   const promise = runCodexTurn({
     open: transport.open,
@@ -223,13 +225,12 @@ test("a dead agent connection surfaces a bounded error, not a hang", async () =>
     timeoutMs: 2000,
   })
 
-  // Sever the ACP connection mid-turn, as a crashed codex-acp would.
-  setTimeout(() => transport.kill(), 50)
-
-  await assert.rejects(promise, (error) => {
-    assert.ok(error instanceof Error)
-    return true
-  })
+  // A startup failure must reject the test rather than leave readiness pending.
+  await Promise.race([ready, promise])
+  assert.equal(transport.calls.prompts.length, 1)
+  // Sever only after prompt admission, not during startup.
+  transport.kill()
+  await assert.rejects(promise, { message: "Codex ACP operation failed; details omitted." })
 })
 
 test("an agent prompt failure omits upstream text and stderr", async () => {

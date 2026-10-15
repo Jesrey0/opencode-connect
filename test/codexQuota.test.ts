@@ -202,21 +202,28 @@ test("manual quota refresh supersedes a pending watcher refresh", async t => {
 });
 
 test("simultaneous close calls both await the active quota reader", async () => {
+  let started!: () => void;
+  const ready = new Promise<void>(resolve => { started = resolve; });
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   const monitor = observeCodexQuota({
     onChange: () => {}, watch: () => { throw new Error("manual"); },
-    readUsage: async () => { await pending; return usage; },
+    readUsage: async () => { started(); await pending; return usage; },
   });
+  await ready;
   let firstSettled = false;
   let secondSettled = false;
   const first = monitor.close().then(() => { firstSettled = true; });
   const second = monitor.close().then(() => { secondSettled = true; });
-  await Promise.resolve();
-  assert.equal(firstSettled, false);
-  assert.equal(secondSettled, false);
-  release();
-  await Promise.all([first, second]);
+  try {
+    // Drain a full turn: a missing wait must settle before the gate opens.
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(firstSettled, false);
+    assert.equal(secondSettled, false);
+  } finally {
+    release();
+    await Promise.all([first, second]);
+  }
   assert.equal(firstSettled, true);
   assert.equal(secondSettled, true);
 });

@@ -8,7 +8,7 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
-import { test } from "node:test"
+import { after, test } from "node:test"
 
 import { resolveCodexAcpEntry, resolveNodeBinary, runCodexTurn, spawnCodexAcp } from "../src/codex.js"
 
@@ -26,7 +26,13 @@ async function until(predicate, timeoutMs) {
   }
 }
 const alive = (pid) => { try { process.kill(pid, 0); return true } catch { return false } }
-const scratch = (name) => path.join(fs.mkdtempSync(path.join(os.tmpdir(), "codex-shutdown-")), name)
+const fixtureDirs = new Set()
+after(() => { for (const dir of fixtureDirs) fs.rmSync(dir, { recursive: true, force: true }) })
+const scratch = (name) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "codex-shutdown-"))
+  fixtureDirs.add(dir)
+  return path.join(dir, name)
+}
 
 test("codex-acp is launched with an explicit node binary, never process.execPath", () => {
   assert.equal(resolveNodeBinary(undefined), "node")
@@ -91,18 +97,20 @@ test("an uncooperative agent and its child are reaped through the owned process 
   assert.equal(await until(() => !alive(grandchild), 5_000), true, "the owned child was reaped")
 })
 
-test("a missing codex-acp entrypoint surfaces a bounded error", async () => {
-  await assert.rejects(
-    () =>
-      runCodexTurn({
-        open: () =>
-          Promise.resolve(
-            spawnCodexAcp({ nodePath: "node", entry: path.join(path.dirname(FIXTURE), "missing.mjs"), cwd: "/" }),
-          ),
-        cwd: "/",
-        prompt: "hi",
-        timeoutMs: 15000,
-      }),
-    (error) => error instanceof Error,
-  )
+test("a missing codex-acp entrypoint rejects on connection loss, not the turn timeout", async () => {
+  let transport
+  try {
+    await assert.rejects(runCodexTurn({
+      open: async () => {
+        transport = spawnCodexAcp({ nodePath: "node", entry: path.join(path.dirname(FIXTURE), "missing.mjs"), cwd: path.dirname(FIXTURE) })
+        return transport
+      },
+      cwd: path.dirname(FIXTURE),
+      prompt: "hi",
+      timeoutMs: 15000,
+    }), { message: "Codex ACP operation failed; details omitted." })
+    assert.equal(transport.isRunning(), false, "the missing entrypoint child exited")
+  } finally {
+    await transport?.close()
+  }
 })

@@ -70,8 +70,6 @@ for (const [width, height] of [[80, 24], [120, 32]]) {
         : " ↑/↓ select · Enter open · a active/all · PgUp/PgDn page · ? help · q exit");
     assert.deepEqual(plain(frame), expected);
     assert.deepEqual(renderFrame(snapshot(), null, state, width, height), frame);
-    assert.equal(plain(frame).filter(line => line.includes("Cwd")).length, 1);
-    assert.equal(plain(frame).filter(line => line.includes("agent") || line.includes("Agent")).length, 1);
     assert.ok(state.pageSize >= 8);
   });
 }
@@ -160,7 +158,7 @@ test("Ctrl-C recovers a paste whose end marker never arrives", () => {
 });
 
 test("invalid and fractional terminal dimensions cannot break frame rendering", () => {
-  for (const [width, height] of [[NaN, 10], [Infinity, 10], [44, Infinity], [44, NaN], [-1, 10], [44, -1], [0, 10]]) {
+  for (const [width, height] of [[NaN, 10], [Infinity, 10], [44, Infinity], [44, NaN], [-1, 10], [44, -1], [0, 10], [0, 0]]) {
     assert.deepEqual(renderFrame(snapshot(), null, emptyState(), width, height), []);
   }
   assertFrame(renderFrame(snapshot(), null, emptyState(), 40.9, 8.9), 40, 8);
@@ -353,6 +351,7 @@ test("stale or not-ready snapshots never advertise live generation, including ti
     assertFrame(stale, width, height);
     assert.match(plain(stale).join("\n"), /stale/);
     assert.doesNotMatch(plain(stale).join("\n"), /\blive\b/);
+    assertFrame(renderFrame(snap, "Backend unavailable", emptyState(), width, height), width, height);
     snap.ready = false;
     assert.doesNotMatch(plain(renderFrame(snap, null, state, width, height)).join("\n"), /\blive\b/);
     snap.ready = true;

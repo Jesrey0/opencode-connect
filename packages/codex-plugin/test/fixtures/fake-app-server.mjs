@@ -19,6 +19,7 @@
  *   FAKE_INITIATE      "refresh" | "approval" | ""  (send one server->client request)
  *   FAKE_EXIT_MODE     "eof" | "ignore" | "term"
  *   FAKE_TARGET        marker file path used by FAKE_EXIT_MODE=ignore
+ *   FAKE_EOF_TARGET    marker written only when stdin EOF is received
  *   FAKE_TRACE         newline-delimited log of every method received
  */
 
@@ -206,6 +207,9 @@ if (process.env.FAKE_TARGET) {
 }
 
 if (process.env.FAKE_EXIT_MODE !== "ignore") {
-  process.stdin.on("end", () => process.exit(process.env.FAKE_EXIT_MODE === "term" ? 0 : 0))
+  process.stdin.on("end", () => {
+    if (process.env.FAKE_EOF_TARGET) fs.writeFileSync(process.env.FAKE_EOF_TARGET, "eof")
+    process.exit(0)
+  })
 }
 process.on("SIGTERM", () => process.exit(0))

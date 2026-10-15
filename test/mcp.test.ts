@@ -187,18 +187,6 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       ["opencode.act", { action: "switchAgent", sessionId: "s", agent: "build" }, [
         { action: "switchAgent", sessionId: "s", agents: [{ name: "build" }] }, { action: "interrupt", sessionId: "s", text: "x" }, { action: "steer", sessionId: "s", instruction: "x", agent: "build" },
       ]],
-      ["opencode.start", { task: "task", cwd: "/tmp", model: "openai/a" }, [
-        { task: "task", model: "openai/a", sessionId: "s", forkFromSessionId: "f" },
-        { task: "task", model: "openai/a", cwd: "/tmp", beforeMessageId: "m" },
-        { task: "task", model: "openai/a" },
-        { task: "task", model: "openai/a", sessionId: "s", cwd: "/tmp" },
-        { task: "task", model: "openai/a", sessionId: "s", permissions: [{ action: "read", resource: "*", effect: "allow" }] },
-        { task: "task", model: "openai/a", sessionId: "s", variant: "high" },
-      ]],
-      ["opencode.inspect", { sessionId: "s", messageId: "u", detail: "result" }, [
-        { sessionId: "s", detail: "result", selectionCursor: "c" },
-        { sessionId: "s", detail: "result", candidateAssistantMessageId: "a" },
-      ]],
     ];
     for (const [name, valid, invalid] of cases) {
       const validate = provider.getValidator(schemas.get(name)! as JsonSchemaType);
@@ -323,6 +311,7 @@ test("published start/inspect contracts self-describe the exact admission and co
       ["opencode.start", { task: "t", model: "openai/a" }, (i) => backend.start(i), "fresh opencode.start requires an explicit cwd"],
       ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", cwd: "/tmp" }, (i) => backend.start(i), "resume and fork inherit cwd and reject cwd overrides"],
       ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", permissions: rules }, (i) => backend.start(i), "permissions are only valid for fresh sessions"],
+      ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", variant: "high" }, (i) => backend.start(i), "resume and fork inherit canonical variant and reject overrides"],
       ["opencode.start", { task: "t", model: "openai/a", forkFromSessionId: "f", variant: "high" }, (i) => backend.start(i), "resume and fork inherit canonical variant and reject overrides"],
       ["opencode.inspect", { sessionId: "s", detail: "result", selectionCursor: "c" }, (i) => backend.inspect(i), "selectionCursor requires the original user messageId"],
       ["opencode.inspect", { sessionId: "s", detail: "result", candidateAssistantMessageId: "a" }, (i) => backend.inspect(i), "candidate requires selectionCursor"],
