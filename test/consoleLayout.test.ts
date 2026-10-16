@@ -11,9 +11,9 @@ function snapshot(): ConsoleSnapshot {
   return {
     codexVisibility: "recent + supervised", ready: true, release: "2.0.24", pid: 7, observedAtMs: 0,
     sessions: [
-      { runtime: "opencode", id: "s1", title: "Refine the console", running: true, outcome: null, agent: "build", model: "openai/gpt-6.1-sol", variant: "high", cwd: "/home/operator/projects/opencode-connect", updatedMs: 3 },
-      { runtime: "opencode", id: "s2", title: "Verify the parser", running: false, outcome: "succeeded", agent: "build", model: "openai/gpt-6.1-sol", variant: null, cwd: "/home/operator/projects/parser", updatedMs: 2 },
-      { runtime: "opencode", id: "s3", title: "Review native events", running: false, outcome: "failed", agent: "review", model: "anthropic/claude-sonnet-4-6", variant: null, cwd: "/home/operator/projects/events", updatedMs: 1 },
+      { runtime: "opencode", id: "s1", title: "Refine the console", running: true, outcome: null, agent: "build", model: "openai/gpt-6.1-sol", modelProvider: null, reasoningEffort: null, mode: null, variant: "high", cwd: "/home/operator/projects/opencode-connect", updatedMs: 3 },
+      { runtime: "opencode", id: "s2", title: "Verify the parser", running: false, outcome: "succeeded", agent: "build", model: "openai/gpt-6.1-sol", modelProvider: null, reasoningEffort: null, mode: null, variant: null, cwd: "/home/operator/projects/parser", updatedMs: 2 },
+      { runtime: "opencode", id: "s3", title: "Review native events", running: false, outcome: "failed", agent: "review", model: "anthropic/claude-sonnet-4-6", modelProvider: null, reasoningEffort: null, mode: null, variant: null, cwd: "/home/operator/projects/events", updatedMs: 1 },
     ],
     pending: [{ runtime: "opencode", kind: "permission", sessionId: "s1", id: "p1", label: "native permission request" }],
     usage: { sessions: 12, prompts: 48, steps: 136, tokensTotal: 234500, costUsd: 2.34, activeDays: 4, streak: 3,

@@ -9,7 +9,7 @@ const nativeObject = z.record(z.string(), z.unknown());
 const nextCall = z.object({ tool: z.enum(["opencode.inspect", "opencode.query", "host.inspect", "host.worktree"]), arguments: nativeObject }).strict().nullable();
 const outcome = z.enum(["completed", "failed", "incomplete", "unknown"]);
 const retry = z.object({ assistantMessageId: id, attempt: z.number().int().positive(), nextAttemptAtMs: count, error: z.object({ type: id, status: z.number().nullable(), messageOmitted: z.literal(true) }).strict() }).strict().nullable();
-const session = z.object({ sessionId: id, cwd: id, status: z.enum(["inProgress", "completed", "failed", "interrupted", "idle"]), executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "historyReplay"]), model: z.string().nullable(), modelVariant: z.string().nullable(), agent: z.string().nullable() }).loose();
+const session = z.object({ sessionId: id, cwd: id, status: z.enum(["inProgress", "completed", "failed", "interrupted", "idle"]), executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "nativeTurnHistory", "historyReplay"]), model: z.string().nullable(), modelVariant: z.string().nullable(), agent: z.string().nullable() }).loose();
 const textPaging = z.object({ offset: count, nextOffset: count.nullable(), size: count, cursorUnit: z.literal("utf16CodeUnits"), fingerprint: id }).strict();
 const textShape = { text: z.string(), textPaging, truncated: z.boolean() };
 const pageShape = { data: z.array(z.unknown()), offset: count, nextOffset: count.nullable(), total: count, fingerprint: id };
@@ -18,7 +18,7 @@ const semanticShape = { session, retry, outcomeEvidence: nativeObject, nextCall,
 const commandShape = { kind: z.enum(["shell", "pty", "persistentPty"]), location, id, cwd: id, status: z.enum(["running", "exited", "timeout", "killed"]), pid: z.number().nullable(), exitCode: z.number().nullable(), retention: z.string() };
 const cursorShape = { cursor: count, cursorUnit: z.enum(["bytes", "utf16CodeUnits"]) };
 
-const codexResult = z.object({ outcomeBasis: z.enum(["nativePromptResponse", "historyReplay"]), outcome, messageId: z.null(), assistantMessageId: id.nullable(), correlationSupported: z.literal(false), terminal: z.boolean(), finish: z.string().nullable(), completedAtMs: z.number().nullable(), error: nativeObject.nullable(), outputTruncated: z.boolean(), ...textShape, textNextCall: nextCall }).strict();
+const codexResult = z.object({ outcomeBasis: z.enum(["nativePromptResponse", "nativeTurnHistory", "historyReplay"]), outcome, messageId: z.null(), assistantMessageId: id.nullable(), correlationSupported: z.literal(false), terminal: z.boolean(), finish: z.string().nullable(), completedAtMs: z.number().nullable(), error: nativeObject.nullable(), outputTruncated: z.boolean(), ...textShape, textNextCall: nextCall }).strict();
 const codexInspection = z.object({ session, result: codexResult, pendingActions: z.array(nativeObject) }).strict();
 
 // Connector-authored errors are structured results too. Publish their existing
@@ -32,7 +32,7 @@ export const errorOutputSchema = z.object({
 }).strict();
 
 export const outputSchemas = {
-  status: z.object({ ready: z.literal(true), opencodeRelease: id, serverPid: z.number().int(), workers: z.array(z.object({ sessionId: id, cwd: id, status: session.shape.status, executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "historyReplay"]), outcomeEvidence: nativeObject, retry, retryReadError: z.string().nullable(), nextCall }).loose()), pendingActions: z.array(nativeObject), events: nativeObject.optional() }).strict(),
+  status: z.object({ ready: z.literal(true), opencodeRelease: id, serverPid: z.number().int(), workers: z.array(z.object({ sessionId: id, cwd: id, status: session.shape.status, executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "nativeTurnHistory", "historyReplay"]), outcomeEvidence: nativeObject, retry, retryReadError: z.string().nullable(), nextCall }).loose()), pendingActions: z.array(nativeObject), events: nativeObject.optional() }).strict(),
   hostInspect: z.discriminatedUnion("type", [
     z.object({ type: z.enum(["list", "vcsStatus", "vcsBranch", "commands"]), location, ...pageShape, nextCall, shellListScope: z.string().optional(), search: z.string().nullable().optional() }).strict(),
     z.object({ type: z.literal("read"), location, path: id, size: count, fingerprint: id, nextCall, encoding: z.enum(["utf8", "base64"]).optional(), text: z.string().optional(), data: z.string().optional(), cursorUnit: z.literal("bytes").optional(), offset: count.optional(), nextOffset: count.nullable().optional() }).strict(),
@@ -56,7 +56,7 @@ export const outputSchemas = {
   ]),
   start: z.union([
     z.object({ sessionId: id, messageId: id, cwd: id, model: id.nullable(), modelVariant: id.nullable(), agent: id.nullable(), status: z.literal("inProgress") }).strict(),
-    z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), cwd: id, model: z.null(), modelVariant: z.null(), agent: z.literal("codex"), status: z.literal("inProgress"), mode: z.string().nullable(), capabilities: nativeObject }).strict(),
+    z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), cwd: id, model: id.nullable(), modelProvider: id.nullable(), reasoningEffort: id.nullable(), modelVariant: z.null(), agent: z.literal("codex"), status: z.literal("inProgress"), mode: z.string().nullable(), capabilities: nativeObject }).strict(),
   ]),
   wait: z.union([
     z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), state: z.enum(["active", "terminal", "unknown"]), wakeReason: z.enum(["timeout", "terminal", "executionUnavailable", "actionRequired"]), session, result: codexResult, pendingActions: z.array(nativeObject) }).strict(),

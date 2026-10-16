@@ -2,7 +2,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { AgentApp, RequestError } from "@agentclientprotocol/sdk"
 import { CodexSessionsRpc, createCodexSessions, SessionError, SESSION_RPC_ID } from "../src/direct.js"
-import { projectTurnOutcome } from "../src/outcomes.js"
+import { projectThreadHistory } from "../src/outcomes.js"
 import { createHarness } from "./harness.js"
 import { createFakeCodexAgent } from "./fake-acp.js"
 
@@ -28,7 +28,7 @@ function codexSessions(options = {}) {
  * `turns` maps a native session ID to the newest turn status Codex would report
  * for it. Anything else stays unknown, exactly as the real reader behaves.
  */
-function turnReader(turns = {}) {
+function turnReader(turns = {}, metadata = {}) {
   const requested = []
   return {
     requested,
@@ -37,7 +37,10 @@ function turnReader(turns = {}) {
       requested.push([...ids])
       const found = new Map()
       for (const id of ids) {
-        const evidence = projectTurnOutcome({ data: [{ id: `turn-${id}`, status: turns[id], items: [] }] }, id)
+        const evidence = projectThreadHistory(
+          { thread: { id, ...(metadata[id] ?? {}) } },
+          { data: [{ id: `turn-${id}`, status: turns[id], items: [] }] }, id,
+        )
         if (evidence) found.set(id, evidence)
       }
       return found
@@ -670,6 +673,41 @@ test("listing recovers one bounded batch of native turn outcomes for a whole pag
   await createCodexSessions({ ...native, readTurnOutcomes: boundedReader }).list({})
   assert.equal(boundedReader.requested[0].length, 25)
   await sessions.dispose()
+})
+
+test("listing carries active thread metadata without claiming an execution outcome", async () => {
+  const native = backend()
+  native.persisted.set("native-1", { sessionId: "native-1", cwd, messages: [] })
+  const reader = turnReader({ "native-1": "inProgress" }, { "native-1": {
+    model: "gpt-5.3-codex", modelProvider: "openai", reasoningEffort: "high",
+  } })
+  const sessions = createCodexSessions({ ...native, readTurnOutcomes: reader })
+  try {
+    const [listed] = (await sessions.list({})).sessions
+    assert.equal(listed.model, "gpt-5.3-codex")
+    assert.equal(listed.modelProvider, "openai")
+    assert.equal(listed.reasoningEffort, "high")
+    assert.equal(listed.executionKnown, undefined)
+    assert.equal(listed.outcome, undefined)
+    const recovered = await sessions.inspect({ sessionId: "native-1" })
+    assert.equal(recovered.executionKnown, false)
+    assert.equal(recovered.model, "gpt-5.3-codex")
+    assert.equal(recovered.reasoningEffort, "high")
+  } finally { await sessions.dispose() }
+})
+
+test("locally known mode survives metadata enrichment and missing settings do not erase it", async () => {
+  const native = backend()
+  const reader = turnReader({}, {})
+  const sessions = createCodexSessions({ ...native, readTurnOutcomes: reader })
+  try {
+    const admitted = await sessions.start({ cwd, task: "work", mode: "workspace-write" })
+    await sessions.wait(admitted)
+    const [listed] = (await sessions.list({})).sessions
+    assert.equal(listed.mode, "workspace-write")
+    assert.equal(listed.model, null)
+    assert.equal((await sessions.inspect(admitted)).mode, "workspace-write")
+  } finally { await sessions.dispose() }
 })
 
 test("a native outcome read never runs while the adapter is closed", async () => {

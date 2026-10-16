@@ -11,9 +11,9 @@ function snapshot(): ConsoleSnapshot {
     release: "2.0.24",
     pid: 7,
     sessions: [
-      { runtime: "opencode", id: "s1", title: "Fix the parser", running: true, outcome: null, agent: "build", model: "openai/a", variant: "low", cwd: "/tmp/a", updatedMs: 5 },
-      { runtime: "opencode", id: "s2", title: "Old task", running: false, outcome: "succeeded", agent: "build", model: "openai/b", variant: null, cwd: "/tmp/b", updatedMs: 3 },
-      { runtime: "opencode", id: "s3", title: null, running: false, outcome: "failed", agent: null, model: null, variant: null, cwd: "/tmp/c", updatedMs: 1 },
+      { runtime: "opencode", id: "s1", title: "Fix the parser", running: true, outcome: null, agent: "build", model: "openai/a", modelProvider: null, reasoningEffort: null, mode: null, variant: "low", cwd: "/tmp/a", updatedMs: 5 },
+      { runtime: "opencode", id: "s2", title: "Old task", running: false, outcome: "succeeded", agent: "build", model: "openai/b", modelProvider: null, reasoningEffort: null, mode: null, variant: null, cwd: "/tmp/b", updatedMs: 3 },
+      { runtime: "opencode", id: "s3", title: null, running: false, outcome: "failed", agent: null, model: null, modelProvider: null, reasoningEffort: null, mode: null, variant: null, cwd: "/tmp/c", updatedMs: 1 },
     ],
     pending: [{ runtime: "opencode", kind: "permission", sessionId: "s1", id: "p1", label: "write · src/a.ts" }],
     usage: { sessions: 3, prompts: 9, steps: 20, tokensTotal: 1500, costUsd: 0.42, activeDays: 2, streak: 1, models: ["openai/a"] },

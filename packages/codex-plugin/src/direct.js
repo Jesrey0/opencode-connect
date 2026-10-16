@@ -249,7 +249,9 @@ function view(record) {
     output: record.output, outputTruncated: record.outputTruncated,
     completedAtMs: record.completedAtMs ?? null, error: record.error ?? null,
     capabilities: CAPABILITIES, historyComplete: record.historyComplete,
-    mode: record.mode ?? null, pendingActions: pendingActions(record),
+    mode: record.mode ?? null, model: record.model ?? null,
+    modelProvider: record.modelProvider ?? null, reasoningEffort: record.reasoningEffort ?? null,
+    pendingActions: pendingActions(record),
   }
 }
 
@@ -276,8 +278,14 @@ function executionOutcome(record) {
  * stronger evidence than a later read of the same thread, so it is never
  * overwritten here. Anything else leaves the record untouched and unknown.
  */
+const THREAD_METADATA = ["model", "modelProvider", "reasoningEffort"]
+function applyThreadMetadata(target, evidence) {
+  if (!evidence) return
+  for (const field of THREAD_METADATA) if (evidence[field] != null) target[field] = evidence[field]
+}
 function applyTurnEvidence(record, evidence) {
-  if (!evidence || record.executionKnown) return
+  applyThreadMetadata(record, evidence)
+  if (!evidence?.status || record.executionKnown) return
   record.basis = "nativeTurnHistory"
   record.turn = evidence
   record.executionKnown = true
@@ -303,7 +311,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
   }
   function remember(record) { record.touched = now(); records.set(record.sessionId, record); sweep(); return record }
   function fresh(sessionId, cwd) {
-    return { sessionId, cwd, status: "idle", outcome: "unknown", executionKnown: false, basis: "historyReplay", turn: null, output: "", outputTruncated: false, messages: [], historyComplete: true, touched: now(), mode: null, pending: new Map(), waiters: new Set(), maxPending: maxPendingPermissions, now }
+    return { sessionId, cwd, status: "idle", outcome: "unknown", executionKnown: false, basis: "historyReplay", turn: null, output: "", outputTruncated: false, messages: [], historyComplete: true, touched: now(), mode: null, model: null, modelProvider: null, reasoningEffort: null, pending: new Map(), waiters: new Set(), maxPending: maxPendingPermissions, now }
   }
   async function connection(cwd, onUpdate, signal, onPermission) {
     if (disposed) throw fail("unavailable", "Codex session adapter is closed")
@@ -321,7 +329,15 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
   async function catalog(conn, input = {}, signal) {
     if (!conn.initialized.agentCapabilities?.sessionCapabilities?.list) throw fail("unsupported", "Codex does not advertise session listing")
     const result = await conn.request("session/list", { ...(input.cwd ? { cwd: input.cwd } : {}), ...(input.cursor ? { cursor: input.cursor } : {}) }, signal)
-    return { sessions: result.sessions.map(s => ({ sessionId: identity(s.sessionId), cwd: s.cwd, title: s.title ?? null, updatedAt: s.updatedAt ?? null, runtime: "codex", capabilities: CAPABILITIES })), nextCursor: result.nextCursor ?? null }
+    return { sessions: result.sessions.map(s => {
+      const local = records.get(s.sessionId)
+      return {
+        sessionId: identity(s.sessionId), cwd: s.cwd, title: s.title ?? null, updatedAt: s.updatedAt ?? null,
+        runtime: "codex", capabilities: CAPABILITIES, mode: local?.mode ?? null,
+        model: local?.model ?? null, modelProvider: local?.modelProvider ?? null,
+        reasoningEffort: local?.reasoningEffort ?? null,
+      }
+    }), nextCursor: result.nextCursor ?? null }
   }
   async function locate(conn, sessionId) {
     let cursor
@@ -349,13 +365,14 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     return conn.request("session/load", { sessionId: record.sessionId, cwd: record.cwd, mcpServers: [] }, signal)
   }
   /**
-   * Recovers how the newest native turn of these identities ended.
+   * Recovers persisted settings and how the newest native turn ended.
    *
    * ACP history alone proves nothing about a turn's termination, so the outcome
    * comes from Codex's own durable turn status instead. The read is bounded,
    * batched and read-only, and it holds no session lock, so it never blocks
    * execution. A read that fails, is cancelled, or finds nothing leaves the
-   * record unknown rather than guessing an outcome.
+   * record unknown rather than guessing an outcome. Settings alone never make
+   * execution known.
    */
   async function recoverOutcomes(ids, signal, revisions = {}) {
     if (disposed || ids.length === 0) return new Map()
@@ -367,7 +384,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     }
   }
   /**
-   * Attaches native turn evidence to catalog rows.
+   * Attaches native thread metadata and terminal evidence to catalog rows.
    *
    * A row the adapter supervises keeps its own ACP evidence, and only a bounded
    * prefix of a page is read at all, so one native batch serves a page instead of
@@ -375,13 +392,17 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
    * the native catalog described them.
    */
   async function enrich(rows, signal) {
-    const targets = rows.slice(0, MAX_RECOVERED_ROWS).filter(row => !records.get(row.sessionId)?.executionKnown)
+    const targets = rows.slice(0, MAX_RECOVERED_ROWS)
     if (targets.length === 0) return
     const evidence = await recoverOutcomes(targets.map(row => row.sessionId), signal,
       Object.fromEntries(targets.map(row => [row.sessionId, row.updatedAt ?? null])))
     for (const row of targets) {
       const turn = evidence.get(row.sessionId)
       if (!turn) continue
+      applyThreadMetadata(row, turn)
+      const local = records.get(row.sessionId)
+      if (local) applyThreadMetadata(local, turn)
+      if (!turn.status || local?.executionKnown) continue
       Object.assign(row, {
         status: turn.status, outcome: turn.outcome, executionKnown: true,
         outcomeBasis: "nativeTurnHistory", executionOutcome: turn.executionOutcome, error: turn.error,
@@ -459,6 +480,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
       cwd = resolveSessionCwd(cwd ?? input.cwd)
       record = fresh(id ?? "", cwd)
       record.mode = selected.mode
+      applyThreadMetadata(record, old)
       conn = await connection(cwd, p => collect(record, p), admissionSignal, request => queuePermission(record, request))
       // Codex resets a loaded session to its initial mode, so the selected mode
       // is reapplied on every turn, including the very first one after a load.
@@ -517,7 +539,11 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
       })
       // Keep supervision attached even when an RPC caller disconnects.
       void record.done.catch(() => {})
-      return { sessionId: record.sessionId, messageId: null, cwd, runtime: "codex", mode: selected.mode, status: "inProgress", capabilities: CAPABILITIES }
+      return {
+        sessionId: record.sessionId, messageId: null, cwd, runtime: "codex", mode: selected.mode,
+        model: record.model, modelProvider: record.modelProvider, reasoningEffort: record.reasoningEffort,
+        status: "inProgress", capabilities: CAPABILITIES,
+      }
     } catch (error) {
       try { await conn?.close() } finally { active--; if (id) locks.delete(id); if (record?.sessionId) locks.delete(record.sessionId) }
       if (record?.sessionId) throw fail("admission_failed", "Codex session exists; prompt admission must be reconciled before retrying", { sessionId: record.sessionId, promptSubmitted: submitted ? null : false })
@@ -575,6 +601,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     records.delete(sessionId)
     const recovered = await recover(sessionId)
     recovered.mode = current?.mode ?? null
+    applyThreadMetadata(recovered, current)
     if (current?.executionKnown && current.assistantMessageId === recovered.assistantMessageId) {
       recovered.status = current.status; recovered.outcome = current.outcome; recovered.executionKnown = true
       recovered.basis = current.basis; recovered.turn = current.turn

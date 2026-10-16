@@ -37,6 +37,16 @@ test("durable Codex terminal outcomes appear beside OpenCode without inferred ex
     assert.equal(entry.running, expected === "unverified" ? null : false);
   }
   assert.match(plain(renderFrame(snap, null, emptyState(), 100, 30)), /codex\s+completed\s+Complete/);
+  assert.match(snap.codexVisibility, /some outcomes unverified/);
+});
+
+test("fully verified Codex history does not claim outcomes are unverified", async () => {
+  const native = fixture(request => request.path.endsWith("/list")
+    ? { output: { sessions: [{ sessionId: "complete", cwd: "/work/codex", title: "Complete", status: "completed", outcome: "completed", executionOutcome: "completed", executionKnown: true, outcomeBasis: "nativeTurnHistory", capabilities }], nextCursor: null } }
+    : { output: { sessions: [] } });
+  const snapshot = await observe(native.client);
+  assert.equal(snapshot.codexVisibility, "recent + supervised");
+  assert.doesNotMatch(snapshot.codexVisibility, /unverified|partial/);
 });
 
 test("completed Codex stays visible and selectable beside a large recent OpenCode inventory, after running rows", async () => {
@@ -170,7 +180,8 @@ test("Codex runtime routing keeps colliding session IDs and ignores OpenCode del
   assert.equal(observer.applyEvent({ id: "e", created: 1, type: "session.text.delta", data: { sessionID: "s", assistantMessageID: "ca", ordinal: 0, delta: "WRONG RUNTIME" } } as never), false);
   const detail = plain(renderFrame(snapshot, null, state, 80, 24));
   assert.match(detail, /Codex worker/);
-  assert.doesNotMatch(detail, /OpenCode worker|WRONG RUNTIME|running · live/);
+  assert.doesNotMatch(detail, /OpenCode worker|WRONG RUNTIME|running · live|Codex worker · codex|agent codex|<unknown model>/);
+  assert.match(detail, /unavailable · mode unavailable · effort unavailable/);
   // Replayed bounded snapshots with null IDs must not duplicate cached history.
   await observer.refresh();
   assert.equal(state.transcript?.length, 2);
@@ -263,8 +274,9 @@ test("Codex history failures use the long cache while status and transcript reco
 test("history lists every five minutes while supervised execution and approvals stay live", async () => {
   let now = 0;
   const native = fixture(request => {
-    if (request.path.endsWith("/list")) return { output: { sessions: [{ sessionId: "worker", cwd: "/history", title: "History title", capabilities }], nextCursor: null } };
+    if (request.path.endsWith("/list")) return { output: { sessions: [{ sessionId: "worker", cwd: "/history", title: "History title", capabilities, model: "gpt-5.3-codex", modelProvider: "openai", reasoningEffort: "high" }], nextCursor: null } };
     return { output: { sessions: [{ ...supervised(), title: null,
+      mode: "workspace-write",
       status: now >= 10_000 ? "completed" : "inProgress",
       outcome: now >= 10_000 ? "completed" : "unknown",
       pendingActions: now === 5000 ? [{ requestId: "approval", sessionId: "worker", action: "Run command", resources: [], options: [], details: { locations: [], truncatedFields: [] } }] : [],
@@ -275,6 +287,10 @@ test("history lists every five minutes while supervised execution and approvals 
     const snapshot = await reads.snapshot();
     const worker = snapshot.sessions.find(entry => entry.runtime === "codex")!;
     assert.equal(worker.title, "History title");
+    assert.equal(worker.model, "gpt-5.3-codex");
+    assert.equal(worker.modelProvider, "openai");
+    assert.equal(worker.reasoningEffort, "high");
+    assert.equal(worker.mode, "workspace-write");
     assert.equal(sessionStatus(worker), now >= 10_000 ? "completed" : "running");
     assert.equal(snapshot.pending.length, now === 5000 ? 1 : 0);
   }

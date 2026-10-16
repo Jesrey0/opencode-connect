@@ -22,7 +22,7 @@ const capabilities = { continuation: true, exactPromptWait: false, modelSelectio
   { id: "agent", name: "Auto review", sandboxPolicy: "workspaceWrite", approvalPolicy: "on-request", approvalsReviewer: "auto_review" },
   { id: "agent-full-access", name: "Full access", sandboxPolicy: "dangerFullAccess", approvalPolicy: "never", approvalsReviewer: "user" },
 ] };
-const snapshot = { sessionId: "native-thread", cwd: "/tmp", status: "completed", outcome: "completed", executionKnown: true, output: "answer", outputTruncated: false, assistantMessageId: "native-assistant", stopReason: "end_turn", completedAtMs: 1, error: null, capabilities, mode: "agent", pendingActions: [] };
+const snapshot = { sessionId: "native-thread", cwd: "/tmp", status: "completed", outcome: "completed", executionKnown: true, output: "answer", outputTruncated: false, assistantMessageId: "native-assistant", stopReason: "end_turn", completedAtMs: 1, error: null, capabilities, mode: "agent", model: "gpt-5.3-codex", modelProvider: "openai", reasoningEffort: "high", pendingActions: [] };
 function fixture(handler: (request: NativeRequest) => unknown = () => undefined) {
   return nativeFixture(request => {
     assert.ok(request.path.startsWith("/api/rpc/codex-sessions/"), request.path);
@@ -40,6 +40,10 @@ test("shared session tools route Codex directly and preserve native identities",
   const inspected = await backend.inspect({ runtime: "codex", sessionId: admitted.sessionId, detail: "result" });
   outputSchemas.inspect.parse(inspected);
   assert.equal((inspected as any).result.text, "answer");
+  assert.equal((inspected as any).session.model, "gpt-5.3-codex");
+  assert.equal((inspected as any).session.modelProvider, "openai");
+  assert.equal((inspected as any).session.reasoningEffort, "high");
+  assert.equal((inspected as any).session.modelVariant, null);
   const waited = await backend.wait(admitted.sessionId, undefined, undefined, "codex");
   outputSchemas.wait.parse(waited);
   assert.equal(waited.state, "terminal");
@@ -61,13 +65,16 @@ test("restart history remains unknown and unsupported capabilities never reach O
   assert.equal(f.requests.length, 1);
 });
 test("Codex inventory normalizes only native metadata and refuses unsupported filters", async () => {
-  const f = fixture(() => ({ output: { sessions: [{ sessionId: "native-thread", cwd: "/tmp", title: "smoke audit priority", updatedAt: "2026-10-11T12:00:00Z", capabilities }, { sessionId: "other", cwd: "/tmp", updatedAt: "invalid", capabilities }], nextCursor: "native-cursor" } }));
+  const f = fixture(() => ({ output: { sessions: [{ sessionId: "native-thread", cwd: "/tmp", title: "smoke audit priority", updatedAt: "2026-10-11T12:00:00Z", capabilities, model: "gpt-5.3-codex", modelProvider: "openai", reasoningEffort: "medium", mode: "workspace-write" }, { sessionId: "other", cwd: "/tmp", updatedAt: "invalid", capabilities }], nextCursor: "native-cursor" } }));
   const backend = new OpenCodeBackend(f.connect);
   const inventory = (await backend.query([{ runtime: "codex", type: "sessions", cwd: "/tmp", cursor: "previous" }])).results[0].result as any;
   assert.equal(inventory.runtime, "codex"); assert.equal(inventory.cursor.next, "native-cursor");
   const s = inventory.sessions[0];
   assert.equal(s.runtime, "codex"); assert.equal(s.updatedAtMs, Date.parse("2026-10-11T12:00:00Z"));
   assert.equal(s.status, null); assert.equal(s.executionOutcome, null); assert.equal(s.outcome, "unknown"); assert.equal(s.outcomeBasis, "unavailable");
+  assert.equal(s.model, "gpt-5.3-codex"); assert.equal(s.modelProvider, "openai"); assert.equal(s.reasoningEffort, "medium");
+  assert.equal(s.mode, "workspace-write"); assert.equal(s.modelVariant, null); assert.equal(s.executionKnown, false);
+  assert.equal(inventory.sessions[1].model, null); assert.equal(inventory.sessions[1].reasoningEffort, null); assert.equal(inventory.sessions[1].mode, null);
   for (const field of ["createdAtMs", "archivedAtMs", "idleAtMs"]) assert.equal(s[field], null);
   assert.equal("updatedAt" in s, false); assert.equal("importance" in s, false);
   assert.equal(inventory.sessions[1].updatedAtMs, null);

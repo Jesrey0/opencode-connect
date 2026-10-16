@@ -7,7 +7,7 @@ import { nativeFixture, assistant, user } from "./native-fixture.js";
 
 const snapshot = (): ConsoleSnapshot => ({
   codexVisibility: "recent + supervised", ready: true, release: "2.0.24", pid: 1, observedAtMs: 0, usage: null, pending: [],
-  sessions: [{ runtime: "opencode", id: "s", title: "Stream", running: true, outcome: null, agent: "build", model: "openai/a", variant: null, cwd: "/tmp", updatedMs: 0 }],
+  sessions: [{ runtime: "opencode", id: "s", title: "Stream", running: true, outcome: null, agent: "build", model: "openai/a", modelProvider: null, reasoningEffort: null, mode: null, variant: null, cwd: "/tmp", updatedMs: 0 }],
 });
 let sequence = 0;
 function textEvent(kind: "started" | "delta" | "ended", text = "", ordinal = 0, sessionID = "s", assistantMessageID = "a"): OpenCodeEvent {

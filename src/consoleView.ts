@@ -19,6 +19,9 @@ export type ConsoleSession = {
   outcome: "succeeded" | "failed" | "interrupted" | "completed" | "incomplete" | null;
   agent: string | null;
   model: string | null;
+  modelProvider: string | null;
+  reasoningEffort: string | null;
+  mode: string | null;
   variant: string | null;
   cwd: string;
   updatedMs: number | null;
@@ -200,7 +203,14 @@ export function sessionStatus(session: ConsoleSession): string {
 }
 
 export function modelLabel(session: ConsoleSession): string {
-  return session.model ? `${session.model}${session.variant ? `#${session.variant}` : ""}` : session.runtime === "codex" ? "<unknown model>" : "<no model>";
+  if (!session.model) return session.runtime === "codex" ? "unavailable" : "<no model>";
+  const model = session.runtime === "codex" && session.modelProvider && !session.model.startsWith(`${session.modelProvider}/`)
+    ? `${session.modelProvider}/${session.model}` : session.model;
+  return `${model}${session.variant ? `#${session.variant}` : ""}`;
+}
+
+function codexSettings(session: ConsoleSession): string {
+  return `Mode ${session.mode ?? "unavailable"} · effort ${session.reasoningEffort ?? "unavailable"}`;
 }
 
 // Returns true when the key changed view/selection so the caller can refetch
@@ -505,7 +515,7 @@ export function transcriptLines(entries: TranscriptEntry[], width: number, runni
   for (const [index, entry] of entries.entries()) {
     if (!entry.text && !entry.tools?.length && !entry.reasoningParts?.length && entry.completed !== false) continue;
     const operator = entry.role === "user";
-    const label = operator ? "0xOperator" : entry.role === "assistant" ? `${runtime === "codex" ? "Codex" : "OpenCode"} worker${agent && width >= 60 ? ` · ${oneLine(agent)}` : ""}` : entry.role === "system" ? "System" : "Event";
+    const label = operator ? "0xOperator" : entry.role === "assistant" ? `${runtime === "codex" ? "Codex" : "OpenCode"} worker${runtime === "opencode" && agent && width >= 60 ? ` · ${oneLine(agent)}` : ""}` : entry.role === "system" ? "System" : "Event";
     const live = running && index === entries.length - 1 && entry.role === "assistant" && entry.completed === false;
     const reasoning = reasoningLabel(entry);
     const activity = reasoning || (live ? "live" : "");
@@ -577,6 +587,7 @@ export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | nul
     if (quota) lines.push(styled(row(quotaLine(quota, width), width), quota.status !== "available" ? YELLOW : DIM));
     if (selected) {
       lines.push(styled(row(`Model ${modelLabel(selected)}`, width), DIM));
+      if (selected.runtime === "codex") lines.push(styled(row(codexSettings(selected), width), DIM));
       lines.push(styled(row(`Cwd ${pathLabel(selected.cwd, width - 4)}`, width), DIM));
     }
     if (snapshot) lines.push(styled(row(`Codex · ${snapshot.codexVisibility}`, width), DIM));
@@ -691,8 +702,12 @@ function renderDashboard(lines: string[], state: ConsoleState, snapshot: Console
   const detail: string[] = selected ? [
     ...(selected.runtime === "codex" && selected.running === null
       ? [styled(row(" Codex · execution outcome unverified", width), YELLOW)] : []),
-    styled(row(` Model  ${modelLabel(selected)}`, width), TEXT),
-    styled(rowLeftRight(` Agent  ${selected.agent ?? "<unset>"}`, `${shortId(selected.id)} `, width), DIM),
+    selected.runtime === "codex"
+      ? styled(rowLeftRight(` Model  ${modelLabel(selected)}`, `${shortId(selected.id)} `, width), TEXT)
+      : styled(row(` Model  ${modelLabel(selected)}`, width), TEXT),
+    ...(selected.runtime === "codex"
+      ? [styled(row(` ${codexSettings(selected)}`, width), DIM)]
+      : [styled(rowLeftRight(` Agent  ${selected.agent ?? "<unset>"}`, `${shortId(selected.id)} `, width), DIM)]),
     styled(row(` Cwd    ${pathLabel(selected.cwd, width - 8)}`, width), DIM),
   ] : [];
   const available = height - (lines.length - start);
@@ -734,7 +749,10 @@ function renderSessionView(lines: string[], state: ConsoleState, snapshot: Conso
     lines.push(styled(row(" Codex · execution outcome unverified", width), YELLOW));
   }
   if (session) {
-    lines.push(styled(row(` ${modelLabel(session)}${compact ? "" : ` · agent ${session.agent ?? "<unset>"}`}`, width), DIM));
+    const identity = session.runtime === "codex"
+      ? `${modelLabel(session)} · ${codexSettings(session).toLowerCase()}`
+      : `${modelLabel(session)}${compact ? "" : ` · agent ${session.agent ?? "<unset>"}`}`;
+    lines.push(styled(row(` ${identity}`, width), DIM));
     if (!compact) lines.push(styled(row(` Cwd ${pathLabel(session.cwd, width - 5)}`, width), DIM));
   }
   const pending = (snapshot?.pending ?? []).filter((action) => session && action.runtime === session.runtime && action.sessionId === session.id);

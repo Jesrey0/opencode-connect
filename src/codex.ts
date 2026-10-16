@@ -51,6 +51,11 @@ function mode(value: unknown): CodexMode | null {
   if (!(CODEX_MODES as readonly unknown[]).includes(value)) throw new ConnectorError("Codex returned an invalid native mode");
   return value as CodexMode;
 }
+function threadSetting(value: unknown, label: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string" || !value || value.trim() !== value || value.length > 512 || CONTROL.test(value)) throw new ConnectorError(`Codex returned invalid native ${label}`);
+  return value;
+}
 function capabilities(value: unknown) {
   const native = record(value);
   if (native.permissions !== "operator-selected" || !Array.isArray(native.modes) || native.modes.length > 16) throw new ConnectorError("Codex mode capabilities are unavailable");
@@ -98,14 +103,28 @@ function project(value: Record<string, any>, sessionId?: string) {
   const basis = !known ? "historyReplay" as const : value.outcomeBasis === "nativeTurnHistory" ? "nativeTurnHistory" as const : "nativePromptResponse" as const;
   if (basis === "nativeTurnHistory" && ({ completed: "completed", failed: "failed", interrupted: "incomplete" } as Record<string, string>)[value.status] !== value.outcome) throw new ConnectorError("Codex historical outcome does not match native turn status");
   const finish = basis === "nativeTurnHistory" ? ({ completed: "completed", failed: "failed", interrupted: "interrupted" } as Record<string, string>)[value.status] : value.stopReason ?? (value.status === "failed" ? "failed" : null);
-  return { sessionId: nativeId, cwd: id(value.cwd), runtime: "codex" as const, status: value.status as "idle" | "inProgress" | "completed" | "failed" | "interrupted", outcome: value.outcome as "unknown" | "completed" | "failed" | "incomplete", outcomeBasis: basis, executionOutcome: known ? finish : null, executionKnown: known, model: null, modelVariant: null, agent: "codex", capabilities: capabilities(value.capabilities), title: typeof value.title === "string" ? value.title.slice(0, 512) : null, mode: mode(value.mode) };
+  return {
+    sessionId: nativeId, cwd: id(value.cwd), runtime: "codex" as const,
+    status: value.status as "idle" | "inProgress" | "completed" | "failed" | "interrupted",
+    outcome: value.outcome as "unknown" | "completed" | "failed" | "incomplete", outcomeBasis: basis,
+    executionOutcome: known ? finish : null, executionKnown: known,
+    model: threadSetting(value.model, "model"), modelProvider: threadSetting(value.modelProvider, "model provider"),
+    reasoningEffort: threadSetting(value.reasoningEffort, "reasoning effort"), modelVariant: null, agent: "codex",
+    capabilities: capabilities(value.capabilities), title: typeof value.title === "string" ? value.title.slice(0, 512) : null,
+    mode: mode(value.mode),
+  };
 }
 export async function codexStart(client: OpenCodeClient, input: { task: string; cwd?: string; sessionId?: string; mode?: CodexMode }) {
   const value = await call(client, "start", input);
   if (input.sessionId && value.sessionId !== input.sessionId) throw new ConnectorError("Codex continued a different native session; reconcile admission before retrying");
   if (input.mode && value.mode !== input.mode) throw new ConnectorError("Codex admitted a different native mode; reconcile admission before retrying");
   if (value.status !== "inProgress" || value.messageId !== null) throw new ConnectorError("Codex returned unusable prompt admission evidence");
-  return { runtime: "codex" as const, sessionId: id(value.sessionId), messageId: null, cwd: id(value.cwd), status: "inProgress" as const, model: null, modelVariant: null, agent: "codex", mode: mode(value.mode), capabilities: capabilities(value.capabilities) };
+  return {
+    runtime: "codex" as const, sessionId: id(value.sessionId), messageId: null, cwd: id(value.cwd), status: "inProgress" as const,
+    model: threadSetting(value.model, "model"), modelProvider: threadSetting(value.modelProvider, "model provider"),
+    reasoningEffort: threadSetting(value.reasoningEffort, "reasoning effort"), modelVariant: null, agent: "codex",
+    mode: mode(value.mode), capabilities: capabilities(value.capabilities),
+  };
 }
 export type CodexInspectInput = { sessionId: string; messageId?: string; detail?: "semantic" | "result"; textOffset?: number; textLimit?: number; textFingerprint?: string; selectionCursor?: string; candidateAssistantMessageId?: string; selectionFingerprint?: string };
 function inspection(value: Record<string, any>, input: CodexInspectInput) {
@@ -145,7 +164,10 @@ export async function codexAct(client: OpenCodeClient, input: { action: string; 
 export async function codexStatus(client: OpenCodeClient, signal?: AbortSignal) {
   const value = await call(client, "status", {}, signal);
   if (!Array.isArray(value.sessions) || value.sessions.length > 64) throw new ConnectorError("Codex returned an invalid supervised session inventory");
-  return value.sessions.map(entry => ({ ...project(record(entry)), pendingActions: pending(record(entry).pendingActions, id(record(entry).sessionId)), retry: null, retryReadError: null, outcomeEvidence: { basis: record(entry).executionKnown ? "nativePromptResponse" : "historyReplay" }, nextCall: null }));
+  return value.sessions.map(entry => {
+    const projected = project(record(entry));
+    return { ...projected, pendingActions: pending(record(entry).pendingActions, projected.sessionId), retry: null, retryReadError: null, outcomeEvidence: { basis: projected.outcomeBasis }, nextCall: null };
+  });
 }
 export async function codexQuery(client: OpenCodeClient, input: { type: string; sessionId?: string; messageId?: string; cwd?: string; cursor?: string; order?: "asc" | "desc"; searchTerm?: string; textOffset?: number; textLimit?: number; textFingerprint?: string; section?: string; field?: string } & PageInput, signal?: AbortSignal) {
   if (input.type === "usage") {
@@ -169,7 +191,18 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
       const nativeOutcomes: Record<string, string> = { completed: "completed", failed: "failed", interrupted: "incomplete" };
       const verified = s.executionKnown === true && s.outcomeBasis === "nativeTurnHistory";
       if (verified && (nativeOutcomes[s.status] !== s.outcome || s.executionOutcome !== s.status)) throw new ConnectorError("Codex history outcome is inconsistent with native status");
-      return { sessionId: id(s.sessionId), cwd: id(s.cwd), title: typeof s.title === "string" ? s.title.slice(0, 512) : null, runtime: "codex", capabilities: capabilities(s.capabilities), status: verified ? s.status as "completed" | "failed" | "interrupted" : null, executionOutcome: verified ? s.executionOutcome as string : null, executionKnown: verified, outcome: verified ? s.outcome as "completed" | "failed" | "incomplete" : "unknown" as const, outcomeBasis: verified ? "nativeTurnHistory" as const : "unavailable" as const, createdAtMs: null, updatedAtMs: Number.isFinite(updated) ? updated : null, idleAtMs: null, archivedAtMs: null };
+       return {
+         sessionId: id(s.sessionId), cwd: id(s.cwd), title: typeof s.title === "string" ? s.title.slice(0, 512) : null,
+         runtime: "codex", capabilities: capabilities(s.capabilities),
+         status: verified ? s.status as "completed" | "failed" | "interrupted" : null,
+         executionOutcome: verified ? s.executionOutcome as string : null, executionKnown: verified,
+         outcome: verified ? s.outcome as "completed" | "failed" | "incomplete" : "unknown" as const,
+         outcomeBasis: verified ? "nativeTurnHistory" as const : "unavailable" as const,
+         model: threadSetting(s.model, "model"), modelProvider: threadSetting(s.modelProvider, "model provider"),
+         reasoningEffort: threadSetting(s.reasoningEffort, "reasoning effort"), modelVariant: null,
+         mode: mode(s.mode), createdAtMs: null, updatedAtMs: Number.isFinite(updated) ? updated : null,
+         idleAtMs: null, archivedAtMs: null,
+       };
     }), cursor: { next: value.nextCursor === null ? null : id(value.nextCursor) } };
   }
   if (input.type === "runtime") return { runtime: "codex", capabilities: capabilities((await call(client, "status", {})).capabilities) };

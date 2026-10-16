@@ -61,7 +61,9 @@ export async function observeCodex(client: OpenCodeClient, readHistory = () => c
       const verified = entry.outcomeBasis === "nativeTurnHistory" && entry.executionKnown === true;
       sessions.set(entry.sessionId, {
         runtime: "codex", id: entry.sessionId, title: entry.title, running: verified ? false : null,
-        outcome: verified ? entry.status === "interrupted" ? "interrupted" : entry.outcome === "unknown" ? null : entry.outcome : null, agent: "codex", model: null, variant: null,
+        outcome: verified ? entry.status === "interrupted" ? "interrupted" : entry.outcome === "unknown" ? null : entry.outcome : null,
+        agent: null, model: entry.model, modelProvider: entry.modelProvider, reasoningEffort: entry.reasoningEffort,
+        mode: entry.mode, variant: null,
         cwd: entry.cwd, updatedMs: entry.updatedAtMs,
       });
     }
@@ -75,7 +77,10 @@ export async function observeCodex(client: OpenCodeClient, readHistory = () => c
         runtime: "codex", id: entry.sessionId, title: entry.title ?? previous?.title ?? null,
         running: entry.executionKnown && !terminalWithoutOutcome ? entry.status === "inProgress" : previous?.running ?? null,
         outcome: entry.executionKnown && entry.outcome !== "unknown" ? entry.status === "interrupted" ? "interrupted" : entry.outcome : previous?.outcome ?? null,
-        agent: "codex", model: null, variant: null, cwd: entry.cwd,
+        agent: null, model: entry.model ?? previous?.model ?? null,
+        modelProvider: entry.modelProvider ?? previous?.modelProvider ?? null,
+        reasoningEffort: entry.reasoningEffort ?? previous?.reasoningEffort ?? null,
+        mode: entry.mode ?? previous?.mode ?? null, variant: null, cwd: entry.cwd,
         updatedMs: previous?.updatedMs ?? null,
       });
       for (const action of entry.pendingActions) pending.push({
@@ -84,9 +89,10 @@ export async function observeCodex(client: OpenCodeClient, readHistory = () => c
       });
     }
   } else gaps.push("supervised status unavailable");
+  if ([...sessions.values()].some(entry => entry.running === null)) gaps.push("some outcomes unverified");
   return { sessions: [...sessions.values()], pending,
     visibility: gaps.length === 2 && history.status === "rejected" && supervised.status === "rejected"
-      ? "unavailable · partial visibility" : gaps.length ? `partial · ${gaps.join("; ")}` : "recent + supervised · history outcomes unverified" };
+      ? "unavailable · partial visibility" : gaps.length ? `partial · ${gaps.join("; ")}` : "recent + supervised" };
 }
 
 export async function observe(client: OpenCodeClient, readCodex = () => observeCodex(client), signal?: AbortSignal): Promise<ConsoleSnapshot> {
@@ -125,13 +131,17 @@ export async function observe(client: OpenCodeClient, readCodex = () => observeC
       outcome: session.outcome ?? null,
       agent: session.agent ?? null,
       model: session.model ? `${session.model.providerID}/${session.model.id}` : null,
+      modelProvider: null,
+      reasoningEffort: null,
+      mode: null,
       variant: session.model?.variant ?? null,
       cwd: session.location.directory,
       updatedMs: session.time.updated,
     }));
   for (const id of missingActiveIds) if (!missingActive.has(id)) sessions.push({
     runtime: "opencode", id, title: `${id} · metadata unavailable`, running: true,
-    outcome: null, agent: null, model: null, variant: null, cwd: "<unavailable>", updatedMs: null,
+    outcome: null, agent: null, model: null, modelProvider: null, reasoningEffort: null, mode: null,
+    variant: null, cwd: "<unavailable>", updatedMs: null,
   });
   const pending: ConsolePending[] = [];
   for (const session of sessions.filter((entry) => entry.running && !optionalSignal.aborted)) {

@@ -1,8 +1,9 @@
 /**
- * Historical Codex turn outcomes from durable native history.
+ * Historical Codex thread metadata and turn outcomes from durable native history.
  *
- * This module answers exactly one question: how did the most recent turn of a
- * native Codex thread end, when this adapter did not supervise that turn?
+ * This module answers two bounded history questions: what settings are
+ * persisted for a native Codex thread now, and how did its most recent turn
+ * end when this adapter did not supervise that turn?
  *
  * What it is
  * ----------
@@ -45,9 +46,9 @@
  *   be a guess about time rather than evidence about time.
  * - **No error bodies.** A failed turn carries a fixed local error type; the
  *   native `error` payload is never read, because it can contain provider text.
- * - **Terminal evidence only.** An `inProgress` turn is not an outcome. This
- *   adapter holds no writer for a turn it did not start, so it cannot wait on
- *   or interrupt one, and it reports no outcome rather than a provisional one.
+ * - **Terminal outcome evidence only.** An `inProgress` turn is not an outcome.
+ *   Persisted thread settings may still be projected from the correlated
+ *   `thread/read`, but never make execution known.
  * - **Bounded and batched.** One short-lived child serves a whole batch, ids
  *   are deduplicated and cached, concurrent readers collapse onto one batch,
  *   and a failed read backs off instead of respawning on every call.
@@ -87,6 +88,11 @@ export function boundOutcomeTimeout(timeoutMs) {
 
 /** Native identity bound; the same rule the ACP boundary applies. */
 function boundedId(value) {
+  return typeof value === "string" && value.length > 0 && value.trim() === value && value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value) ? value : null
+}
+
+/** Native thread setting bound. Invalid or absent metadata remains unavailable. */
+function boundedSetting(value) {
   return typeof value === "string" && value.length > 0 && value.trim() === value && value.length <= 512 && !/[\x00-\x1f\x7f]/.test(value) ? value : null
 }
 
@@ -175,7 +181,27 @@ export function projectTurnOutcome(result, threadId) {
 }
 
 /**
- * Reads authoritative turn outcomes for a bounded set of native threads.
+ * Projects the same bounded `thread/read` used for identity confirmation.
+ *
+ * These are current/latest persisted thread settings, not per-turn telemetry.
+ * Missing or malformed settings stay null. A valid setting may be returned
+ * without a terminal turn; that does not make execution known.
+ */
+export function projectThreadHistory(threadResult, turnResult, threadId) {
+  const id = boundedId(threadId)
+  if (!id || threadResult?.thread?.id !== id) return null
+  const metadata = {
+    model: boundedSetting(threadResult.thread.model),
+    modelProvider: boundedSetting(threadResult.thread.modelProvider),
+    reasoningEffort: boundedSetting(threadResult.thread.reasoningEffort),
+  }
+  const turn = projectTurnOutcome(turnResult, id)
+  if (!turn && Object.values(metadata).every(value => value === null)) return null
+  return { threadId: id, ...metadata, ...(turn ?? {}) }
+}
+
+/**
+ * Reads authoritative thread settings and turn outcomes for bounded threads.
  *
  * The reader owns one cache and one batch lane. Batches never overlap: a
  * concurrent reader waits for the running batch and then resolves whatever is
@@ -226,9 +252,8 @@ export function createTurnOutcomeReader({
     // ACP's native updatedAt changes when an external turn updates a thread.
     // A prior completed turn must not mask a newly active turn.
     if (entry.revision !== revision) { cache.delete(id); return null }
-    // A recovered outcome is a fact about a turn that already ended. Expiry
-    // only bounds how long a page stays cheap to render; it never contradicts
-    // a terminal status, it just re-reads it.
+    // Expiry bounds how long a page stays cheap to render. A newer native
+    // revision invalidates both terminal evidence and thread settings.
     if (now() - entry.at > (revision === null ? Math.min(ttlMs, 10_000) : ttlMs)) {
       cache.delete(id)
       return null
@@ -249,14 +274,21 @@ export function createTurnOutcomeReader({
     return found
   }
 
-  /** One identity: confirm the thread echoes, then read its newest turn. */
+  /** One identity: confirm/project the thread, then read its newest turn. */
   async function resolveOne(transport, id, signal) {
     const thread = await bounded(signal, () => transport.request("thread/read", { threadId: id }))
     // Strict correlation. The app-server must resolve this exact ID back to a
     // thread that claims it; anything else is not this session's history.
     if (thread?.thread?.id !== id) return null
-    const turns = await bounded(signal, () => transport.request("thread/turns/list", { threadId: id }))
-    return projectTurnOutcome(turns, id)
+    let turns = null
+    try {
+      turns = await bounded(signal, () => transport.request("thread/turns/list", { threadId: id }))
+    } catch (error) {
+      // Metadata already read from the correlated thread remains valid when a
+      // turn page alone is unreadable. Cancellation still cancels the row.
+      if (signal.aborted) throw error
+    }
+    return projectThreadHistory(thread, turns, id)
   }
   async function runBatch(ids, signal, revisions) {
     const controller = new AbortController()
@@ -318,7 +350,7 @@ export function createTurnOutcomeReader({
 
   return {
     /**
-     * Resolves the outcomes it can establish for `ids`, never throwing.
+     * Resolves the metadata/outcomes it can establish for `ids`, never throwing.
      *
      * @param {string[]} ids Native session/thread identities to resolve.
      * @param {{signal?: AbortSignal}} [context]

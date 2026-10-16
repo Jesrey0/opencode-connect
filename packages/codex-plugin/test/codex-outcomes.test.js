@@ -24,6 +24,7 @@ import {
   OUTCOME_REQUESTS,
   buildTurnParams,
   createTurnOutcomeReader,
+  projectThreadHistory,
   projectTurnOutcome,
 } from "../src/outcomes.js"
 
@@ -62,12 +63,14 @@ function fakeAppServer({ threads = {}, delayMs = 0, failTurns = [] } = {}) {
         if (method === "thread/read") {
           // A thread Codex does not know echoes nothing at all.
           if (threads[params.threadId] === undefined) throw new Error("thread not found")
-          return { thread: { id: params.threadId } }
+           const value = threads[params.threadId]
+           return { thread: { id: params.threadId, ...(value && typeof value === "object" ? value.metadata : {}) } }
         }
         if (method === "thread/turns/list") {
           if (threads[params.threadId] === undefined) throw new Error("thread not found")
           if (failTurns.includes(params.threadId)) throw new Error("provider detail that must not leak")
-          return page(threads[params.threadId])
+          const value = threads[params.threadId]
+          return page(value && typeof value === "object" ? value.status : value)
         }
         throw new Error(`unexpected method ${method}`)
       },
@@ -124,6 +127,27 @@ test("an unfinished, empty, or unreadable turn is never an outcome", () => {
   // An identity that is not a bounded native ID correlates nothing.
   assert.equal(projectTurnOutcome(page("completed"), ""), null)
   assert.equal(projectTurnOutcome(page("completed"), `x\n${THREAD}`), null)
+})
+
+test("thread settings are projected without turning active work into an outcome", () => {
+  const evidence = projectThreadHistory({ thread: {
+    id: THREAD, model: "gpt-5.3-codex", modelProvider: "openai", reasoningEffort: "high",
+  } }, page("inProgress"), THREAD)
+  assert.deepEqual(evidence, {
+    threadId: THREAD, model: "gpt-5.3-codex", modelProvider: "openai", reasoningEffort: "high",
+  })
+  assert.equal("status" in evidence, false)
+  assert.equal("outcome" in evidence, false)
+})
+
+test("missing or unbounded thread settings stay unavailable rather than being invented", () => {
+  assert.equal(projectThreadHistory({ thread: { id: THREAD } }, page("inProgress"), THREAD), null)
+  assert.deepEqual(projectThreadHistory({ thread: {
+    id: THREAD, model: "x".repeat(513), modelProvider: "bad\nprovider", reasoningEffort: " ",
+  } }, page("completed"), THREAD), {
+    threadId: THREAD, model: null, modelProvider: null, reasoningEffort: null,
+    turnId: "turn-1", status: "completed", outcome: "completed", executionOutcome: "completed", error: null,
+  })
 })
 
 test("a native completion time is never projected", () => {
@@ -200,6 +224,22 @@ test("an unreachable or unmaterialized thread is unknown, and never fails its ne
     assert.equal(server.opened.length, 1)
     // A refused page never becomes evidence, and its provider text is dropped.
     assert.deepEqual([...found.values()].map(evidence => evidence.threadId), ["good"])
+  } finally { await reader.dispose() }
+})
+
+test("active metadata is returned and cached without terminal execution evidence", async () => {
+  const server = fakeAppServer({ threads: { [THREAD]: {
+    status: "inProgress", metadata: { model: "gpt-5.3-codex", modelProvider: "openai", reasoningEffort: "medium" },
+  } } })
+  const reader = createTurnOutcomeReader({ open: server.open, now: () => 0 })
+  try {
+    const evidence = (await reader.read([THREAD])).get(THREAD)
+    assert.deepEqual(evidence, {
+      threadId: THREAD, model: "gpt-5.3-codex", modelProvider: "openai", reasoningEffort: "medium",
+    })
+    assert.equal(server.opened.length, 1)
+    await reader.read([THREAD])
+    assert.equal(server.opened.length, 1)
   } finally { await reader.dispose() }
 })
 
