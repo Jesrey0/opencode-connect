@@ -14,7 +14,7 @@ There are two runtime components and one source/install lock. This repository is
 - src/runtime/result.ts owns the inspection contract and bounded, fingerprint-pinned assistant selection. It imports only projections/bounds/continuations, never the facade.
 - src/runtime/projection.ts owns pure native projections and outcome-evidence shapes. Callers import helpers from their owning modules; the facade does not re-export them.
 - src/codex.ts validates the connector-facing RPC boundary; src/codexRpc.ts owns the importable connector declaration. It never executes plugin code or Codex turns directly.
-- packages/codex-plugin/src/index.js registers the plugin; direct.js owns native sessions/RPC; codex.js owns ACP; usage.js owns read-only quota protocol and projection; stdio.js owns shared child lifetime and stderr bounds. Neither transport imports the other.
+- packages/codex-plugin/src/index.js registers the plugin; direct.js owns native sessions/RPC; codex.js owns the ACP backend; app-server.js owns the read-only App Server JSON-RPC transport; usage.js owns quota read authorization and projection; stdio.js owns shared child-process lifetime and bounded stderr handling. The two protocol transports depend on stdio.js, not on each other.
 - Local plugin configuration names packages/codex-plugin/src, whose index.js is resolved by the pinned native directory loader. npm package exports also resolve to src/index.js; there is no package-root directory wrapper.
 
 ## Call path
