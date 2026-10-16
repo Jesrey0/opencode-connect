@@ -4,24 +4,23 @@ This is an operator runbook, **not** a shell script. The MCP connector and nativ
 OpenCode plugin have separate lifecycles. Connector activation/rollback alone
 never proves the plugin has changed.
 
-## Accepted baseline and supported releases
+## Release identity and rollback candidates
 
-The operator independently accepted commit `0ac3e16`, immutable release
-`6ab67427dc237b56`, on October 11, 2026. The plugin was loaded from that release's
-`packages/codex-plugin/src` directory; the operator also verified that no live
-configuration or process referenced the superseded standalone checkout.
-These are dated observations, **not mutable status guarantees**. Re-inspect
-current/previous builds, configured plugin path/options, and loaded native
-inventory before any lifecycle action.
+No immutable release is a permanent default baseline. Before every cutover,
+re-inspect the deployed/current and previous connector builds, the exact configured
+native plugin path/options, and the loaded OpenCode inventory. Record the
+pre-cutover connector build plus plugin path as one rollback pair. Historical
+acceptance records are evidence about their date only; they do not replace current
+runtime inspection.
 
 - This repository owns both sources; `packages/codex-plugin` is an npm workspace,
   not a separate MCP server. Its stable package name remains `opencode-codex-subagent`.
 - Installed releases live under `~/.local/lib/opencode-connect/builds/<buildId>/`.
   Release identity covers connector/plugin source, manifests, and build scripts.
 - Supported source and runnable release trees must declare and contain the complete
-  plugin workspace. Connector-only releases are no longer accepted by this source's
-  deployment implementation. The accepted `6ab67427dc237b56` layout satisfies this
-  invariant and is the rollback baseline for the next cleanup release.
+  plugin workspace. Connector-only releases are not accepted by this source's
+  deployment implementation. Validate the recorded rollback release itself rather
+  than assuming an older accepted build remains suitable.
 - Configure the immutable `<builds>/<buildId>/packages/codex-plugin/src` directory,
   never a moving `current` path. The pinned OpenCode 2.0.24 loader resolves a local
   directory's `server` or `index`, not package `main`/`exports`. New releases omit
@@ -67,14 +66,16 @@ restart OpenCode.
 - Restore the recorded immutable plugin path/options and reload its native owner;
   verify native RPC and quota independently.
 - Roll back the connector only if activation occurred. Rollback swaps current/previous
-  and remains reversible, including to the accepted workspace baseline. Verify health
-  and MCP behavior; report partial recovery if any check cannot complete.
+  and remains reversible to the recorded pre-cutover connector build. Restore the
+  matching plugin path separately, then verify health and MCP behavior; report partial
+  recovery if any check cannot complete.
 - Automatic connector rollback cannot restore native plugin configuration.
 
-## Standalone-checkout retirement
+## Legacy standalone-checkout cleanup
 
-The standalone checkout is superseded and is not part of release preparation.
-Deletion is a separate operator-owned action **after independent cleanup acceptance**:
+If a legacy standalone plugin checkout still exists, it is superseded and is not
+part of release preparation. Deletion is a separate operator-owned action **after
+independent cleanup acceptance**:
 
 1. Verify that all applicable configurations and live processes are independent of it.
 2. Confirm the accepted connector and rollback target both have complete immutable

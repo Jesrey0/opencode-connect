@@ -290,12 +290,15 @@ at the HTTP entry before SDK wire validation; discovery authorization rejections
 and unparsable-transport failures record no lifecycle entry.
 Ingress rejections before forwarding require evidence at that owning boundary.
 
-The account plugin's OpenCode Events reference owns platform subscription and
-post-turn acceptance instructions. After event changes, rescan the connector and
-confirm the event appears alongside tools. Request native ChatGPT monitoring
-with exact session/message IDs and verify callback success plus persisted activation
-before ending a response or releasing a gated test worker. A native wait, backend
-restart or webhook `2xx` is not post-turn chat acceptance. See the
+PlatformPlane guidance decides whether the current ChatGPT surface actually
+supports post-turn continuation. Runtime-specific OpenCode Events mechanics live
+in the native global `opencode-connect` skill and its Events reference, discovered
+through OpenCode at runtime rather than mirrored into this repository. After event
+changes, rescan the connector and confirm the event appears alongside tools.
+Request native ChatGPT monitoring with exact session/message IDs and verify
+callback success plus persisted activation before ending a response or releasing
+a gated test worker. A native wait, backend restart or webhook `2xx` is not
+post-turn chat acceptance. See the
 [official MCP Events contract](https://developers.openai.com/plugins/build/mcp-events).
 
 Semantic activity and recent-message summaries use 512 UTF-16-unit text previews
@@ -669,11 +672,12 @@ the catalog in the selected native location.
 
 ## Source, packaging and validation
 
-Account-plugin source is owned outside this backend at `~/plugins/0x0perator/`. That
-neutral user-root tree contains `0xoperator` and
-`0xoperator-opencode` plus the account manifests, assets, and assembler. This
-repository owns only the OpenCode Connect backend; account plugins are independently
-versioned and published.
+This repository is the sole source owner for the OpenCode Connect backend and its
+native Codex plugin. PlatformPlane `$0xOperator` guidance is managed separately
+by ChatGPT and stays capability-agnostic. Runtime-specific operator knowledge is
+installed as native OpenCode global skills under `~/.config/opencode/skills/`
+and discovered through the live OpenCode skill catalog. Do not copy that skill
+library into this repository or maintain a second catalog here.
 
 ```bash
 npm ci --include=dev
@@ -690,7 +694,7 @@ so deleted source artifacts cannot survive into deployment.
 Tests exercise the pinned official client against deterministic native HTTP/wire
 fixtures, lifecycle/bounds, Unicode, permission forwarding/readback, sanitized
 queries, result recovery beyond 100/500 messages, mutation between pages, and
-MCP discovery/image/transport limits. Real HTTP calls exercise the core MCP surface and verify the full 25-tool catalog,
+MCP discovery/image/transport limits. Real HTTP calls exercise the core MCP surface and verify the exact 12-tool catalog,
 output-schema validation, structured-only results, near-1-MiB PNG reads,
 legacy/malformed-wire rejection without native access, localhost Host/Origin
 protection, and cancellation without worker interruption. Published `tools/list` schemas expose root
@@ -745,12 +749,16 @@ Native worktree branch is an existing Git reference, not a new branch name. Omit
 The read-only terminal console shows both OpenCode and Codex native inventories,
 with runtime-labeled rows and runtime-specific detail routing. Codex combines one
 native history page with supervised workers, including workers absent from that
-page. Native ACP history alone has no turn outcome; a separate bounded,
-read-only Codex App Server lookup checks the newest native turn. Historical
-`completed`, `failed`, and `interrupted` states appear only when verified by
-that lookup. Unavailable, in-progress, or mismatched history remains
-`unverified`; models and unsupervised session modes are not inferred.
-ACP still owns execution, and no history read starts or resumes a turn.
+page. Native ACP history alone has no turn outcome; the bounded, read-only Codex
+App Server lookup correlates `thread/read` metadata with the newest native turn.
+Historical `completed`, `failed`, and `interrupted` states appear only when
+verified by native turn history. Correlated `thread/read` may also provide the
+persisted thread model, provider, and reasoning effort even when no terminal turn
+is available; those settings do not make execution known. Missing metadata stays
+unavailable. Session mode is shown only when this adapter locally supervised and
+applied it; recovered historical modes are never inferred. Unavailable,
+in-progress, or mismatched execution history remains `unverified`. ACP still
+owns execution, and no history read starts or resumes a turn.
 Unsupported or
 disconnected Codex RPC leaves OpenCode visible and marks partial visibility;
 history and supervised-status failures are independent. Codex supervised status uses the five-second fallback cadence, while
