@@ -115,14 +115,17 @@ function projectOptions(options) {
 function projectDetails(toolCall) {
   const call = toolCall && typeof toolCall === "object" && !Array.isArray(toolCall) ? toolCall : {}
   const raw = call.rawInput && typeof call.rawInput === "object" && !Array.isArray(call.rawInput) ? call.rawInput : {}
-  const argv = Array.isArray(raw.command) ? raw.command.filter((part) => typeof part === "string") : null
+  const argv = Array.isArray(raw.command) ? raw.command : null
   const truncatedFields = []
+  if (argv?.some((part) => typeof part !== "string")) truncatedFields.push("command")
   const cut = (field, text, limit) => {
     if (typeof text !== "string") return null
     if (text.length > limit) truncatedFields.push(field)
     return text.slice(0, limit)
   }
-  const command = cut("command", argv ? argv.join(" ") : (typeof raw.command === "string" ? raw.command : null), MAX_DETAIL_TEXT)
+  // Preserve argument boundaries exactly; never silently omit malformed entries.
+  const command = cut("command", argv ? JSON.stringify(argv.map((part) => typeof part === "string" ? part : null)) : (typeof raw.command === "string" ? raw.command : null), MAX_DETAIL_TEXT)
+  if (call.kind === "execute" && (!command || (argv && argv.length === 0))) truncatedFields.push("command")
   const cwd = cut("cwd", typeof raw.cwd === "string" ? raw.cwd : null, MAX_DETAIL_PATH)
   // A path cut short is still a path the operator cannot read, so an oversized
   // one marks the whole request unreviewable rather than looking complete.
@@ -599,7 +602,13 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     if (current?.done) await current.done.catch(() => {})
     // Read native history again so canonical user IDs and changes by other clients are visible.
     records.delete(sessionId)
-    const recovered = await recover(sessionId)
+    let recovered
+    try { recovered = await recover(sessionId) }
+    catch (error) {
+      // A read failure must not erase locally verified mode or execution evidence.
+      if (current && !records.has(sessionId)) records.set(sessionId, current)
+      throw error
+    }
     recovered.mode = current?.mode ?? null
     applyThreadMetadata(recovered, current)
     if (current?.executionKnown && current.assistantMessageId === recovered.assistantMessageId) {

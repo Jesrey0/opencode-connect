@@ -156,11 +156,11 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
   }
   if (query.type === "skills") {
     const response = await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
-    return page(response.data.map(projectSkill), query);
+    return { location: response.location, ...contextualPage(response.data.map(projectSkill), query, { location: response.location }) };
   }
   if (query.type === "providers") {
     const response = await client.provider.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
-    return page(response.data.map((provider) => ({ id: provider.id, name: provider.name, activation: provider.activation })), query);
+    return { location: response.location, ...contextualPage(response.data.map((provider) => ({ id: provider.id, name: provider.name, activation: provider.activation })), query, { location: response.location }) };
   }
   if (query.type === "usage") {
     return client.session.stats();

@@ -138,3 +138,30 @@ test("agent-not-found errors preserve only requested identity, while other nativ
   assert.match(query.results[1].error!, /native operation failed/);
   assert.equal(JSON.stringify(query).includes("PRIVATE"), false);
 });
+
+
+test("skill and provider pagination binds to the native resolved location", async () => {
+  let resolved = location;
+  const fixture = nativeFixture((request) => {
+    if (request.path === "/api/skill") return { location: resolved, data: [
+      { id: "one", name: "one", description: "first", path: "/tmp/one" },
+      { id: "two", name: "two", description: "second", path: "/tmp/two" },
+    ] };
+    if (request.path === "/api/provider") return { location: resolved, data: [
+      { id: "a", name: "A", activation: "enabled" },
+      { id: "b", name: "B", activation: "enabled" },
+    ] };
+    throw new Error("unexpected " + request.path);
+  });
+  const backend = new OpenCodeBackend(fixture.connect);
+  for (const type of ["skills", "providers"] as const) {
+    resolved = location;
+    const initial = result(await backend.query([{ type, limit: 1 }]));
+    assert.deepEqual(initial.location, location);
+    assert.equal(initial.nextCall.arguments.queries[0].cwd, location.directory);
+    const continuation = initial.nextCall.arguments.queries[0];
+    assert.equal(result(await backend.query([continuation])).data.length, 1);
+    resolved = { directory: "/tmp/other" };
+    assert.match(JSON.stringify(await backend.query([continuation])), /content changed/);
+  }
+});

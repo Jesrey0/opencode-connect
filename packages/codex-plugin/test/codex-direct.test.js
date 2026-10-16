@@ -301,7 +301,7 @@ test("parked permission requests expose the tool detail and exact options", asyn
   const [pending] = waiting.pendingActions
   assert.equal(pending.sessionId, admitted.sessionId)
   assert.equal(pending.action, "Run a command")
-  assert.equal(pending.details.command, "rm -rf /tmp/x")
+  assert.equal(pending.details.command, JSON.stringify(["rm", "-rf", "/tmp/x"]))
   assert.equal(pending.details.cwd, "/tmp")
   assert.deepEqual(pending.resources, ["/tmp/x"])
   assert.equal(pending.message, "Remove a temporary directory")
@@ -971,3 +971,62 @@ test("history replay identity changes preserve selected mode without fabricating
   await sessions.wait(continued)
   await sessions.dispose()
 })
+
+
+test("permission previews preserve argv boundaries and refuse malformed elements", async () => {
+  const options = [
+    { optionId: "allow", name: "Allow", kind: "allow_once" },
+    { optionId: "reject", name: "Reject", kind: "reject_once" },
+  ];
+  for (const [command, valid] of [
+    [["rm", "-rf", "/tmp/a b"], true],
+    [["sh", "-c", null, "rm -rf /"], false],
+    [42, false],
+    [null, false],
+    [[], false],
+    ["", false],
+  ]) {
+    const native = backend({ permissions: options, toolCall: {
+      toolCallId: "call-argv", title: "Run argv", kind: "execute", status: "pending",
+      rawInput: { command }, locations: [], content: [],
+    } });
+    const sessions = codexSessions(native);
+    try {
+      const admitted = await sessions.start({ cwd, task: "run argv", mode: "workspace-write" });
+      const [pending] = (await sessions.wait({ sessionId: admitted.sessionId, waitMs: 2000 })).pendingActions;
+      assert.equal(pending.details.command, Array.isArray(command) ? JSON.stringify(command) : (typeof command === "string" ? command : null));
+      assert.equal(pending.reviewable, valid);
+      if (!valid) {
+        assert.deepEqual(pending.details.truncatedFields, ["command"]);
+        await assert.rejects(sessions.respondPermission({ sessionId: admitted.sessionId, requestId: pending.requestId, optionId: "allow" }), error => error.code === "codex-sessions.unreviewable_request");
+      }
+      await sessions.respondPermission({ sessionId: admitted.sessionId, requestId: pending.requestId, optionId: "reject" });
+      await sessions.wait({ sessionId: admitted.sessionId, waitMs: 2000 });
+    } finally { await sessions.dispose(); }
+  }
+});
+
+test("failed Codex history refresh preserves locally verified mode and outcome", async () => {
+  const native = backend();
+  let denyConnection = false;
+  const sessions = codexSessions({ ...native, open: async () => {
+    if (denyConnection) throw new Error("temporary metadata outage");
+    return native.open();
+  } });
+  try {
+    const admitted = await sessions.start({ cwd, task: "first", mode: "workspace-write" });
+    await sessions.wait(admitted);
+    const previous = await sessions.inspect(admitted);
+    assert.equal(previous.executionKnown, true);
+    assert.equal(previous.mode, "workspace-write");
+    denyConnection = true;
+    await assert.rejects(sessions.messages(admitted));
+    const retained = await sessions.inspect(admitted);
+    assert.equal(retained.executionKnown, true);
+    assert.equal(retained.mode, "workspace-write");
+    assert.equal(retained.outcome, previous.outcome);
+  } finally {
+    denyConnection = false;
+    await sessions.dispose();
+  }
+});
