@@ -15,7 +15,7 @@ const plugin = read("packages/codex-plugin/package.json")
 const lock = read("package-lock.json")
 const clientVersion = connector.dependencies["@opencode/client"]
 const pluginVersion = plugin.dependencies["@opencode/plugin"]
-if (clientVersion !== pluginVersion || plugin.dependencies["@opencode/schema"] !== pluginVersion || !/^\d+\.\d+\.\d+$/.test(clientVersion)) {
+if (clientVersion !== pluginVersion || !/^\d+\.\d+\.\d+$/.test(clientVersion)) {
   throw new Error("OpenCode client/plugin version drift: " + clientVersion + " != " + pluginVersion)
 }
 if (!connector.workspaces?.includes("packages/codex-plugin") ||

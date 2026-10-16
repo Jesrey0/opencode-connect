@@ -1,6 +1,4 @@
 import {
-  type AgentInfo,
-  type ModelInfo,
   type SessionInfo,
   type OpenCodeClient,
   type PermissionRule,
@@ -10,7 +8,7 @@ import { connectNative, type Connect } from "./native.js";
 import { codexStart, codexInspect, codexWait, codexAct, codexQuery, codexStatus, type Runtime, type CodexMode } from "./codex.js";
 import { safeError, AdmissionError, CatalogError, SessionDeleteError, MESSAGE_PREVIEW_LIMIT } from "./bounds.js";
 import { nextCall, queryNextCall } from "./continuation.js";
-import { resolveNativeQuery, type QueryCatalogs, type NativeQueryInput } from "./runtime/query.js";
+import { resolveNativeQuery, type NativeQueryInput } from "./runtime/query.js";
 import { latestResult, resultEvidence, type ResultSelectionInput } from "./runtime/result.js";
 import {
   modelKey,
@@ -24,21 +22,14 @@ import {
   currentRetry,
   unknownEvidence,
   eventSessionId,
-  eventLocationDirectory,
-  catalogLocation,
 } from "./runtime/projection.js";
 import { stat } from "node:fs/promises";
 import { ConnectorError as Error } from "./bounds.js";
 
-export const DEFAULT_AGENT = "build";
 export const WAIT_TIMEOUT_MS = 45_000;
-const CATALOG_INIT_TIMEOUT_MS = 8_000;
-const CATALOG_SETTLE_MS = 200;
 const RECENT_SESSION_LIMIT = 8;
 
 type Client = OpenCodeClient;
-type AgentCatalogEntry = Awaited<ReturnType<Client["agent"]["list"]>>["data"][number];
-type ProviderCatalogEntry = Awaited<ReturnType<Client["provider"]["list"]>>["data"][number];
 
 export type StartInput = {
   runtime?: Runtime;
@@ -82,10 +73,6 @@ export type ActInput = (
   | { action: "synthetic"; sessionId: string; text: string; description?: string; delivery?: "steer" | "queue"; resume?: boolean }
   ) & { runtime?: Runtime };
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function assertDirectory(cwd: string): Promise<void> {
   if (!cwd.startsWith("/")) throw new Error("cwd must be an absolute path");
   const info = await stat(cwd);
@@ -107,8 +94,6 @@ export class OpenCodeBackend {
   constructor(
     private readonly connect: Connect = connectNative,
     private readonly waitTimeoutMs = WAIT_TIMEOUT_MS,
-    private readonly catalogInitTimeoutMs = CATALOG_INIT_TIMEOUT_MS,
-    private readonly catalogSettleMs = CATALOG_SETTLE_MS,
   ) {}
 
   async health() {
@@ -118,129 +103,6 @@ export class OpenCodeBackend {
       opencodeRelease: info.version,
       serverPid: info.pid,
     };
-  }
-
-  private async stableCatalog<T, R extends { data: T[] }>(
-    client: Client,
-    read: () => Promise<R>,
-    eventType: "agent.updated" | "model.updated" | "provider.updated",
-    key: (entry: T) => string,
-    label: string,
-    cwd?: string,
-    allowEmptyAfterTimeout = false,
-  ): Promise<R> {
-    const same = (left: R, right: R) => {
-      const leftKeys = left.data.map(key).sort();
-      const rightKeys = right.data.map(key).sort();
-      return leftKeys.length === rightKeys.length && leftKeys.every((value, index) => value === rightKeys[index]);
-    };
-    const confirm = async (candidate: R): Promise<R | null> => {
-      if (candidate.data.length === 0) return null;
-      if (this.catalogSettleMs > 0) await sleep(this.catalogSettleMs);
-      const current = await read();
-      return current.data.length > 0 && same(candidate, current) ? current : null;
-    };
-
-    let current = await read();
-    const initial = await confirm(current);
-    if (initial) return initial;
-    if (this.catalogInitTimeoutMs <= 0) {
-      if (allowEmptyAfterTimeout) return current;
-      throw new Error("OpenCode " + label + " catalog did not stabilize");
-    }
-
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.catalogInitTimeoutMs);
-    const iterator = client.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]();
-    const nextEvent = () => {
-      const promise = iterator.next();
-      void promise.catch(() => {});
-      return promise;
-    };
-    try {
-      let next = nextEvent();
-      current = await read();
-      const caughtUp = await confirm(current);
-      if (caughtUp) return caughtUp;
-      while (!controller.signal.aborted) {
-        const item = await next;
-        if (item.done) break;
-        next = nextEvent();
-        const event = item.value;
-        if (event.type !== eventType) continue;
-        const target = cwd ?? catalogLocation(current);
-        const directory = eventLocationDirectory(event);
-        if (target && directory && target !== directory) continue;
-        current = await read();
-        const settled = await confirm(current);
-        if (settled) return settled;
-      }
-    } catch (error) {
-      if (!controller.signal.aborted) throw error;
-    } finally {
-      clearTimeout(timer);
-      controller.abort();
-      await iterator.return?.();
-    }
-
-    if (allowEmptyAfterTimeout) return await read();
-    throw new Error("OpenCode " + label + " catalog did not stabilize before native location initialization completed");
-  }
-
-  private async stableModels(client: Client, cwd?: string): Promise<ModelInfo[]> {
-    const response = await this.stableCatalog(
-      client,
-      async () => {
-        const current = await client.model.list(cwd ? { location: { directory: cwd } } : undefined);
-        return { ...current, data: current.data.filter((model) => model.enabled).sort((a, b) => modelKey(a).localeCompare(modelKey(b))) };
-      },
-      "model.updated",
-      modelKey,
-      "model",
-      cwd,
-    );
-    return response.data;
-  }
-
-  private async stableAgentCatalog(client: Client, cwd?: string, allowEmptyAfterTimeout = false) {
-    return this.stableCatalog(
-      client,
-      () => client.agent.list(cwd ? { location: { directory: cwd } } : undefined),
-      "agent.updated",
-      (agent: AgentCatalogEntry) => agent.id,
-      "agent",
-      cwd,
-      allowEmptyAfterTimeout,
-    );
-  }
-
-  private async stableAgents(client: Client, cwd?: string): Promise<AgentInfo[]> {
-    return (await this.stableAgentCatalog(client, cwd)).data;
-  }
-
-  private async stableProviders(client: Client, cwd?: string, allowEmptyAfterTimeout = false) {
-    return this.stableCatalog(
-      client,
-      () => client.provider.list(cwd ? { location: { directory: cwd } } : undefined),
-      "provider.updated",
-      (provider: ProviderCatalogEntry) => provider.id,
-      "provider",
-      cwd,
-      allowEmptyAfterTimeout,
-    );
-  }
-
-  private async validateModelAndAgent(client: Client, cwd: string, model: string, agent: string): Promise<void> {
-    const [models, agents] = await Promise.all([
-      this.stableModels(client, cwd),
-      this.stableAgents(client, cwd),
-    ]);
-    if (!models.some((entry) => modelKey(entry) === model)) {
-      throw new Error(`OpenCode model is not available at ${cwd}: ${model}`);
-    }
-    if (!agents.some((entry) => entry.id === agent)) {
-      throw new Error(`OpenCode agent is not available at ${cwd}: ${agent}`);
-    }
   }
 
   async status(runtime: "codex"): Promise<{ ready: true; opencodeRelease: string; serverPid: number; workers: Awaited<ReturnType<typeof codexStatus>>; pendingActions: Array<Record<string, unknown>> }>;
@@ -309,13 +171,13 @@ export class OpenCodeBackend {
   }
   private async startNative(input: StartInput) {
     if (!input.task.trim()) throw new Error("task must not be empty");
-    if (!input.model?.trim()) throw new Error("opencode.start requires an explicit model");
     if (input.sessionId && input.forkFromSessionId) throw new Error("sessionId and forkFromSessionId are mutually exclusive");
     if (input.beforeMessageId && !input.forkFromSessionId) throw new Error("beforeMessageId requires forkFromSessionId");
     if (!input.sessionId && !input.forkFromSessionId && !input.cwd) throw new Error("fresh opencode.start requires an explicit cwd");
     if ((input.sessionId || input.forkFromSessionId) && input.cwd) throw new Error("resume and fork inherit cwd and reject cwd overrides");
     if ((input.sessionId || input.forkFromSessionId) && input.permissions) throw new Error("permissions are only valid for fresh sessions");
     if ((input.sessionId || input.forkFromSessionId) && input.variant !== undefined) throw new Error("resume and fork inherit canonical variant and reject overrides");
+    if (input.variant !== undefined && input.model === undefined) throw new Error("variant requires an explicit model");
     checkPromptSize(input.task, input);
 
     const { client } = await this.connect();
@@ -327,45 +189,35 @@ export class OpenCodeBackend {
     if (input.sessionId) {
       session = await client.session.get({ sessionID: input.sessionId });
       if (active[session.id]) throw new Error("session is already running; use opencode.act steer or interrupt");
-      if (!session.model || modelKey(session.model) !== input.model) {
+      if (input.model !== undefined && (!session.model || modelKey(session.model) !== input.model)) {
         throw new Error(`resume model must match canonical session model ${session.model ? modelKey(session.model) : "<unset>"}`);
       }
-      if (input.agent && session.agent !== input.agent) throw new Error(`resume agent must match canonical session agent ${session.agent ?? "<unset>"}`);
+      if (input.agent !== undefined && session.agent !== input.agent) throw new Error(`resume agent must match canonical session agent ${session.agent ?? "<unset>"}`);
     } else if (input.forkFromSessionId) {
       const source = await client.session.get({ sessionID: input.forkFromSessionId });
-      if (!source.model || modelKey(source.model) !== input.model) {
+      if (input.model !== undefined && (!source.model || modelKey(source.model) !== input.model)) {
         throw new Error(`fork model must match canonical source model ${source.model ? modelKey(source.model) : "<unset>"}`);
       }
-      if (input.agent && source.agent !== input.agent) throw new Error(`fork agent must match canonical source agent ${source.agent ?? "<unset>"}`);
-      await this.validateAttachments(client, source.location.directory, input.task, input);
+      if (input.agent !== undefined && source.agent !== input.agent) throw new Error(`fork agent must match canonical source agent ${source.agent ?? "<unset>"}`);
       if (input.beforeMessageId) await client.session.message.get({ sessionID: source.id, messageID: input.beforeMessageId });
       session = await client.session.fork({ sessionID: source.id, before: input.beforeMessageId });
-      if (session.location.directory !== source.location.directory || !session.model || modelKey(session.model) !== modelKey(source.model) || session.model.variant !== source.model.variant || session.agent !== source.agent) throw new Error("fork canonical state readback mismatch; prompt not submitted");
+      if (session.location.directory !== source.location.directory || (session.model ? modelKey(session.model) : null) !== (source.model ? modelKey(source.model) : null) || session.model?.variant !== source.model?.variant || session.agent !== source.agent) throw new Error("fork canonical state readback mismatch; prompt not submitted");
     } else {
       const cwd = input.cwd!;
       await assertDirectory(cwd);
-      const agent = input.agent ?? DEFAULT_AGENT;
-      await this.validateModelAndAgent(client, cwd, input.model, agent);
-      await this.validateAttachments(client, cwd, input.task, input);
-      if (input.variant !== undefined) {
-        const models = await this.stableModels(client, cwd);
-        if (!models.find((entry) => modelKey(entry) === input.model)?.variants.some((entry) => entry.id === input.variant)) throw new Error("model variant is not available");
-      }
-      const model = { ...parseModelRef(input.model), ...(input.variant !== undefined ? { variant: input.variant } : {}) };
       session = await client.session.create({
         title: input.title,
         location: { directory: cwd },
-        model,
-        agent,
+        ...(input.model !== undefined ? { model: { ...parseModelRef(input.model), ...(input.variant !== undefined ? { variant: input.variant } : {}) } } : {}),
+        ...(input.agent !== undefined ? { agent: input.agent } : {}),
         permissions: input.permissions,
       });
     }
 
-    if (input.sessionId) await this.validateAttachments(client, session.location.directory, input.task, input);
     stage = "configurationReadback";
     if (!input.sessionId && !input.forkFromSessionId) {
       session = await client.session.get({ sessionID: session.id });
-      if (!session.model || modelKey(session.model) !== input.model || session.agent !== (input.agent ?? DEFAULT_AGENT) || (input.variant !== undefined && session.model.variant !== input.variant)) throw new Error("initial session configuration readback mismatch; prompt not submitted");
+      if ((input.model !== undefined && (!session.model || modelKey(session.model) !== input.model)) || (input.agent !== undefined && session.agent !== input.agent) || (input.variant !== undefined && session.model?.variant !== input.variant)) throw new Error("initial session configuration readback mismatch; prompt not submitted");
       if (!session.location.directory) throw new Error("initial session location missing; prompt not submitted");
     }
     if (input.permissions) {
@@ -376,13 +228,15 @@ export class OpenCodeBackend {
     stage = "promptAdmission";
     promptSubmitted = null;
     const prompt = await client.session.prompt({ sessionID: session.id, text: input.task, ...attachments(input), delivery: "steer", resume: true });
+    stage = "selectionReadback";
+    session = await client.session.get({ sessionID: session.id });
     return {
       sessionId: session.id,
       messageId: prompt.id,
       cwd: session.location.directory,
-      model: session.model ? modelKey(session.model) : input.model,
+      model: session.model ? modelKey(session.model) : null,
       modelVariant: session.model?.variant ?? null,
-      agent: session.agent ?? input.agent ?? DEFAULT_AGENT,
+      agent: session.agent ?? null,
       status: "inProgress",
     };
     } catch (error) {
@@ -390,18 +244,6 @@ export class OpenCodeBackend {
       throw error;
     }
   }
-  private async validateAttachments(client: Client, cwd: string, text: string, input: PromptAttachments) {
-    checkPromptSize(text, input);
-    if (input.agents?.length) {
-      const catalog = (await client.agent.list({ location: { directory: cwd } })).data;
-      for (const mention of input.agents) if (!catalog.some((entry) => entry.id === mention.name)) throw new Error("agent mention must use a canonical available agent ID");
-    }
-    if (input.skills?.length) {
-      const catalog = (await client.skill.list({ location: { directory: cwd } })).data;
-      for (const mention of input.skills) if (!catalog.some((entry) => entry.id === mention.id)) throw new Error("skill mention must match canonical skill ID");
-    }
-  }
-
   private async inspectSemantic(client: Client, session: SessionInfo, active: Record<string, unknown>, messageId?: string, signal?: AbortSignal) {
     const [messages, pendingActions] = await Promise.all([
       client.message.list({ sessionID: session.id, limit: 20, order: "desc" }, { signal }),
@@ -528,11 +370,6 @@ export class OpenCodeBackend {
   async query(queries: QueryInput[], signal?: AbortSignal) {
     signal?.throwIfAborted();
     const { client } = await this.connect();
-    const catalogs: QueryCatalogs = {
-      stableModels: (target, cwd) => this.stableModels(target, cwd),
-      stableAgentCatalog: (target, cwd, allowEmptyAfterTimeout) => this.stableAgentCatalog(target, cwd, allowEmptyAfterTimeout),
-      stableProviders: (target, cwd, allowEmptyAfterTimeout) => this.stableProviders(target, cwd, allowEmptyAfterTimeout),
-    };
     const results: Array<{ index: number; type: QueryInput["type"]; result?: unknown; error?: string; errorCode?: string | null; agentId?: string | null }> = [];
     for (let index = 0; index < queries.length; index += 1) {
       signal?.throwIfAborted();
@@ -540,7 +377,7 @@ export class OpenCodeBackend {
       try {
         const result = query.runtime === "codex"
           ? await codexQuery(client, query, signal)
-          : await resolveNativeQuery(client, query, catalogs);
+          : await resolveNativeQuery(client, query);
         results.push({ index, type: query.type, result });
       } catch (error) {
         signal?.throwIfAborted();
@@ -601,29 +438,19 @@ export class OpenCodeBackend {
       return { action: input.action, sessionId: session.id, committed: true };
     }
     if (input.action === "command") {
-      await this.validateAttachments(client, session.location.directory, input.text, input);
-      const commands = (await client.command.list({ location: session.location })).data;
-      if (!commands.some((entry) => entry.name === input.name)) throw new Error("native session command absent from catalog");
+      checkPromptSize(input.text, input);
       await client.session.command({ sessionID: session.id, name: input.name, text: input.text, delivery: input.delivery, ...attachments(input) });
       return { action: input.action, sessionId: session.id, name: input.name, submitted: true, identitySupplied: false };
     }
     if (input.action === "invokeSkill") {
-      const skills = (await client.skill.list({ location: session.location })).data;
-      if (!skills.some((entry) => entry.id === input.skillId)) throw new Error("canonical skill absent from catalog");
       await client.session.skill({ sessionID: session.id, id: input.skillId, resume: input.resume });
       return { action: input.action, sessionId: session.id, skillId: input.skillId, submitted: true, identitySupplied: false };
     }
     if (input.action === "switchModel" || input.action === "switchAgent" || input.action === "setPermissions") {
       const before = await client.session.get({ sessionID: input.sessionId });
       if (input.action === "switchModel") {
-        const models = await this.stableModels(client, before.location.directory);
-        const model = models.find((entry) => modelKey(entry) === input.model);
-        if (!model) throw new Error(`OpenCode model is not available: ${input.model}`);
-        if (input.variant && !model.variants.some((entry) => entry.id === input.variant)) throw new Error("model variant is not available");
         await client.session.switchModel({ sessionID: before.id, model: { ...parseModelRef(input.model), ...(input.variant ? { variant: input.variant } : {}) } });
       } else if (input.action === "switchAgent") {
-        const agents = await this.stableAgents(client, before.location.directory);
-        if (!agents.some((entry) => entry.id === input.agent)) throw new Error(`OpenCode agent is not available: ${input.agent}`);
         await client.session.switchAgent({ sessionID: before.id, agent: input.agent });
       } else await client.session.update({ sessionID: before.id, permissions: input.permissions });
       const after = await client.session.get({ sessionID: before.id });
@@ -649,7 +476,7 @@ export class OpenCodeBackend {
     if (input.action === "steer") {
       const active = await client.session.active();
       if (!active[input.sessionId]) throw new Error("steer requires an active session; use opencode.start to continue an idle session");
-      await this.validateAttachments(client, session.location.directory, input.instruction, input);
+      checkPromptSize(input.instruction, input);
       const prompt = await client.session.prompt({ sessionID: input.sessionId, text: input.instruction, ...attachments(input), delivery: "steer", resume: true });
       return { action: input.action, sessionId: input.sessionId, messageId: prompt.id };
     }

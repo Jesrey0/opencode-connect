@@ -146,7 +146,8 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
     const items = (query.properties!.queries as { items: { type: string; properties: Record<string, Record<string, unknown>>; required: string[]; oneOf: Record<string, unknown>[] } }).items;
     assert.equal(items.type, "object");
     assert.ok(items.required.includes("type"));
-    for (const field of ["type", "agentId", "view", "includeHidden", "includePermissionsSummary", "sessionId", "messageId", "toolId", "field", "textOffset", "cursor", "limit"]) assert.ok(field in items.properties, field);
+    for (const field of ["type", "agentId", "view", "includeHidden", "sessionId", "messageId", "toolId", "field", "textOffset", "cursor", "limit"]) assert.ok(field in items.properties, field);
+    assert.equal("includePermissionsSummary" in items.properties, false);
     assert.equal(items.properties.type.type, "string");
     assert.equal(items.properties.limit.type, "integer");
     assert.equal(items.properties.field.type, "string");
@@ -181,7 +182,7 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       ["command.control", { action: "resize", kind: "pty", cwd: "/tmp", id: "pty", rows: 1, cols: 1000 }, [
         { action: "input", kind: "shell", cwd: "/tmp", id: "shell", text: "x" }, { action: "remove", kind: "pty", cwd: "/tmp", id: "pty", text: "x" }, { action: "resize", kind: "pty", cwd: "/tmp", id: "pty", rows: 0, cols: 80 },
       ]],
-      ["opencode.query", { queries: [{ type: "agents", includePermissionsSummary: true, limit: 50 }, { type: "sessions" }] }, [
+      ["opencode.query", { queries: [{ type: "agents", includeHidden: true, limit: 50 }, { type: "sessions" }] }, [
         { queries: [{ type: "agents", limit: 51 }] }, { queries: [{ type: "usage", agentId: "build" }] }, { queries: [{ type: "message", sessionId: "s" }] }, { queries: [{ type: "messages", sessionId: "s", cursor: "native", order: "desc" }] }, { queries: [{ type: "agent", agentId: "build", textLimit: 12001 }] }, { queries: [{ type: "agents", limit: 0 }] }, { queries: Array.from({ length: 11 }, () => ({ type: "usage" })) },
       ]],
       ["opencode.act", { action: "switchAgent", sessionId: "s", agent: "build" }, [
@@ -353,7 +354,7 @@ test("runtime inventory drops config/env/auth/failed-error text while retaining 
   });
   const result = await new OpenCodeBackend(native.connect).query([{ type: "runtime", cwd: "/tmp" }]);
   assert.equal(result.results.some((entry) => "error" in entry), false);
-  const json = JSON.stringify(result); assert.equal(json.includes("SECRET"), false); assert.ok(json.includes('"liveLsp":false'));
+  const json = JSON.stringify(result); assert.equal(json.includes("SECRET"), false); assert.equal(json.includes('"capabilities"'), false);
   assert.equal(native.requests.some((r) => r.path.includes("config") || r.path.includes("credential")), false);
 });
 
@@ -385,17 +386,18 @@ test("schemas bound commands, dimensions, permission lists and native message pa
 test("MCP catalog advertises compact options and reports field-specific bounds before native access", async () => {
   let calls = 0;
   const native = nativeFixture(() => { calls += 1; return { location: { directory: "/tmp" }, data: [] }; });
-  const fixture = await mcpFixture(native, new OpenCodeBackend(native.connect, 45_000, 0, 0));
+  const fixture = await mcpFixture(native, new OpenCodeBackend(native.connect));
   try {
     const { tools } = await fixture.client.listTools();
     const schema = JSON.stringify(tools.find((tool) => tool.name === "opencode.query")!.inputSchema);
-    for (const option of ["includePermissionsSummary", "includeHidden", "permissionSummary", "compact"]) assert.ok(schema.includes(option));
+    for (const option of ["includeHidden", "compact"]) assert.ok(schema.includes(option));
+    for (const removed of ["includePermissionsSummary", "permissionSummary"]) assert.equal(schema.includes(removed), false);
     const rejected = await fixture.client.callTool({ name: "opencode.query", arguments: { queries: [{ type: "agents", limit: 100 }] } });
     assert.equal(rejected.isError, true); assert.equal(calls, 0);
     assert.match(JSON.stringify(rejected.content), /limit/); assert.match(JSON.stringify(rejected.content), /50/);
     const unknown = await fixture.client.callTool({ name: "opencode.query", arguments: { queries: [{ type: "agents", includeBuiltins: false }] } });
     assert.equal(unknown.isError, true); assert.equal(calls, 0);
-    const accepted = await fixture.client.callTool({ name: "opencode.query", arguments: { queries: [{ type: "agents", includePermissionsSummary: true }] } });
+    const accepted = await fixture.client.callTool({ name: "opencode.query", arguments: { queries: [{ type: "agents", includeHidden: true }] } });
     assert.notEqual(accepted.isError, true); assert.equal(calls, 1);
     assert.deepEqual(accepted.content, []);
     assert.match(JSON.stringify(accepted.structuredContent), /effective/);

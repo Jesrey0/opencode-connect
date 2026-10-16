@@ -4,11 +4,8 @@
 // envelope (runtime dispatch, per-entry error capture, continuation attachment),
 // so this layer stays a pure client-query-to-canonical-result translation.
 //
-// Catalog reads that must stabilize against native location initialization are
-// supplied by the caller, because settling policy is a runtime concern.
 import {
   isAgentNotFoundError,
-  type ModelInfo,
   type OpenCodeClient,
 } from "@opencode/client";
 import { OPENCODE_RELEASE } from "../native.js";
@@ -16,10 +13,9 @@ import { OPENCODE_RELEASE } from "../native.js";
 // through safeError instead of leaking native/client error messages.
 import { page, textPage, integer, fingerprint, CatalogError, ConnectorError as Error, MESSAGE_PREVIEW_LIMIT, type PageInput } from "../bounds.js";
 import { pageNextCall } from "../continuation.js";
-import { compactAgent, contextualPage, permissionSummary } from "../catalog.js";
+import { compactAgent, contextualPage } from "../catalog.js";
 import {
   modelKey,
-  isZeroCostModel,
   projectAgent,
   projectSkill,
   projectSession,
@@ -42,13 +38,6 @@ async function readAgent(client: Client, agentId: string, cwd?: string) {
   }
 }
 
-/** The catalog reads that must stabilize before a query may trust them. */
-export type QueryCatalogs = {
-  stableModels(client: Client, cwd?: string): Promise<ModelInfo[]>;
-  stableAgentCatalog(client: Client, cwd?: string, allowEmptyAfterTimeout?: boolean): Promise<Awaited<ReturnType<Client["agent"]["list"]>>>;
-  stableProviders(client: Client, cwd?: string, allowEmptyAfterTimeout?: boolean): Promise<Awaited<ReturnType<Client["provider"]["list"]>>>;
-};
-
 type TextInput = { textOffset?: number; textLimit?: number; textFingerprint?: string };
 
 /**
@@ -62,11 +51,11 @@ export type NativeQueryInput = (
   | ({ type: "tools"; sessionId: string; messageId: string } & PageInput)
   | ({ type: "tool"; sessionId: string; messageId: string; toolId: string; field: "input" | "content" | "error"; contentIndex?: number } & TextInput)
   | ({ type: "models"; cwd?: string; view?: "compact" | "full" } & PageInput)
-  | ({ type: "agents"; cwd?: string; view?: "compact" | "full"; includeHidden?: boolean; includePermissionsSummary?: boolean } & PageInput)
-  | ({ type: "agent"; cwd?: string; agentId: string; field?: "system" | "description" | "permissions" | "permissionSummary"; textOffset?: number; textLimit?: number; textFingerprint?: string } & PageInput)
+  | ({ type: "agents"; cwd?: string; view?: "compact" | "full"; includeHidden?: boolean } & PageInput)
+  | ({ type: "agent"; cwd?: string; agentId: string; field?: "system" | "description" | "permissions"; textOffset?: number; textLimit?: number; textFingerprint?: string } & PageInput)
   | ({ type: "messages"; sessionId: string; cursor?: string; order?: "asc" | "desc" } & PageInput)
   | { type: "message"; sessionId: string; messageId: string; field?: "summary" | "recent"; textOffset?: number; textLimit?: number; textFingerprint?: string }
-  | ({ type: "permissions"; sessionId: string; section?: "rules" | "pending" | "summary" } & PageInput)
+  | ({ type: "permissions"; sessionId: string; section?: "rules" | "pending" } & PageInput)
   | ({ type: "savedApprovals"; sessionId: string } & PageInput)
   | ({ type: "runtime"; cwd: string } & PageInput)
   | ({ type: "skills"; cwd?: string } & PageInput)
@@ -75,7 +64,7 @@ export type NativeQueryInput = (
   | { type: "sessions"; cursor?: string; limit?: number; cwd?: string; searchTerm?: string }
   | { type: "session"; sessionId: string });
 
-export async function resolveNativeQuery(client: Client, query: NativeQueryInput, catalogs: QueryCatalogs): Promise<unknown> {
+export async function resolveNativeQuery(client: Client, query: NativeQueryInput): Promise<unknown> {
   if (query.type === "skill") {
     const skills = (await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined)).data;
     const skill = skills.find((entry) => entry.id === query.skillId);
@@ -128,14 +117,15 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
     return { ...identity, toolId: tool.id, name: tool.name, status: state.status, time: tool.time, executed: tool.executed ?? null, field: query.field, contentType, contentTotal, contentIndex: query.contentIndex ?? 0, file, ...textPage(text, query.textOffset, query.textLimit, query.textFingerprint) };
   }
   if (query.type === "models") {
-    const models = await catalogs.stableModels(client, query.cwd);
-    const data = models.map((model) => ({
+    const response = await client.model.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
+    const view = query.view ?? "full";
+    const data = response.data.map((model) => ({
       id: modelKey(model),
-      free: isZeroCostModel(model),
       enabled: model.enabled,
+      cost: model.cost,
       modalities: model.capabilities.input,
       variants: model.variants.map((variant) => variant.id),
-      ...(query.view === "compact" ? {} : {
+      ...(view === "compact" ? {} : {
       name: model.name,
       providerId: model.providerID,
       family: model.family ?? null,
@@ -149,22 +139,19 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
       outputLimit: model.limit.output,
       }),
     }));
-    return { view: query.view ?? "full", ...page(data, query) };
+    return { location: response.location, view, ...contextualPage(data, query, { location: response.location, view }) };
   }
   if (query.type === "agents") {
-    const response = await catalogs.stableAgentCatalog(client, query.cwd, true);
+    const response = await client.agent.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
     const location = response.location;
     const view = query.view ?? "compact";
     const includeHidden = query.includeHidden ?? false;
     const agents = response.data.filter((agent) => includeHidden || !agent.hidden);
-    const data = agents.map((agent) => {
-      const summary = query.includePermissionsSummary ? permissionSummary(agent.permissions, { type: "agent", agentId: agent.id, location }) : undefined;
-      return view === "full" ? { ...projectAgent(agent), ...(summary ? { permissionSummary: summary } : {}) } : compactAgent(agent, summary);
-    });
+    const data = agents.map((agent) => view === "full" ? projectAgent(agent) : compactAgent(agent));
     return {
       location, catalog: "effective", provenanceAvailable: false, view, includesBuiltins: true, includesHidden: includeHidden,
       hiddenCount: response.data.filter((agent) => agent.hidden).length,
-      ...contextualPage(data, query, { location, view, includeHidden, includePermissionsSummary: query.includePermissionsSummary ?? false }),
+      ...contextualPage(data, query, { location, view, includeHidden }),
     };
   }
   if (query.type === "skills") {
@@ -172,7 +159,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
     return page(response.data.map(projectSkill), query);
   }
   if (query.type === "providers") {
-    const response = await catalogs.stableProviders(client, query.cwd, true);
+    const response = await client.provider.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
     return page(response.data.map((provider) => ({ id: provider.id, name: provider.name, activation: provider.activation })), query);
   }
   if (query.type === "usage") {
@@ -189,10 +176,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
     const response = await readAgent(client, query.agentId, query.cwd);
     const agent = response.data;
     const field = query.field ?? "system";
-    const context = { type: "agent" as const, agentId: agent.id, location: response.location };
-    return field === "permissionSummary"
-      ? { id: agent.id, location: response.location, field, permissionSummary: permissionSummary(agent.permissions, context, query) }
-      : { ...projectAgent(agent), location: response.location, field, ...(field === "permissions" ? { permissions: page(agent.permissions, query) } : textPage(agent[field] ?? "", query.textOffset, query.textLimit, query.textFingerprint)) };
+    return { ...projectAgent(agent), location: response.location, field, ...(field === "permissions" ? { permissions: page(agent.permissions, query) } : textPage(agent[field] ?? "", query.textOffset, query.textLimit, query.textFingerprint)) };
   }
   if (query.type === "messages") {
     if (query.cursor && query.order) throw new Error("native message cursor cannot be combined with order");
@@ -213,15 +197,8 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
   }
   if (query.type === "permissions") {
     const session = await client.session.get({ sessionID: query.sessionId });
-    if (query.section === "summary") {
-      if (!session.agent) throw new Error("session has no persisted agent; cannot summarize its permission rules");
-      const agent = (await readAgent(client, session.agent, session.location.directory)).data;
-      return { sessionId: session.id, agentId: agent.id, location: session.location,
-        permissionSummary: permissionSummary([...agent.permissions, ...(session.permissions ?? [])], { type: "session", agentId: agent.id, sessionId: session.id, location: session.location }, query),
-      };
-    }
     const requests = query.section === "pending" ? await client.permission.list({ sessionID: session.id }) : [];
-    return { sessionId: session.id, defaultPolicyPreserved: session.permissions === undefined, section: query.section ?? "rules", ...((query.section ?? "rules") === "rules" ? { rules: page(session.permissions ?? [], query) } : { pending: page(requests.map(projectPermission), query) }), precedence: "session rules follow agent rules; omission preserves native default policy; explicit deny beats saved approval" };
+    return { sessionId: session.id, section: query.section ?? "rules", ...((query.section ?? "rules") === "rules" ? { rules: page(session.permissions ?? [], query) } : { pending: page(requests.map(projectPermission), query) }) };
   }
   if (query.type === "savedApprovals") {
     const session = await client.session.get({ sessionID: query.sessionId });
@@ -236,7 +213,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
       ...mcp.data.map((server) => ({ type: "mcp", name: server.name, status: server.status.status })),
       ...commands.data.map((command) => ({ type: "command", name: command.name })),
     ];
-    return { location: { directory: runtime.directory }, projectId: runtime.project.id, opencodeRelease: OPENCODE_RELEASE, ...page(inventory, query), capabilities: { files: true, fileWrite: true, worktrees: true, sessionDiff: true, inbox: true, toolEvidence: true, skillContent: true, modelVariant: true, promptAttachments: true, sessionCommands: true, skillInvoke: true, compactionAdmission: true, vcs: true, shells: true, pty: true, persistentPty: "experimental", terminalScreen: true, terminalSnapshot: true, contentSearch: "native shell rg", patch: "native shell git apply", liveLsp: false, symbols: false, formatter: false } };
+    return { location: { directory: runtime.directory }, projectId: runtime.project.id, opencodeRelease: OPENCODE_RELEASE, ...page(inventory, query) };
   }
   if (query.type === "session") {
     const [session, active] = await Promise.all([

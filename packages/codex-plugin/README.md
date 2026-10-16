@@ -6,70 +6,22 @@
 > Connector activation does not migrate/reload this plugin; coordinated loading
 > and rollback are separate authorized actions. See [release lifecycle](../../docs/release-cutover.md).
 
-An OpenCode 2.0.24 V2 plugin that adds **one** external agent name, `codex`, to
-OpenCode's existing built-in `subagent` tool. Codex runs over the Agent Client
-Protocol (ACP). Native OpenCode subagents are untouched.
+An OpenCode 2.0.24 V2 plugin that registers the `codex-sessions` RPC for direct
+Codex sessions over the Agent Client Protocol (ACP). It does not transform or
+intercept OpenCode's built-in `subagent` tool; all native subagent behavior stays
+owned by OpenCode.
 
 ## Design
 
-The plugin extends the built-in subagent tool and registers the `codex-sessions`
-RPC definition for direct operator sessions. Subagent routing uses this transform:
-
-```js
-ctx.tool.transform((draft) => {
-  const current = draft.get("subagent")      // capture the built-in tool
-  const { id: _id, ...native } = current
-  const nativeExecute = native.execute        // keep the built-in executor
-
-  draft.add({
-    ...native,
-    execute: async (input, context) => {
-      if (input.agent !== "codex") return nativeExecute(input, context) // native: unchanged
-      return runCodexTurn(/* ... */)
-    },
-  })
-})
-```
-
-Native agent names — including `general`, `explore`, and any agent configured in
-`opencode.jsonc` — receive the captured built-in executor and the original input
-object, by reference. They keep native child sessions, permissions, jobs,
-continuation, cancellation, and TUI inspection.
-
-Routing order for the `codex` name:
-
-1. A native OpenCode agent configured with `id: "codex"` wins; it goes to the
-   built-in executor unchanged.
-2. Otherwise the external ACP backend runs.
+The plugin registers only the `codex-sessions` RPC definition. A native OpenCode
+agent named `codex`, like every other native agent, is handled by OpenCode's
+built-in subagent implementation without plugin routing or permission evaluation.
 
 ## Safety model
 
-Codex is external to OpenCode's command permission system, so its authority is
-bounded by which ACP session mode is selected and by who answers approvals.
-
-The plugin has two routes with deliberately different envelopes.
-
-### Foreground subagent route
-
-`subagent(agent="codex")` is the constrained route and is unchanged by writable
-mode support:
-
-| Control | Behavior |
-| --- | --- |
-| Session mode | Forced to `read-only`. If the agent does not offer that mode, or the switch fails, the run fails closed before any prompt is sent. |
-| Permission requests | Every `session/request_permission` is answered `{ outcome: { outcome: "cancelled" } }`. No approval is ever granted and no prompt is shown. |
-| ACP filesystem | `fs.readTextFile` / `fs.writeTextFile` advertised `false`; both methods reject with `-32601` if called anyway. |
-| ACP terminal | `terminal` capability advertised `false`; all five `terminal/*` methods reject with `-32601`. |
-| Elicitation | `elicitation/create` rejects with `-32601`. |
-| Timeouts | Bounded by `timeoutMs` (default 10 minutes); the turn is cancelled and the child reaped. |
-| Cancellation | `ToolContext.signal` cancels the ACP request and closes the transport. |
-
-A `subagent` allow rule authorizes *launching* Codex. It never grants write
-access, because this route cannot select a writable mode at all.
-
-### Direct operator sessions
-
-`codex-sessions` selects one native ACP session mode explicitly and queues
+Codex is external to OpenCode's command permission system, so direct-session
+authority is bounded by the selected native ACP mode and by who answers
+approvals. `codex-sessions` selects one native ACP session mode explicitly and queues
 approvals for the operator instead of deciding them:
 
 | Mode | Sandbox policy | Approval policy | Reviewer |
@@ -80,10 +32,9 @@ approvals for the operator instead of deciding them:
 | `agent-full-access` | `dangerFullAccess` | `never` | `user` |
 
 Each mode binds the native sandbox and reviewer exactly as Codex itself defines
-it; this plugin never overrides either. `workspace-write`, `agent`, and
-`agent-full-access` are never selected on the foreground subagent route.
+it; this plugin never overrides either.
 
-ACP filesystem and terminal delegation stays denied on both routes, because
+ACP filesystem and terminal delegation stays denied, because
 Codex performs its tools natively rather than through the client.
 
 ## Historical turn outcomes
@@ -98,15 +49,8 @@ select a session mode, run a turn, or answer an approval.
 
 ## Authorization
 
-The backend is inert unless `enableCodex: true`. When disabled, **no tool
-override is registered at all** and the built-in tool keeps its original
-definition.
-
-When enabled, the calling (parent) agent must also be authorized. The plugin
-evaluates the parent agent's configured `subagent` permission rules directly;
-a package plugin cannot drive OpenCode's interactive prompt, so **`ask` and
-`deny` both fail closed**. Last matching rule wins, and unmatched rules resolve
-to `ask`.
+The direct RPC is inert unless `enableCodex: true`. Whether enabled or disabled,
+the plugin registers no tool override and does not inspect agent permission rules.
 
 ```jsonc
 {
@@ -116,14 +60,7 @@ to `ask`.
       "package": "/absolute/path/to/immutable-build/packages/codex-plugin/src",
       "options": { "enableCodex": true },
     },
-  ],
-  "agents": {
-    "build": {
-      "permissions": [
-        { "action": "subagent", "resource": "codex", "effect": "allow" },
-      ],
-    },
-  },
+  ]
 }
 ```
 
@@ -144,12 +81,11 @@ is never used, so the backend does not depend on the OpenCode runtime's binary.
 ## Layout
 
 ```
-src/index.js        plugin, tool.transform, native capture + routing, authorization
+src/index.js        plugin registration for direct codex-sessions RPC
 src/direct.js       native Codex session supervision and codex-sessions RPC
-src/codex.js        ACP client app, safety envelope, transport, bounded run
+src/codex.js        ACP client app, safety envelope, and transport
 src/usage.js        bounded read-only Codex App Server quota reader
 src/stdio.js        shared owned-process shutdown and bounded stderr
-src/permissions.js  fail-closed permission resolution
 scripts/            live non-prompt ACP handshake against the real binary
 test/               in-process fake ACP agent, stdio ACP fixture, suites
 ```
@@ -168,36 +104,25 @@ diagnostic. It creates a native Codex session and switches its mode even though 
 sends no model prompt. It is not part of source validation or shipped release
 inputs. Do not run it as a supposedly side-effect-free check.
 
-`npm test` covers native pass-through, the disabled path, fail-closed
-authorization, the read-only foreground mode, denied permissions and fs/terminal
-calls, cancellation, timeout, and agent death.
-
-Direct-session coverage adds selected-mode application before each prompt,
+`npm test` covers the disabled path and proves native tools remain untouched.
+Direct-session coverage includes selected-mode application before each prompt,
 continuation inheritance and reapplication, explicit mode after an unrecoverable
 restart, reviewable vs. truncated approval detail, exact-option resolution,
 stale/unknown/cross-session rejection, request-ID non-reuse, bounded queue
 behaviour, interruption and disposal settling parked decisions, and unchanged
 OpenCode behaviour.
 
-Transport coverage runs a full turn over the real spawn + newline-delimited ACP
-stdio path and proves both shutdown paths: a cooperative agent exits on stdin
+Transport coverage exercises the real spawn + newline-delimited ACP stdio
+transport and proves both shutdown paths: a cooperative agent exits on stdin
 EOF without ever being signalled, and an uncooperative agent together with its
 own child is reaped through the owned process group.
 
 ## Limitations
 
-- Foreground only on the subagent route. `background: true` is rejected for
-  `codex`; there is no session queue.
-- No continuation on the subagent route. `sessionID` is rejected for `codex`;
-  `codex` runs one turn per call. Direct sessions do continue by native
-  `sessionId`.
 - Model and reasoning-effort selection are not exposed; Codex picks its own
   default.
-- Authorization reads static rules on the parent agent. Saved interactive
-  approvals and permission-evaluation hooks are OpenCode-internal and are not
-  reachable from a package plugin.
-- Codex is an external backend behind the native `subagent` tool. It is not
-  itself selectable as an OpenCode agent and does not create a native child session.
+- Direct Codex sessions are not OpenCode subagents and do not create native
+  OpenCode child sessions.
 
 ## Loading and release lifecycle
 
@@ -344,7 +269,3 @@ selection is unsupported. History replay recovers native message IDs, while a
 restarted adapter recovers conversation history but reports execution outcome as
 unknown. Native session listing and deletion require their advertised
 capabilities. Plugin disposal interrupts and reaps active children.
-
-The foreground `subagent(agent="codex")` route keeps its existing behavior and
-parent permission checks: read-only mode, denied permissions, and no ACP
-filesystem or terminal client access.

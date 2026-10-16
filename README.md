@@ -314,21 +314,23 @@ unbounded native fields can still exceed it, in which case the result fails
 explicitly and the caller narrows the page. Native opaque cursors and order are
 preserved; rows are never skipped and cursors never invented to fit a byte cap.
 
-Catalog the effective native agents and ordered permissions before selecting
-execution. Scalar `agent` is the executing session selection; omission on fresh
-work selects `build`. `agents[]` is structured prompt context and does not admit
-delegated child execution. Native agent APIs are list/get only; the connector
+Scalar `agent` is the executing session selection; omission on fresh work lets
+OpenCode choose its configured default. `agents[]` is structured prompt context
+and does not admit delegated child execution. Native agent APIs are list/get only; the connector
 does not create, update or delete agent definitions. Catalog mode/model/rules are
 native facts, not a connector permission mode.
 
-Fresh starts require `cwd` and an explicit canonical `provider/model`. Resume and
-fork inherit cwd/model/agent, reject conflicting overrides, and require the
-canonical model on each start. Agent IDs are canonical IDs, not display names. Scalar `agent` on resume/fork
-may be omitted to inherit; an explicit value must match persisted selection.
+Fresh starts require `cwd`; model and agent are optional. Omitted selections are
+left out of native `session.create` so OpenCode chooses its configured defaults.
+Resume and fork inherit cwd/model/variant/agent without requiring callers to replay
+them. An explicit model or agent must match persisted native selection before any
+mutation. Agent IDs are canonical IDs, not display names. Responses read native
+selection after prompt admission and report nullable model/agent only when native
+state remains unset.
 For active work use `steer`; for idle continuation use `start` with `sessionId`.
-Fresh starts accept a catalog-validated `variant`, included in native creation and read back before
-the first prompt. Resume/fork inherit canonical variant and reject any variant
-override; responses include `modelVariant`.
+Fresh starts accept a native `variant` with an explicit model, included in native
+creation. Resume/fork inherit canonical variant and reject any variant override;
+responses include the post-admission native `modelVariant`.
 
 Start/steer and native session commands accept structured native `files`, `agents`
 and `skills`. Files use SDK input `{ uri, name?, description?, mention? }`, not
@@ -337,7 +339,8 @@ bounded to 64 KiB decoded; URI credentials are rejected. Agents use canonical
 `name` IDs; skills use canonical `id` (native catalogs validate both). Mentions
 are exact `{ start, end, text }` UTF-16 prompt ranges. Each kind caps at 20,
 text at 64 KiB and serialized attachments at 128 KiB. File contents/URIs and
-operator-chosen prompts are not confidentiality boundaries. User prompts retain
+operator-chosen prompts are not confidentiality boundaries. Native prompt/session
+endpoints validate agent and skill identities. User prompts retain
 their canonical user message identity, not a synthetic admission identity.
 
 `query` supports models, agents, one agent, skills, providers, usage, native session
@@ -386,17 +389,14 @@ signal; catalog activation does not imply successful execution.
 built-ins and configured agents. Hidden internal agents are excluded unless
 `includeHidden: true`. The response returns the native resolved `location`,
 `hiddenCount`, page totals and fingerprint. Supply `cwd` to select the project;
-omission uses native location resolution. Agent/provider reads reconcile
-the native location update stream during bounded initialization, so a transient
-empty catalog is not exposed as ready state. If the bounded window ends empty,
-those queries preserve that native empty catalog rather than inventing entries.
-Model reads instead fail explicitly when the catalog does not stabilize.
+omission uses native location resolution. Model, agent and provider queries read
+their native endpoints directly and preserve native empty results.
 The pinned client
 does not expose agent provenance, so `provenanceAvailable: false` is explicit;
 the connector never guesses builtin/global/project origin from an ID.
 
 ```json
-{"type":"agents","cwd":"/absolute/project","includePermissionsSummary":true}
+{"type":"agents","cwd":"/absolute/project","includeHidden":false}
 ```
 
 Compact entries contain canonical ID/name, mode, hidden status, a 512-unit
@@ -408,25 +408,9 @@ schema errors with field/bounds; direct backend pagination names `limit` or
 `offset`. Missing individual agents return `errorCode: AGENT_NOT_FOUND` and the
 requested `agentId`, without leaking native error bodies.
 
-`includePermissionsSummary: true` adds a structured **agent-rule** summary.
-It keeps the last universal baseline, removes earlier universal-shadowed rules
-and duplicate matchers, and preserves overlapping wildcard exceptions in native
-order. It does not implement a second wildcard matcher or permission authority.
-`defaultEffect`, `defaultRuleIndex`, exception `ruleIndex`, `shadowedRuleCount`,
-and source fingerprints make overriding rules visible. A final universal allow
-has zero surviving exceptions; earlier `.env` asks or plan denials are not
-misrepresented as effective restrictions.
-
-Use `query agent field: permissionSummary` to independently page a summary's
-`exceptions` with their fingerprint. Use `query permissions section: summary`
-for the current persisted agent plus session rules in the session's location.
-Unset session agents fail explicitly. These reads are not an atomic snapshot of
-all runtime authority. `context` identifies agent versus session scope, and
-`excludedLayers` lists saved approvals/policies plus session rules for an agent
-summary. Summaries cannot predict every runtime decision, parent/child authority,
-or direct HostPlane access. Native evaluation remains authoritative. Continuation
-fingerprints include source rules and context, so changes to shadowed rules,
-resolved location, view, hidden filter or summary selection invalidate pages.
+Raw ordered agent permissions remain available through `query agent field:
+permissions`; raw ordered session rules and pending requests remain available
+through `query permissions`. No connector-derived permission summary is exposed.
 
 Additional query details:
 
@@ -522,10 +506,10 @@ automatic replay. Mutations and persistent observer command reads have no
 automatic continuation. `host.worktree` continuation is list-only despite the
 combined tool's conservative lifecycle annotations.
 
-`act switchModel` and `act switchAgent` validate their separate canonical
-catalogs and return persisted session readback. These are separate, **non-atomic**
+`act switchModel` and `act switchAgent` delegate validation to their native
+session endpoints and return persisted session readback. These are separate, **non-atomic**
 operations; switching one must not be treated as switching both. `switchModel`
-accepts an optional catalog-validated `variant`. Omitting model `variant` delegates
+accepts an optional native `variant`. Omitting model `variant` delegates
 resolution to OpenCode; read back its resolved `modelVariant`. `setPermissions` replaces ordered
 canonical rules and checks persisted readback. `synthetic` accepts text,
 description, native delivery (`steer`/`queue`), and optional resume, returning the
@@ -575,8 +559,8 @@ success nor failure. The message includes its reason, model when available,
 summary/recent previews and per-request usage. Recover exact summary/recent
 fields through fingerprinted continuations; no timing heuristic or connector
 registry is needed.
-`command` validates native session command `name` and `invokeSkill` validates
-canonical `skillId`. Both upstream operations return `void`, so the connector
+`command` and `invokeSkill` delegate identity validation to their native session
+endpoints. Both upstream operations return `void`, so the connector
 returns submission without inventing user `messageId`/inbox identity or completion.
 `revertStage`, `revertClear`, and `revertCommit` preserve OpenCode's staged revert
 boundary: stage selects a canonical message (and optional native files choice),
@@ -618,7 +602,7 @@ metadata connection, and a 64-entry expiring supervision cache. Cache eviction
 never deletes native Codex sessions.
 
 `query sessions/session/messages/message`, `query runtime`, and
-`query permissions section: "summary"` or `"pending"` accept `runtime: "codex"`. Native history
+`query permissions section: "pending"` accept `runtime: "codex"`. Native history
 replay supplies canonical user and assistant IDs. Message inventories page a
 bounded history snapshot with offsets and fingerprints; full text recovery uses
 native message IDs. `historyComplete: false` and `outputTruncated` disclose
@@ -678,12 +662,10 @@ own policy, so this reviewer must not launch them. Allowed tests execute
 repository code with host authority. Direct authenticated HostPlane calls do
 not inherit worker permissions. No global configuration changes are needed.
 
-The native model catalog alone owns current availability. Price metadata across
-all canonical tiers determines `free` regardless of model name or provider: every
-tier must explicitly price input/output/cache read/cache write at zero; missing
-pricing is not free. The connector adds no provider filter, name heuristic or
-duplicate model policy. Model entries retain native capability and compatibility
-metadata. Query the catalog in the selected native location.
+The native model catalog alone owns current availability. The connector does not
+filter disabled models or derive a `free` eligibility judgment. Model entries
+retain native `enabled`, cost tiers, capability and compatibility metadata. Query
+the catalog in the selected native location.
 
 ## Source, packaging and validation
 

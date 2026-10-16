@@ -1,21 +1,6 @@
 /**
  * Codex ACP backend.
  *
- * Two callers share this transport and they deliberately have different
- * authority envelopes.
- *
- * The foreground `subagent(agent="codex")` route is the constrained one. It
- * runs a single turn with:
- *
- *   - ACP session mode forced to `read-only`, aborting when the agent does not
- *     offer that mode. Writable and full-access modes are never selected.
- *   - Advertised client capabilities that disable ACP filesystem and terminal
- *     access, and the corresponding client methods reject with "method not
- *     found" even if an agent calls them anyway.
- *   - Every `session/request_permission` answered as `cancelled`. No approval
- *     is ever granted on this route.
- *   - An explicit timeout and the caller's AbortSignal.
- *
  * Direct operator sessions (`codex-sessions` RPC) select one of the native ACP
  * session modes explicitly and queue permission requests for the operator
  * instead of answering them automatically. Mode selection is the only authority
@@ -29,12 +14,6 @@ import { Readable, Writable } from "node:stream"
 
 import { ClientApp, PROTOCOL_VERSION, RequestError, ndJsonStream } from "@agentclientprotocol/sdk"
 import { spawnOwnedStdio } from "./stdio.js"
-
-/** The agent name reserved for the external Codex backend. */
-export const CODEX_AGENT_NAME = "codex"
-
-/** The only Codex session mode the foreground subagent route will run under. */
-export const CODEX_READ_ONLY_MODE = "read-only"
 
 /**
  * The native ACP session modes a direct operator session may select, in the
@@ -60,7 +39,7 @@ export function isCodexSessionMode(value) {
   return typeof value === "string" && MODE_IDS.has(value)
 }
 
-/** Default bounded runtime for one foreground Codex turn. */
+/** Default bounded runtime for one direct Codex turn. */
 export const DEFAULT_TIMEOUT_MS = 10 * 60 * 1000
 
 const require_ = createRequire(import.meta.url)
@@ -136,25 +115,19 @@ const DENIED_CLIENT_METHODS = [
 /**
  * Builds the ACP client app with the safety envelope applied.
  *
- * Every fs/terminal method is absent on both routes. Permission requests are
- * cancelled unless a route supplies `onPermission`; the direct operator route
- * does, and resolves each request from a bounded queue instead of deciding here.
+ * Every fs/terminal method is absent. Direct sessions supply `onPermission` and
+ * resolve each request from a bounded queue instead of deciding here.
  */
-export function createCodexClientApp({ name = "opencode-codex-subagent", onDenied, onPermission } = {}) {
+export function createCodexClientApp({ name = "opencode-codex-subagent", onPermission } = {}) {
   const app = new ClientApp({ name })
 
-  app.onRequest("session/request_permission", async ({ params, requestId, signal }) => {
-    if (onPermission) return onPermission({ params, requestId, signal })
-    onDenied?.({
-      method: "session/request_permission",
-      toolName: params?.toolCall?.title ?? params?.toolCall?.name,
-    })
-    return { outcome: { outcome: "cancelled" } }
-  })
+  // Without a resolver every request is cancelled, so an unrouted approval is
+  // refused rather than granted.
+  app.onRequest("session/request_permission", ({ params, requestId, signal }) =>
+    onPermission ? onPermission({ params, requestId, signal }) : { outcome: { outcome: "cancelled" } })
 
   for (const method of DENIED_CLIENT_METHODS) {
-    app.onRequest(method, (params) => {
-      onDenied?.({ method, params })
+    app.onRequest(method, () => {
       throw new RequestError(-32601, `${method} is not available: this client advertises no ACP filesystem or terminal access.`)
     })
   }
@@ -244,157 +217,4 @@ export async function applySessionMode(client, sessionId, modeId, modes, request
   if (modes?.currentModeId === modeId) return { mode: modeId, changed: false, available }
   await request.call(client, "session/set_mode", { sessionId, modeId })
   return { mode: modeId, changed: true, available }
-}
-
-/** The foreground subagent route never reaches a writable mode. */
-export async function forceReadOnlyMode(client, sessionId, modes, request) {
-  return applySessionMode(client, sessionId, CODEX_READ_ONLY_MODE, modes, request, "Refusing to run Codex under a writable sandbox.")
-}
-
-function chunkText(update) {
-  if (update?.sessionUpdate !== "agent_message_chunk") return ""
-  const content = update.content
-  if (!content) return ""
-  if (typeof content === "string") return content
-  if (content.type === "text" && typeof content.text === "string") return content.text
-  return ""
-}
-
-/**
- * Drives one prompt turn, collecting assistant text, and always finishes on a
- * stop message, a prompt rejection, or an abort.
- */
-async function runTurn(session, prompt, { signal, onText }) {
-  const promptPromise = session.prompt(prompt, { cancellationSignal: signal })
-
-  const pump = (async () => {
-    let text = ""
-    for (;;) {
-      const message = await session.nextUpdate()
-      if (message.kind === "stop") return { text, stopReason: message.stopReason }
-      const chunk = chunkText(message.update)
-      if (chunk) {
-        text += chunk
-        onText?.(chunk, text)
-      }
-    }
-  })()
-
-  // A prompt rejection must surface immediately rather than waiting on updates.
-  const winner = await Promise.race([
-    pump.then(() => "pump"),
-    promptPromise.then(
-      () => "prompt",
-      (error) => {
-        throw error
-      },
-    ),
-  ])
-
-  // If the prompt settled first, drain the queued stop message.
-  if (winner === "prompt") {
-    const settled = await pump
-    return { text: settled.text, stopReason: settled.stopReason }
-  }
-
-  const settled = await pump
-  return { text: settled.text, stopReason: settled.stopReason }
-}
-
-/**
- * Runs one bounded, foreground Codex turn.
- *
- * @param {object} options
- * @param {() => Promise<{target: any, close: () => Promise<void>, stderr?: {summary: () => string}}>} options.open
- *   Transport factory. Defaults to spawning codex-acp with `node`.
- * @param {string} options.cwd Absolute workspace path for the Codex session.
- * @param {string} options.prompt The task text sent to Codex.
- * @param {AbortSignal} [options.signal] Caller cancellation.
- * @param {number} [options.timeoutMs]
- * @returns {Promise<{ sessionID: string, text: string, stopReason: string, mode: string }>}
- */
-export async function runCodexTurn({
-  open,
-  cwd,
-  prompt,
-  signal,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-  onText,
-  onDenied,
-  clientApp,
-}) {
-  const app = clientApp ?? createCodexClientApp({ onDenied })
-  let opened, connection
-
-  const controller = new AbortController()
-  let timedOut = false
-  const timer = setTimeout(() => {
-    timedOut = true
-    controller.abort()
-  }, timeoutMs)
-  timer.unref?.()
-
-  const onExternalAbort = () => controller.abort()
-  if (signal) {
-    if (signal.aborted) controller.abort()
-    else signal.addEventListener("abort", onExternalAbort, { once: true })
-  }
-
-  try {
-    controller.signal.throwIfAborted()
-    await cancellable(async () => {
-      const resource = await open()
-      if (controller.signal.aborted) {
-        await resource.close()
-        controller.signal.throwIfAborted()
-      }
-      opened = resource
-    }, controller.signal)
-    controller.signal.throwIfAborted()
-    connection = app.connect(opened.target)
-    const client = connection.agent
-    await cancellable(() => client.request("initialize", {
-      protocolVersion: PROTOCOL_VERSION,
-      clientCapabilities: CODEX_CLIENT_CAPABILITIES,
-      clientInfo: { name: "opencode-codex-subagent" },
-    }, { cancellationSignal: controller.signal }), controller.signal)
-
-    const active = await cancellable(() => client.buildSession(cwd).start({ cancellationSignal: controller.signal }), controller.signal)
-    const mode = await forceReadOnlyMode(client, active.sessionId, active.modes, {
-      call: (target, method, params) => cancellable(() => target.request(method, params, { cancellationSignal: controller.signal }), controller.signal),
-    })
-
-    // Never open a model turn on an already-cancelled call.
-    if (controller.signal.aborted) throw controller.signal.reason ?? new Error("cancelled")
-
-    const turn = await cancellable(() => runTurn(active, prompt, { signal: controller.signal, onText }), controller.signal)
-
-    if (timedOut) throw new Error(`Codex subagent exceeded the ${timeoutMs}ms time limit and was cancelled.`)
-    if (signal?.aborted) throw new Error("Codex subagent was cancelled because the parent tool call was interrupted.")
-
-    return {
-      sessionID: active.sessionId,
-      text: turn.text,
-      stopReason: turn.stopReason,
-      mode: mode.mode,
-    }
-  } catch (error) {
-    // Cancellation is reported as a deliberate, bounded outcome rather than a
-    // protocol failure, whether it came from the caller or the time limit.
-    if (timedOut) throw new Error(`Codex subagent exceeded the ${timeoutMs}ms time limit and was cancelled.`)
-    if (signal?.aborted)
-      throw new Error("Codex subagent was cancelled because the parent tool call was interrupted.")
-
-    if (error instanceof CodexModeError) throw error
-    // Provider/SDK errors and stderr can contain credential-derived text.
-    throw new Error("Codex ACP operation failed; details omitted.")
-  } finally {
-    clearTimeout(timer)
-    signal?.removeEventListener("abort", onExternalAbort)
-    try {
-      connection?.close()
-    } catch {}
-    try { await opened?.close() }
-    catch { throw new Error("Codex ACP transport shutdown failed; details omitted.") }
-  }
 }

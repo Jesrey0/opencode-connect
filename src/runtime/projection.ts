@@ -8,7 +8,6 @@
 import {
   type AgentInfo,
   type FormInfo,
-  type ModelInfo,
   type PermissionRequest,
   type SessionInfo,
   type SessionInboxInfo,
@@ -34,15 +33,6 @@ export function parseModelRef(value: string): { providerID: string; id: string }
 
 export function modelKey(model: { providerID: string; id: string }): string {
   return `${model.providerID}/${model.id}`;
-}
-
-export function isZeroCostModel(model: Pick<ModelInfo, "cost">): boolean {
-  return Array.isArray(model.cost) && model.cost.length > 0 && model.cost.every((tier) =>
-    tier?.input === 0 &&
-    tier?.output === 0 &&
-    tier?.cache?.read === 0 &&
-    tier?.cache?.write === 0
-  );
 }
 
 export function sessionState(session: SessionInfo, active: Record<string, unknown>): SessionState {

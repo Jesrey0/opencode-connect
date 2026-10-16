@@ -11,7 +11,7 @@ export const SERVICE_NAME = "opencode-connect.service";
 export const BUILD_ID_RE = /^[0-9a-f]{16}$/;
 const FIXED_SOURCE_FILES = ["package.json", "package-lock.json", "tsconfig.json"];
 const CODEX_PLUGIN_DIR = path.join("packages", "codex-plugin");
-const CODEX_PLUGIN_FILES = ["package.json", "src/index.js", "src/codex.js", "src/direct.js", "src/permissions.js", "src/usage.js", "src/stdio.js"];
+const CODEX_PLUGIN_FILES = ["package.json", "src/index.js", "src/codex.js", "src/direct.js", "src/usage.js", "src/stdio.js"];
 
 async function assertWorkspacePlugin(sourceDir: string): Promise<void> {
   const manifest = JSON.parse(await fs.readFile(path.join(sourceDir, "package.json"), "utf8"));

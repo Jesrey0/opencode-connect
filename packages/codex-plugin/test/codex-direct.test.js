@@ -895,7 +895,16 @@ test("the registered RPC returns native sessions through real ACP", async () => 
   assert.equal(result.output, "rpc text")
   await harness.rpcCall(SESSION_RPC_ID, "delete", { sessionId: admitted.sessionId })
   assert.equal(native.persisted.size, 0)
+  assert.equal(harness.subagent, harness.builtInSubagent)
   const ordinary = await harness.call({ agent: "explore", prompt: "native", description: "test" })
+  assert.equal(ordinary.output.sessionID, "ses_native")
+})
+
+test("disabled direct Codex registers no RPC and leaves native tools untouched", async () => {
+  const harness = await createHarness({ pluginOptions: { enableCodex: false } })
+  assert.equal(harness.rpc(SESSION_RPC_ID), undefined)
+  assert.equal(harness.subagent, harness.builtInSubagent)
+  const ordinary = await harness.call({ agent: "codex", prompt: "native", description: "test" })
   assert.equal(ordinary.output.sessionID, "ses_native")
 })
 

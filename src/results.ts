@@ -55,7 +55,7 @@ export const outputSchemas = {
     z.object({ kind: commandShape.kind, location, id, cwd: id, status: commandShape.status, pid: z.number(), exitCode: z.number().nullable(), resized: z.literal(true), sessionId: id.optional(), size: nativeObject.optional(), output: nativeObject.optional() }).strict(),
   ]),
   start: z.union([
-    z.object({ sessionId: id, messageId: id, cwd: id, model: id, modelVariant: id.nullable(), agent: id, status: z.literal("inProgress") }).strict(),
+    z.object({ sessionId: id, messageId: id, cwd: id, model: id.nullable(), modelVariant: id.nullable(), agent: id.nullable(), status: z.literal("inProgress") }).strict(),
     z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), cwd: id, model: z.null(), modelVariant: z.null(), agent: z.literal("codex"), status: z.literal("inProgress"), mode: z.string().nullable(), capabilities: nativeObject }).strict(),
   ]),
   wait: z.union([

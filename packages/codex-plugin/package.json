@@ -1,7 +1,7 @@
 {
   "name": "opencode-codex-subagent",
   "version": "0.3.1",
-  "description": "OpenCode 2.0.24 V2 plugin that extends the built-in subagent tool with one Codex ACP backend",
+  "description": "OpenCode 2.0.24 V2 plugin for direct Codex ACP sessions",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -13,21 +13,20 @@
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
-    "check": "node --check src/index.js && node --check src/codex.js && node --check src/permissions.js && node --check src/direct.js && node --check src/usage.js && node --check src/app-server.js && node --check src/outcomes.js && node --check src/stdio.js"
+    "check": "node --check src/index.js && node --check src/codex.js && node --check src/direct.js && node --check src/usage.js && node --check src/app-server.js && node --check src/outcomes.js && node --check src/stdio.js"
   },
   "keywords": [
     "opencode",
     "opencode-plugin",
     "codex",
     "acp",
-    "subagent"
+    "sessions"
   ],
   "license": "MIT",
   "dependencies": {
     "@agentclientprotocol/codex-acp": "2.1.1",
     "@agentclientprotocol/sdk": "1.5.0",
     "@opencode/plugin": "2.0.24",
-    "@opencode/schema": "2.0.24",
     "effect": "4.0.0-rc.112"
   }
 }

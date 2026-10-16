@@ -9,18 +9,18 @@
  *
  *   node scripts/live-acp-handshake.mjs
  */
-import { ClientApp, PROTOCOL_VERSION } from "@agentclientprotocol/sdk"
+import { PROTOCOL_VERSION } from "@agentclientprotocol/sdk"
 
-import { CODEX_CLIENT_CAPABILITIES, CODEX_READ_ONLY_MODE, createCodexClientApp, resolveCodexAcpEntry, resolveNodeBinary, spawnCodexAcp } from "../src/codex.js"
+import { CODEX_CLIENT_CAPABILITIES, createCodexClientApp, resolveCodexAcpEntry, resolveNodeBinary, spawnCodexAcp } from "../src/codex.js"
+
+const READ_ONLY_MODE = "read-only"
 
 const entry = resolveCodexAcpEntry()
 const nodePath = resolveNodeBinary(undefined)
 console.log(`node binary : ${nodePath}`)
 console.log(`codex-acp   : ${entry}`)
 
-const app = createCodexClientApp({
-  onDenied: (event) => console.log(`denied      : ${event.method}`),
-})
+const app = createCodexClientApp()
 
 const transport = spawnCodexAcp({ nodePath, entry, cwd: process.cwd() })
 transport.stderr && process.stderr.write("")
@@ -45,14 +45,14 @@ try {
   console.log(`modes       : ${offered.join(", ")}`)
   console.log(`default mode: ${active.modes?.currentModeId}`)
 
-  if (!offered.includes(CODEX_READ_ONLY_MODE)) {
+  if (!offered.includes(READ_ONLY_MODE)) {
     throw new Error(`read-only mode is not offered; offered: ${offered.join(", ")}`)
   }
-  if (active.modes?.currentModeId !== CODEX_READ_ONLY_MODE) {
-    await connection.agent.request("session/set_mode", { sessionId: active.sessionId, modeId: CODEX_READ_ONLY_MODE })
-    console.log(`mode switch : forced ${CODEX_READ_ONLY_MODE}`)
+  if (active.modes?.currentModeId !== READ_ONLY_MODE) {
+    await connection.agent.request("session/set_mode", { sessionId: active.sessionId, modeId: READ_ONLY_MODE })
+    console.log(`mode switch : forced ${READ_ONLY_MODE}`)
   } else {
-    console.log(`mode switch : already ${CODEX_READ_ONLY_MODE}`)
+    console.log(`mode switch : already ${READ_ONLY_MODE}`)
   }
 
   console.log("HANDSHAKE COMPLETE (no prompt sent, no quota used)")

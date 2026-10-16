@@ -10,8 +10,33 @@ excludes session-scoped instruction-entry APIs and all mutations thereof.
 | --- | --- | --- | --- |
 | `session.log({ after, follow:false })` | `opencode.inspect`, `opencode.query messages`, session status | Replayed only `log.synced` (no durable events) for an existing completed session and a newly created+updated disposable session | **Do not expose** until durable replay is demonstrably available. Re-test after a pinned upstream update |
 | `session.context` | Bounded selected result and message paging | 19 entries / 268,086 JSON bytes for an existing completed session | **Do not expose raw**; could leak sensitive context and increases response size |
-| `model.default` | Canonical compact `query models` and explicit model at worker admission | Returned no default for tested project (173 ms) | **Defer**; cannot replace explicit cost-aware model selection |
+| `model.default` | Canonical compact `query models`; native session creation owns omitted selection | Returned no default for tested project (173 ms) | **Do not project separately**; fresh admission omits an unspecified model and reads native selected state back |
 | `reference.list` | Native skills/catalogs and host file lookup | Available upstream but no proven operator workflow reducing calls | **Defer** pending a concrete use case |
+
+## Catalog identity validation (source and test review, 2026-10-16)
+
+Session command names, skill IDs, and structured prompt attachments (`files`,
+`agents`, `skills`) are **delegated to native OpenCode 2.0.24**. The connector
+does not shadow the native command or skill catalogs: it forwards the caller's
+identifier verbatim, bounds only the request shape (at most 20 entries per
+attachment kind, bounded text and attachment JSON), and reports
+`identitySupplied: false`, because native admission returns no message identity
+for these routes.
+
+Decision: **do not shadow native catalogs.** Pre-resolving a name or ID against a
+cached command/skill list would duplicate catalog state the native server owns,
+and would reject identities that native accepts after a live reload.
+
+| Claim | Evidence |
+| --- | --- |
+| Unknown or malformed command/skill identity is refused by native admission, not by the connector | Source-verified: `opencode.act` forwards `name`/`id` straight to `client.session.command`/`client.session.skill` with no local catalog lookup |
+| The connector issues no extra catalog read for command admission | Test-verified: an unlisted command name is still forwarded, and no `/api/command` request is made |
+| A forwarded identity the native server rejects surfaces as a sanitized native error | Test-verified against the native fixture; the underlying error text is not surfaced verbatim |
+| Native behavior for an unknown command/skill ID on a live 2.0.24 server, and any structured attachment rejection, is unchanged by this delegation | **Not live-verified.** No live observation of an unknown command or skill identity was made for this audit; only the fixture-backed tests above |
+
+This section records source and test review only. It adds no live observation to
+the reproducible measurements below, and no timing or catalog-size claim is made
+for command, skill, or attachment identity handling.
 
 ## Reproducible observation
 

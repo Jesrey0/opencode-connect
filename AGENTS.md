@@ -5,10 +5,10 @@ ChatGPT 0xOperator owns the orchestration of native HostPlane and WorkerPlane wo
 
 ## Entry points
 - src/server.ts, src/http.ts, src/mcp.ts: the external MCP/HTTP boundary.
-- src/opencode.ts: public worker facade, catalog settling and lifecycle orchestration.
+- src/opencode.ts: public worker facade, admission and lifecycle orchestration.
 - src/runtime/{query,result,projection}.ts: native query/inspect contracts, selection and pure projections; never import the facade from these modules.
 - src/codex.ts and src/codexRpc.ts: connector-facing Codex adapter and importable RPC declaration; no direct CLI model turns.
-- packages/codex-plugin/src/index.js: native plugin registration and subagent routing.
+- packages/codex-plugin/src/index.js: native plugin registration for direct Codex RPC.
 - packages/codex-plugin/src/direct.js: Codex session RPC, modes and permissions.
 - packages/codex-plugin/src/usage.js: read-only Codex quota App Server client.
 - packages/codex-plugin/src/stdio.js: shared owned-child lifetime/stderr; protocol logic stays with ACP/quota.
@@ -19,7 +19,7 @@ ChatGPT 0xOperator owns the orchestration of native HostPlane and WorkerPlane wo
 - test/ and packages/codex-plugin/test/: independent and integration contracts.
 
 ## Contracts
-OpenCode is authoritative for its own native session, agent and model identities. Codex conversations retain native IDs; the plugin owns Codex ACP processes and mode selection, the connector owns MCP translation. Never substitute a Codex CLI model turn for connector RPC, or treat OpenCode token totals as ChatGPT Codex quota. Plugin and connector must agree on the codex-sessions method set and pinned OpenCode version.
+OpenCode is authoritative for its own native session, agent, model and subagent behavior. Codex conversations retain native IDs; the plugin owns direct Codex ACP processes and mode selection, the connector owns MCP translation. Never substitute a Codex CLI model turn for connector RPC, or treat OpenCode token totals as ChatGPT Codex quota. Plugin and connector must agree on the codex-sessions method set and pinned OpenCode version.
 
 ## Working on this repository
 Run npm ci --include=dev from the repository root. Run npm run check:all, npm run test:all and npm run build before a release. Run npm run verify:integration for the source/install RPC/version/loader check (no live service access). Do not edit generated dist/, node_modules/, or immutable release builds. If a console is active, use an isolated source copy rather than replace its toolchain/artifacts. Preserve installed configuration; connector activation does not migrate or reload the native plugin. Live MCP deployment, plugin loading and Git publication are distinct decisions. Every supported release contains the plugin workspace; native local loading uses its src/ directory. Any retained standalone plugin checkout is superseded, not a parallel source owner; retirement requires separate operator acceptance and authorization.

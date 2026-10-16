@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { isZeroCostModel, parseModelRef } from "../src/runtime/projection.js";
+import { parseModelRef } from "../src/runtime/projection.js";
 import { OpenCodeBackend } from "../src/opencode.js";
 import { nativeFixture } from "./native-fixture.js";
 
@@ -13,34 +13,6 @@ test("parseModelRef preserves provider and model IDs", () => {
 
 test("parseModelRef rejects non-canonical IDs", () => {
   assert.throws(() => parseModelRef("muse-spark-1.3-contributor-free"), /provider\/model/);
-});
-
-test("zero-cost classification requires every pricing field in every tier to be exactly zero", () => {
-  const free = { input: 0, output: 0, cache: { read: 0, write: 0 } };
-  for (const field of ["input", "output", "read", "write"] as const) {
-    const paid = structuredClone(free);
-    if (field === "input" || field === "output") paid[field] = 1;
-    else paid.cache[field] = 1;
-    assert.equal(isZeroCostModel({ cost: [free, paid] }), false, field);
-  }
-  assert.equal(isZeroCostModel({ cost: [free, free] }), true);
-});
-
-test("zero-cost classification excludes unknown or malformed pricing", () => {
-  type Cost = Parameters<typeof isZeroCostModel>[0]["cost"];
-  const free = { input: 0, output: 0, cache: { read: 0, write: 0 } };
-  const unknownCosts: unknown[] = [undefined, null, {}, [], [null], [{ input: 0, output: 0 }]];
-  for (const value of [undefined, null, "0", "", false, NaN]) {
-    for (const field of ["input", "output", "read", "write"] as const) {
-      const tier = { ...free, cache: { ...free.cache } };
-      if (field === "input" || field === "output") Object.assign(tier, { [field]: value });
-      else Object.assign(tier.cache, { [field]: value });
-      unknownCosts.push([tier]);
-    }
-  }
-  for (const cost of unknownCosts) {
-    assert.equal(isZeroCostModel({ cost: cost as Cost }), false);
-  }
 });
 
 test("saved approval removal requires the exact project target and verifies absence", async () => {

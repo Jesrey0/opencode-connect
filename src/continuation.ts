@@ -30,9 +30,8 @@ export function pageNextCall(tool: ReadTool, args: Record<string, unknown>, resu
 export function queryNextCall(query: Record<string, unknown>, result: unknown) {
   if (!result || typeof result !== "object") return null;
   const value = result as Record<string, unknown>;
-  const summary = value.permissionSummary as { exceptions?: unknown } | undefined;
   const args = { ...query };
   if (value.location && typeof value.location === "object" && "directory" in value.location && ("cwd" in query || ["agent", "agents", "models", "skills", "providers"].includes(String(query.type)))) args.cwd = value.location.directory;
-  const selected = summary?.exceptions ?? (query.type === "agent" && query.field === "permissions" ? value.permissions : query.type === "permissions" ? value.rules ?? value.pending : result);
+  const selected = query.type === "agent" && query.field === "permissions" ? value.permissions : query.type === "permissions" ? value.rules ?? value.pending : result;
   return pageNextCall("opencode.query", args, selected);
 }

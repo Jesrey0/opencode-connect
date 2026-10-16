@@ -120,7 +120,7 @@ test("MCP removes job actions and enforces OpenCode prompt identity requirements
     assert.equal((valid.structuredContent as any).messageId, null);
     const before = f.requests.length;
     for (const [name, args] of [
-      ["opencode.start", { cwd: "/tmp", task: "missing model" }],
+      ["opencode.start", { task: "missing cwd" }],
       ["opencode.wait", { sessionId: "native-thread" }],
       ["opencode.act", { action: "codexStart", cwd: "/tmp", prompt: "old" }],
     ] as const) assert.equal((await client.callTool({ name, arguments: args })).isError, true);

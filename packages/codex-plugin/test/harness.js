@@ -1,6 +1,7 @@
 /**
  * Test harness: an in-memory stand-in for the OpenCode V2 tool editor and the
- * subset of the plugin Context this plugin uses.
+ * subset of the plugin Context this plugin uses. The built-in subagent is kept
+ * in the editor to prove plugin setup does not transform native tools.
  *
  * The editor mirrors the semantics of the real `ToolEditor` from
  * @opencode/plugin@2.0.24: `get` returns the registered tool plus its id,
@@ -11,7 +12,7 @@
  * error envelope the runtime would.
  */
 
-import { installCodexSubagent } from "../src/index.js"
+import { installCodexSessions } from "../src/index.js"
 
 export function createToolEditor(tools) {
   const registry = new Map(tools.map((tool) => [tool.id ?? tool.name, tool]))
@@ -36,23 +37,19 @@ export function createToolEditor(tools) {
 }
 
 /**
- * Builds a plugin Context whose built-in `subagent` tool records every call.
+ * Builds a plugin Context with direct RPC registration and an untouched native
+ * `subagent` tool that records calls.
  *
  * @param {object} options
- * @param {Array} [options.permissions] Parent agent permission rules.
  * @param {object} [options.pluginOptions] Plugin options (`enableCodex`, ...).
  * @param {object} [options.internals] Injection seam forwarded to the plugin.
  * @param {AbortSignal} [options.signal] Tool-call signal.
- * @param {string[]} [options.agents] IDs reported by ctx.agent.list().
  */
 export async function createHarness({
-  permissions = [{ action: "subagent", resource: "codex", effect: "allow" }],
   pluginOptions = { enableCodex: true },
   internals,
   signal,
   cwd = "/tmp/opencode-project",
-  sessionCwd = cwd,
-  agents = ["build", "general", "explore"],
 } = {}) {
   const nativeCalls = []
   const rpcCalls = []
@@ -77,19 +74,11 @@ export async function createHarness({
   const ctx = {
     options: pluginOptions,
     location: { directory: cwd },
-    session: { get: async ({ sessionID }) => ({ data: { id: sessionID, location: { directory: sessionCwd } } }) },
     tool: {
       transform: async (callback) => {
         callback(editor)
         return { dispose: async () => {} }
       },
-    },
-    agent: {
-      get: async ({ agentID }) => {
-        if (agentID !== "build") throw new Error(`unknown agent ${agentID}`)
-        return { data: { id: agentID, name: "Build", permissions } }
-      },
-      list: async () => ({ data: agents.map((id) => ({ id, name: id })) }),
     },
     rpc: {
       register: async (definition, handlers) => {
@@ -123,7 +112,7 @@ export async function createHarness({
     },
   }
 
-  const dispose = await installCodexSubagent(ctx, internals)
+  const dispose = await installCodexSessions(ctx, internals)
 
   const subagent = editor.get("subagent")
   const callContext = {

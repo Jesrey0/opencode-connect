@@ -10,7 +10,7 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { after, test } from "node:test"
 
-import { resolveCodexAcpEntry, resolveNodeBinary, runCodexTurn, spawnCodexAcp } from "../src/codex.js"
+import { resolveCodexAcpEntry, resolveNodeBinary, spawnCodexAcp } from "../src/codex.js"
 
 const FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "fake-acp-stdio.mjs")
 const SHUTDOWN_FIXTURE = path.join(path.dirname(fileURLToPath(import.meta.url)), "fixtures", "shutdown-acp-stdio.mjs")
@@ -46,24 +46,6 @@ test("the codex-acp entrypoint resolves from the pinned package", () => {
   assert.match(entry, /@agentclientprotocol\/codex-acp\/dist\/index\.js$/)
 })
 
-test("runs a full turn over real spawn + ndjson stdio", async () => {
-  const result = await runCodexTurn({
-    open: () =>
-      Promise.resolve(
-        spawnCodexAcp({ nodePath: "node", entry: FIXTURE, cwd: path.dirname(FIXTURE) }),
-      ),
-    cwd: path.dirname(FIXTURE),
-    prompt: "say hello",
-    timeoutMs: 20000,
-  })
-
-  assert.equal(result.sessionID, "stdio-session")
-  assert.equal(result.text, "stdio ok")
-  assert.equal(result.stopReason, "end_turn")
-  // The fixture starts in agent-full-access; the plugin must force read-only.
-  assert.equal(result.mode, "read-only")
-})
-
 test("the spawned child is reaped and stdin errors do not escape", async () => {
   const transport = spawnCodexAcp({ nodePath: "node", entry: FIXTURE, cwd: path.dirname(FIXTURE) })
   assert.equal(transport.isRunning(), true)
@@ -95,22 +77,4 @@ test("an uncooperative agent and its child are reaped through the owned process 
   assert.equal(transport.isRunning(), false)
   // Signalling only the ACP process would leave its Codex-shaped child running.
   assert.equal(await until(() => !alive(grandchild), 5_000), true, "the owned child was reaped")
-})
-
-test("a missing codex-acp entrypoint rejects on connection loss, not the turn timeout", async () => {
-  let transport
-  try {
-    await assert.rejects(runCodexTurn({
-      open: async () => {
-        transport = spawnCodexAcp({ nodePath: "node", entry: path.join(path.dirname(FIXTURE), "missing.mjs"), cwd: path.dirname(FIXTURE) })
-        return transport
-      },
-      cwd: path.dirname(FIXTURE),
-      prompt: "hi",
-      timeoutMs: 15000,
-    }), { message: "Codex ACP operation failed; details omitted." })
-    assert.equal(transport.isRunning(), false, "the missing entrypoint child exited")
-  } finally {
-    await transport?.close()
-  }
 })

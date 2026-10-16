@@ -156,13 +156,9 @@ test("fresh variant persists before first structured prompt; resume inherits and
   const started = await backend.start({ task: "@test task", model: "openai/a", cwd: "/tmp", variant: "high", ...attachments });
   assert.equal(started.messageId, "canonical-user"); assert.equal(started.modelVariant, "high");
   await assert.rejects(backend.start({ task: "task", model: "openai/a", sessionId: "s", variant: "high" }), /reject overrides/);
-  const resumed = await backend.start({ task: "@test task", model: "openai/a", sessionId: "s", ...attachments });
+  const resumed = await backend.start({ task: "@test task", sessionId: "s", ...attachments });
   assert.equal(resumed.modelVariant, "high");
-  const before = fixture.requests.filter((r) => r.method !== "GET").length;
-  await assert.rejects(backend.start({ task: "task", model: "openai/a", cwd: "/tmp", agents: [{ name: "Administrator" }] }), /canonical/);
-  await assert.rejects(backend.start({ task: "task", model: "openai/a", cwd: "/tmp", skills: [{ id: "missing" }] }), /canonical/);
-  await assert.rejects(backend.start({ task: "task", model: "openai/a", cwd: "/tmp", variant: "missing" }), /variant/);
-  assert.equal(fixture.requests.filter((r) => r.method !== "GET").length, before);
+  assert.equal(fixture.requests.some((r) => ["/api/model", "/api/agent", "/api/skill"].includes(r.path)), false, "session endpoints own model, agent, variant and attachment validation");
 });
 
 test("tool inventory is independently paged and exact evidence excludes provider state/reasoning and native errors", async () => {
@@ -237,7 +233,9 @@ test("inbox mutations preserve targeted identity, reconcile pending state, and v
   for (const action of [{ action: "command" as const, sessionId: "s", name: "native-command", text: "args" }, { action: "invokeSkill" as const, sessionId: "s", skillId: "canonical" }]) {
     const result = await backend.act(action); outputSchemas.act.parse(result); assert.equal(result.identitySupplied, false); assert.equal("messageId" in result, false);
   }
-  await assert.rejects(backend.act({ action: "command", sessionId: "s", name: "raw-rpc", text: "" }), /catalog/);
+  const unlisted = await backend.act({ action: "command", sessionId: "s", name: "raw-rpc", text: "" });
+  assert.equal(unlisted.submitted, true);
+  assert.equal(fixture.requests.some((r) => r.path === "/api/command"), false, "native session command admission owns validation");
   assert.equal(fixture.requests.some((r) => /config|credential|rpc/.test(r.path)), false);
 });
 

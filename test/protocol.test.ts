@@ -24,7 +24,7 @@ const meta = { "io.modelcontextprotocol/protocolVersion": version,
 const authorization = { principal: "operator", clientId: "chatgpt", grantId: "grant", resource: "https://ingress.example/opencode-connect/mcp", scope: "opencode-connect:access", grantContext: "opaque" };
 
 async function httpFixture(native: ReturnType<typeof nativeFixture>, events?: Events, waitTimeoutMs = 20, host = new HostBackend(native.connect)) {
-  const handler = createHttpHandler(new OpenCodeBackend(native.connect, waitTimeoutMs, 0, 0), host, events);
+  const handler = createHttpHandler(new OpenCodeBackend(native.connect, waitTimeoutMs), host, events);
   const app = createMcpExpressApp();
   app.all("/mcp", (req, res) => toNodeHandler(handler)(req, res, req.body));
   const server = app.listen(0, "127.0.0.1");
@@ -285,7 +285,8 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     const failed = await http.send("tools/call", { name: "opencode.start", arguments: { cwd, task: "fixture", model: "missing/model" } });
     assert.equal(failed.reply.result.isError, true);
     assert.deepEqual(failed.reply.result.content, []);
-    assert.match(failed.reply.result.structuredContent.error, /not available/);
+    assert.match(failed.reply.result.structuredContent.error, /readback mismatch/);
+    assert.equal(native.requests.filter((request) => request.path === "/api/model").length, 0, "native session admission owns model validation");
     assert.equal(validators.getValidator(tools.find(tool => tool.name === "opencode.start").outputSchema)(failed.reply.result.structuredContent).valid, true);
     const invalid = await http.send("tools/call", { name: "status", arguments: { alias: "old" } });
     assert.equal(invalid.reply.result.isError, true);

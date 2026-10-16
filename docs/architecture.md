@@ -9,8 +9,8 @@
 There are two runtime components and one source/install lock. This repository is the sole source owner. Any retained standalone checkout is superseded, not a parallel workspace; its retirement is an operator action after independent acceptance and rollback verification.
 
 ## Module ownership
-- src/opencode.ts is the public WorkerPlane facade: connection/catalog settling, admission, wait/act orchestration, runtime routing and query envelopes.
-- src/runtime/query.ts owns the native query union and exhaustive resolution, with catalog-settling functions injected by the facade.
+- src/opencode.ts is the public WorkerPlane facade: admission, wait/act orchestration, runtime routing and query envelopes.
+- src/runtime/query.ts owns the native query union and exhaustive resolution, reading native catalogs directly.
 - src/runtime/result.ts owns the inspection contract and bounded, fingerprint-pinned assistant selection. It imports only projections/bounds/continuations, never the facade.
 - src/runtime/projection.ts owns pure native projections and outcome-evidence shapes. Callers import helpers from their owning modules; the facade does not re-export them.
 - src/codex.ts validates the connector-facing RPC boundary; src/codexRpc.ts owns the importable connector declaration. It never executes plugin code or Codex turns directly.
@@ -19,7 +19,7 @@ There are two runtime components and one source/install lock. This repository is
 
 ## Call path
 External ChatGPT -> opencode-connect HTTP/MCP -> OpenCode 2.0.24 native client -> OpenCode private service.
-For Codex: the connector calls the codex-sessions RPC, registered by the workspace plugin in the OpenCode service. Direct writable Codex uses ACP sessions; OpenCode subagent codex uses foreground read-only ACP. Quota reads call the installed Codex App Server with a short-lived read-only client. OpenCode agents other than codex retain their native execution.
+For Codex: the connector calls the codex-sessions RPC, registered by the workspace plugin in the OpenCode service. Direct Codex uses ACP sessions. The plugin does not intercept OpenCode's native subagent tool. Quota reads call the installed Codex App Server with a short-lived read-only client.
 
 ## Dependency rules
 - The root package pins @opencode/client and the plugin pins @opencode/plugin to exactly the same 2.0.24 release; scripts/verify-integration.mjs enforces this.

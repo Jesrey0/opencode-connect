@@ -250,7 +250,7 @@ test("scalar agent selects execution while plural context forwards unchanged; fr
     if (request.path === "/api/model") return { data: [{ id: "a", providerID: "openai", enabled: true, variants: [] }] };
     if (request.path === "/api/agent") return { data: [{ id: "build", mode: "primary" }, { id: "explore", mode: "subagent" }] };
     if (request.path === "/api/session" && request.method === "POST") {
-      state.agent = String(request.body.agent);
+      if ("agent" in request.body) state.agent = String(request.body.agent);
       return { data: state };
     }
     if (request.path === "/api/session/s") return { data: state };
@@ -267,22 +267,59 @@ test("scalar agent selects execution while plural context forwards unchanged; fr
   assert.equal(first.agent, "build");
   const second = await backend.start({ task: "task", model: "openai/a", cwd: "/tmp", agent: "explore", agents: [{ name: "build" }] });
   assert.equal(second.agent, "explore");
-  const resumed = await backend.start({ task: "task", model: "openai/a", sessionId: "s", agents: [{ name: "build" }] });
+  const resumed = await backend.start({ task: "task", sessionId: "s", agents: [{ name: "build" }] });
   assert.equal(resumed.agent, "explore");
-  const fork = await backend.start({ task: "task", model: "openai/a", forkFromSessionId: "s", agents: [{ name: "build" }] });
+  const fork = await backend.start({ task: "task", forkFromSessionId: "s", agents: [{ name: "build" }] });
   assert.equal(fork.sessionId, "fork");
   assert.equal(fork.agent, "explore");
   const before = fixture.requests.filter((request) => request.method !== "GET").length;
   await assert.rejects(backend.start({ task: "task", model: "openai/a", sessionId: "s", agent: "build" }), /match canonical/);
   await assert.rejects(backend.start({ task: "task", model: "openai/a", forkFromSessionId: "s", agent: "build" }), /match canonical/);
+  await assert.rejects(backend.start({ task: "task", model: "openai/b", sessionId: "s" }), /match canonical/);
+  await assert.rejects(backend.start({ task: "task", model: "openai/b", forkFromSessionId: "s" }), /match canonical/);
   assert.equal(fixture.requests.filter((request) => request.method !== "GET").length, before);
   const creates = fixture.requests.filter((request) => request.path === "/api/session" && request.method === "POST");
-  assert.deepEqual(creates.map((request) => request.body.agent), ["build", "explore"]);
+  assert.deepEqual(creates.map((request) => request.body.agent), [undefined, "explore"]);
+  assert.equal("model" in creates[0].body, true);
+  assert.equal("agent" in creates[0].body, false, "omitted agent remains native-owned");
   assert.equal(creates.some((request) => "agents" in request.body), false);
   const prompts = fixture.requests.filter((request) => request.path.endsWith("/prompt"));
   assert.deepEqual(prompts.map((request) => request.body.agents), [[{ name: "explore" }], [{ name: "build" }], [{ name: "build" }], [{ name: "build" }]]);
   assert.equal(prompts.some((request) => "agent" in request.body), false);
   assert.equal(fixture.requests.filter((request) => request.path.startsWith("/api/agent")).every((request) => request.method === "GET"), true);
+});
+
+test("fresh admission omits model and agent for native defaults and reports only post-prompt native readback", async () => {
+  for (const selected of [true, false]) {
+    const state = session();
+    state.model = undefined;
+    state.agent = undefined;
+    let prompted = false;
+    const fixture = nativeFixture((request) => {
+      if (request.path === "/api/session/active") return { data: {} };
+      if (request.path === "/api/session" && request.method === "POST") {
+        assert.equal("model" in request.body, false);
+        assert.equal("agent" in request.body, false);
+        return { data: state };
+      }
+      if (request.path === "/api/session/s" && request.method === "GET") return { data: state };
+      if (request.path.endsWith("/prompt")) {
+        prompted = true;
+        if (selected) {
+          state.model = { providerID: "native", id: "default", variant: "balanced" };
+          state.agent = "configured-default";
+        }
+        return { data: { id: "user-native", type: "user", sessionID: "s" } };
+      }
+      throw new Error(`unexpected ${request.method} ${request.path}`);
+    });
+    const started = await new OpenCodeBackend(fixture.connect).start({ task: "task", cwd: "/tmp" });
+    assert.equal(prompted, true);
+    assert.equal(started.model, selected ? "native/default" : null);
+    assert.equal(started.modelVariant, selected ? "balanced" : null);
+    assert.equal(started.agent, selected ? "configured-default" : null);
+    assert.equal(fixture.requests.at(-1)?.path, "/api/session/s", "selection is read after prompt admission");
+  }
 });
 
 test("fresh permission omission preserves native policy; explicit rules are persisted verbatim", async () => {
@@ -298,16 +335,15 @@ test("fresh permission omission preserves native policy; explicit rules are pers
   await assert.rejects(backend.act({ action: "setPermissions", sessionId: "s", permissions: reviewer }), /readback mismatch/);
 });
 
-test("model and agent switches validate catalogs separately, read persisted state, and synthetic returns inbox identity", async () => {
+test("model and agent switches delegate validation to native endpoints, read persisted state, and synthetic returns inbox identity", async () => {
   const fixture = workerFixture(); const backend = new OpenCodeBackend(fixture.connect);
-  await assert.rejects(backend.act({ action: "switchModel", sessionId: "s", model: "other/missing" }), /not available/);
-  await assert.rejects(backend.act({ action: "switchAgent", sessionId: "s", agent: "Build" }), /not available/);
   await backend.act({ action: "switchModel", sessionId: "s", model: "openai/b", variant: "high" });
   assert.deepEqual(fixture.state.model, { providerID: "openai", id: "b", variant: "high" });
   assert.equal(fixture.state.agent, "build");
   await backend.act({ action: "switchAgent", sessionId: "s", agent: "explore" });
   assert.equal(fixture.state.agent, "explore");
   assert.equal(fixture.state.model?.id, "b");
+  assert.equal(fixture.requests.some((request) => request.path === "/api/model" || request.path === "/api/agent"), false);
   fixture.persist(false);
   await assert.rejects(backend.act({ action: "switchAgent", sessionId: "s", agent: "build" }), /readback/);
   const synthetic = await backend.act({ action: "synthetic", sessionId: "s", text: "CI finished", delivery: "queue", resume: false });

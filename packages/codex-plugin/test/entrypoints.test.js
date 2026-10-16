@@ -18,7 +18,7 @@ test("local configuration must name src, not the package root", () => {
 })
 
 test("plugin modules expose no helper aliases owned by other modules", () => {
-  for (const name of ["CODEX_AGENT_NAME", "CODEX_DEFAULT_MODE", "CODEX_READ_ONLY_MODE", "CODEX_SESSION_MODES", "DEFAULT_TIMEOUT_MS", "CodexSessionsRpc", "SESSION_RPC_ID", "DEFAULT_USAGE_TIMEOUT_MS", "MAX_USAGE_TIMEOUT_MS", "UsageUnavailableError", "projectUsage", "readCodexUsage"])
+  for (const name of ["CODEX_DEFAULT_MODE", "CODEX_SESSION_MODES", "DEFAULT_TIMEOUT_MS", "CodexSessionsRpc", "SESSION_RPC_ID", "DEFAULT_USAGE_TIMEOUT_MS", "MAX_USAGE_TIMEOUT_MS", "UsageUnavailableError", "projectUsage", "readCodexUsage"])
     assert.equal(Object.hasOwn(entrypoint, name), false, name)
   for (const name of ["CODEX_DEFAULT_MODE", "CODEX_SESSION_MODES", "UsageUnavailableError"])
     assert.equal(Object.hasOwn(direct, name), false, name)

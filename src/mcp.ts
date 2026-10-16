@@ -65,12 +65,12 @@ export const querySchema = exposedUnion("type", [
   z.object({ runtime: runtimeSchema, type: z.literal("skill"), cwd: z.string().min(1).optional(), skillId: z.string().min(1), ...textShape }).strict(),
   z.object({ runtime: runtimeSchema, type: z.literal("tools"), sessionId: z.string().min(1), messageId: z.string().min(1), ...pageShape }).strict(),
   z.object({ runtime: runtimeSchema, type: z.literal("tool"), sessionId: z.string().min(1), messageId: z.string().min(1), toolId: z.string().min(1), field: z.enum(["input", "content", "error"]), contentIndex: z.number().int().min(0).optional(), ...textShape }).strict(),
-  z.object({ runtime: runtimeSchema, type: z.literal("models"), cwd: z.string().min(1).optional(), view: z.enum(["compact", "full"]).optional().describe("Use compact for model selection (IDs, free eligibility, enabled state, modalities and variants); full adds model specifications. Defaults to full."), ...pageShape }),
-  z.object({ runtime: runtimeSchema, type: z.literal("agents"), cwd: z.string().min(1).optional().describe("Select project context; response returns the native resolved location."), view: z.enum(["compact", "full"]).optional().describe("Defaults to compact catalog; full includes instructions and raw permission pages."), includeHidden: z.boolean().optional().describe("Defaults to false; true includes native internal agents."), includePermissionsSummary: z.boolean().optional().describe("Compact ordered-rule summary, excluding session rules, saved approvals and policies."), ...pageShape }).strict(),
-  z.object({ runtime: runtimeSchema, type: z.literal("agent"), cwd: z.string().min(1).optional(), agentId: z.string().min(1), field: z.enum(["system", "description", "permissions", "permissionSummary"]).optional(), ...textShape, ...pageShape }).strict(),
+  z.object({ runtime: runtimeSchema, type: z.literal("models"), cwd: z.string().min(1).optional(), view: z.enum(["compact", "full"]).optional().describe("Compact retains native IDs, enabled state, pricing, input modalities and variants; full adds model specifications. Defaults to full."), ...pageShape }),
+  z.object({ runtime: runtimeSchema, type: z.literal("agents"), cwd: z.string().min(1).optional().describe("Select project context; response returns the native resolved location."), view: z.enum(["compact", "full"]).optional().describe("Defaults to compact catalog; full includes instructions and raw permission pages."), includeHidden: z.boolean().optional().describe("Defaults to false; true includes native internal agents."), ...pageShape }).strict(),
+  z.object({ runtime: runtimeSchema, type: z.literal("agent"), cwd: z.string().min(1).optional(), agentId: z.string().min(1), field: z.enum(["system", "description", "permissions"]).optional(), ...textShape, ...pageShape }).strict(),
   z.object({ runtime: runtimeSchema, type: z.literal("messages"), ...pageShape, sessionId: z.string().min(1), cursor: z.string().min(1).optional(), order: z.enum(["asc", "desc"]).optional(), limit: z.number().int().min(1).max(50).optional() }).refine((input) => !input.cursor || !input.order, { message: "native message cursor cannot be combined with order", path: ["order"] }).meta({ not: { required: ["cursor", "order"] } }),
   z.object({ runtime: runtimeSchema, type: z.literal("message"), sessionId: z.string().min(1), messageId: z.string().min(1), field: z.enum(["summary", "recent"]).optional().describe("Compaction only: page the full native summary or recent text instead of the bounded preview."), ...textShape }),
-  z.object({ runtime: runtimeSchema, type: z.literal("permissions"), sessionId: z.string().min(1), section: z.enum(["rules", "pending", "summary"]).optional().describe("summary compacts current agent plus session rules; saved approvals and policies are excluded."), ...pageShape }).strict(),
+  z.object({ runtime: runtimeSchema, type: z.literal("permissions"), sessionId: z.string().min(1), section: z.enum(["rules", "pending"]).optional().describe("Read raw ordered session rules or native pending requests."), ...pageShape }).strict(),
   z.object({ runtime: runtimeSchema, type: z.literal("savedApprovals"), sessionId: z.string().min(1), ...pageShape }),
   z.object({ runtime: runtimeSchema, type: z.literal("runtime"), cwd: z.string().min(1), ...pageShape }),
   z.object({ runtime: runtimeSchema, type: z.literal("skills"), cwd: z.string().min(1).optional(), ...pageShape }),
@@ -230,20 +230,20 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("opencode.start", {
     title: "Start OpenCode Work",
-    description: "Admit fresh, idle-resume or forked native work. Catalog agents and ordered permissions first; agent selects execution, agents[] supplies prompt context. Select runtime, retain native sessionId and any returned user messageId; reconcile uncertain admission. Codex selects a native mode (fresh default agent), returns messageId null, and supports idle continuation.",
+    description: "Admit fresh, idle-resume or forked native work. OpenCode chooses configured model/agent defaults when omitted; agents[] supplies prompt context. Select runtime, retain native sessionId and any returned user messageId; reconcile uncertain admission. Codex selects a native mode (fresh default agent), returns messageId null, and supports idle continuation.",
     inputSchema: z.object({
       runtime: runtimeSchema,
       mode: z.enum(CODEX_MODES).optional().describe("Codex native preset. Fresh default agent permits workspace writes with automatic approval review. Continuation inherits locally known mode; recovered conversations require an explicit mode."),
       task: z.string().min(1).max(65536).describe("Self-contained objective or next delta for the workstream."),
-      model: z.string().min(1).optional().describe("Required canonical provider/model ID for OpenCode. Codex inherits its runtime model and rejects this field."),
+      model: z.string().min(1).optional().describe("Optional canonical provider/model ID for fresh OpenCode work; omission lets OpenCode choose its configured default. Resume/fork inherit and reject conflicts. Codex rejects this field."),
       cwd: z.string().min(1).optional().describe("Required for fresh work; resume/fork inherit canonical cwd."),
       sessionId: z.string().min(1).optional().describe("Persisted idle session to continue."),
       forkFromSessionId: z.string().min(1).optional().describe("Persisted session to fork into a new workstream."),
       beforeMessageId: z.string().min(1).optional().describe("Optional fork boundary; requires forkFromSessionId."),
-      agent: z.string().min(1).optional().describe("Executing canonical agent ID; fresh defaults to build. Catalog effective agents and ordered rules first. Resume/fork inherit and reject conflicts."),
+      agent: z.string().min(1).optional().describe("Optional executing canonical agent ID for fresh OpenCode work; omission lets OpenCode choose its configured default. Resume/fork inherit and reject conflicts."),
       title: z.string().min(1).optional().describe("OpenCode-only optional title for a fresh session; Codex rejects this field."),
       permissions: permissionsSchema.optional().describe("Canonical ordered session rules for fresh work. Omission preserves native policy. Session rules follow agent rules; broad allow can override agent restrictions."),
-      variant: z.string().min(1).optional().describe("Fresh only: catalog-validated model variant persisted before the first prompt; resume/fork inherit and reject overrides."),
+      variant: z.string().min(1).optional().describe("Fresh only: native model variant persisted before the first prompt; requires model. Resume/fork inherit and reject overrides."),
       ...attachmentShape,
     }).strict()
       // Publish the fresh/resume/fork admission rules the backend already enforces, so
@@ -256,19 +256,19 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
         }
       })
       .refine((input) => input.mode === undefined || input.runtime === "codex", { message: "mode is only valid for Codex", path: ["mode"] })
-      .refine((input) => input.runtime === "codex" || !!input.model, { message: "OpenCode start requires an explicit model", path: ["model"] })
       .refine((input) => !input.sessionId || !input.forkFromSessionId, { message: "sessionId and forkFromSessionId are mutually exclusive", path: ["forkFromSessionId"] })
       .refine((input) => !input.beforeMessageId || !!input.forkFromSessionId, { message: "beforeMessageId requires forkFromSessionId", path: ["beforeMessageId"] })
       .refine((input) => !!input.sessionId || !!input.forkFromSessionId || !!input.cwd, { message: "fresh opencode.start requires an explicit cwd", path: ["cwd"] })
       .refine((input) => !input.cwd || (!input.sessionId && !input.forkFromSessionId), { message: "resume and fork inherit cwd and reject cwd overrides", path: ["cwd"] })
       .refine((input) => !input.permissions || (!input.sessionId && !input.forkFromSessionId), { message: "permissions are only valid for fresh sessions", path: ["permissions"] })
       .refine((input) => input.variant === undefined || (!input.sessionId && !input.forkFromSessionId), { message: "resume and fork inherit canonical variant and reject overrides", path: ["variant"] })
+      .refine((input) => input.variant === undefined || input.model !== undefined, { message: "variant requires an explicit model", path: ["variant"] })
       .meta({
         not: { required: ["sessionId", "forkFromSessionId"] },
-        dependentRequired: { beforeMessageId: ["forkFromSessionId"] },
+        dependentRequired: { beforeMessageId: ["forkFromSessionId"], variant: ["model"] },
         anyOf: [{ required: ["cwd"] }, { required: ["sessionId"] }, { required: ["forkFromSessionId"] }],
         allOf: [
-          { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: codexUnsupportedStartFields.map(field => ({ required: [field] })) } }, else: { required: ["model"], not: { required: ["mode"] } } },
+          { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: codexUnsupportedStartFields.map(field => ({ required: [field] })) } }, else: { not: { required: ["mode"] } } },
           { not: { anyOf: [{ required: ["sessionId", "cwd"] }, { required: ["forkFromSessionId", "cwd"] }] } },
           { not: { anyOf: [{ required: ["sessionId", "permissions"] }, { required: ["forkFromSessionId", "permissions"] }] } },
           { not: { anyOf: [{ required: ["sessionId", "variant"] }, { required: ["forkFromSessionId", "variant"] }] } },

@@ -5,7 +5,7 @@ import * as codex from "../src/codex.js";
 import { nativeFixture } from "./native-fixture.js";
 
 test("backend facades expose no relocated-helper aliases", () => {
-  for (const name of ["OPENCODE_RELEASE", "parseModelRef", "isZeroCostModel", "projectMessage", "projectAgent", "latestResult"])
+  for (const name of ["OPENCODE_RELEASE", "parseModelRef", "projectMessage", "projectAgent", "latestResult"])
     assert.equal(Object.hasOwn(facade, name), false, name);
   assert.equal(Object.hasOwn(codex, "CodexSessionsDefinition"), false);
 });

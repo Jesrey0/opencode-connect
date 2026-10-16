@@ -175,13 +175,11 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
   if (input.type === "runtime") return { runtime: "codex", capabilities: capabilities((await call(client, "status", {})).capabilities) };
   if (input.type === "session") return (await codexInspect(client, { sessionId: id(input.sessionId) })).session;
   if (input.type === "permissions") {
-    if (input.section && !["summary", "pending"].includes(input.section)) throw new ConnectorError("Codex exposes native mode selection and pending requests, not OpenCode permission rules");
+    if (input.section !== "pending") throw new ConnectorError("Codex exposes native pending requests, not OpenCode permission rules");
     const sessionId = id(input.sessionId), value = await call(client, "permissions", { sessionId });
     if (id(value.sessionId) !== sessionId) throw new ConnectorError("Codex answered for a different native session");
     const requests = pending(value.pendingActions, sessionId);
-    if (input.section === "pending") return { sessionId, runtime: "codex", ...page(requests, input) };
-    const caps = capabilities(value.capabilities), selected = mode(value.mode);
-    return { sessionId, runtime: "codex", source: "adapterSelection", mode: selected, modeKnown: selected !== null, policy: selected ? caps.modes.find(m => m.id === selected) ?? null : null, permissionRequests: "operatorWhenRequested", filesystemClient: false, terminalClient: false };
+    return { sessionId, runtime: "codex", ...page(requests, input) };
   }
   if (["messages", "message"].includes(input.type)) {
     if (input.cursor || input.field) throw new ConnectorError("Codex message history uses bounded fingerprint pagination and has no compaction fields");
