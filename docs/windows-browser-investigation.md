@@ -119,3 +119,10 @@ releases, persistent browser profile, browser dependencies and compact recovery
 evidence were retained. The coordinated rollback configuration points to the
 retained rollback plugin workspace. Protected operational evidence is under
 `~/.local/state/opencode-connect/cleanup-20261018T153707Z/`.
+
+Codex accepted managed archival of the completed browser worktree from its owning
+chat, but archival remained queued at final readback. Its verified rebuildable
+`node_modules/` and `dist/` caches were removed, reducing the checkout to 1.8 MiB
+and total reclaimed space to 11.75 GiB. The source checkout and merged branch were
+retained pending managed archive confirmation; no manual worktree removal bypassed
+ownership. All branch commits are already present in remote `main`.
