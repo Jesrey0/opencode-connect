@@ -128,6 +128,36 @@ adapter checks above; that evidence does not establish their execution from Gene
 Chat. The deployment was independently rechecked as healthy version 0.11.0, build
 `6f98ddf8aba904fe`, after receipt of the platform report.
 
+## Linux Chrome stable update
+
+On October 18, 2026, the official `google-chrome-stable` package was upgraded from
+`149.0.7827.196-1` to **`155.0.8059.84-1`**. Both the installed executable and the
+running debugging endpoint reported **Chrome 155.0.8059.84** after relaunch.
+Only the Chrome package was upgraded.
+
+The existing dedicated `opencode-connect/chrome-linux` profile was reused, with
+native session restoration preserving the preexisting user tab. No replacement or
+disposable profile was created. Verification used one temporary tab in that same
+profile and removed only that verification tab afterward.
+
+The installed connector and pinned Nodriver 0.50.6 passed these checks against
+Chrome 155:
+
+- Running-browser detection and reuse without another Chrome launch.
+- Exact target attachment and accessibility snapshots.
+- Fill, click and select with observed success conditions.
+- Same-origin iframe control and bounded JPEG capture.
+- Navigation and rejection of references from the prior document.
+- Controlled Python worker crash, explicit reattachment and safe detach.
+- Preservation of the preexisting user tab after verification cleanup.
+
+Connector health remained good on build `6f98ddf8aba904fe`; no connector or native
+plugin redeployment was needed. Browser restart invalidated earlier leases and
+target identities. The protected operational record is
+`~/.local/state/opencode-connect/chrome-update-20261018.json` (mode 0600).
+The benchmark and original source acceptance above retain their measured Chrome
+149 environment; they were not rerun or relabeled as Chrome 155 results.
+
 ## Supported limits
 
 - Actual Windows Chrome attachment has not been exercised; it requires a reachable
