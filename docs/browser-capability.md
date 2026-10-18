@@ -68,12 +68,19 @@ google-chrome-stable --remote-debugging-address=127.0.0.1 \
 ```
 
 Windows attachment uses `browser:"windows"` explicitly on status, tabs and attach.
-Launch Windows Chrome yourself with a dedicated debugging profile and a distinct
-port, then configure its loopback endpoint. It requires Windows-to-WSL localhost
-reachability, such as mirrored networking. Non-loopback Windows host addresses and
-new tunnels are unsupported. A normal Windows browser session without CDP remains
-unavailable. The connector never launches Windows Chrome or copies profiles or
-authentication state. Actual Windows attachment needs host-specific acceptance.
+The current adapter supports only a traditional HTTP CDP endpoint with
+`/json/version` and `/json/list`, reachable from WSL through loopback. This requires
+WSL-to-Windows localhost reachability, such as mirrored networking. Non-loopback
+Windows host addresses and new tunnels are unsupported.
+
+Chrome's permission-based debugging of an existing everyday profile intentionally
+omits HTTP discovery. That connection flow and a Windows-local transport for WSL
+NAT are not implemented. Launching a separate Windows profile does not provide the
+principal's everyday session. See the [Windows investigation](windows-browser-investigation.md)
+for verified protocol behavior, implementation gaps and acceptance requirements.
+The connector never launches Windows Chrome or copies profiles or authentication
+state. Actual Windows attachment needs host-specific acceptance; successful Linux
+browser acceptance does not establish it.
 
 ## Tools and workflow
 
