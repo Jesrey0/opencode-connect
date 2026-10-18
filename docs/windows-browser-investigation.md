@@ -89,6 +89,33 @@ not claim to run from General Chat.
 
 The actual connected App independently verified production Linux status, discovery,
 observation attachment, accessibility snapshot and detach, and passive Windows
-`approval_required` status. Its conversation catalog still exposed the previous nine
-browser tools, so the new `browser.connect` requires catalog refresh before it can
-be called through that conversation. The production server itself exposes all ten.
+`approval_required` status. After refreshing the connector and starting a branched
+conversation, all ten browser tools, including `browser.connect` and connection-aware
+arguments, were visible in the connected App. This verifies platform catalog
+exposure; the Windows interaction evidence above remains scoped to its actual MCP
+handler test.
+
+## Main integration and release retirement
+
+The complete browser branch was fast-forwarded into `main` and pushed to
+`origin/main`. The active connector remains 0.12.0 build `fddd92c4615a79f7`, and
+`6f98ddf8aba904fe` is the retained rollback release. Both immutable releases contain
+the complete plugin workspace and pass the installed integration verifier.
+
+Native plugin configuration was migrated from the legacy `1ee740f1b0945db7` build
+to the current immutable `fddd92c4615a79f7/packages/codex-plugin/src` path, preserving
+all other configuration and options. Plugin workspace source is byte-identical
+across the old, current and rollback releases. The idle development console was
+closed gracefully, the native location was reloaded and initialized through its
+supported API, and the owning inventory confirmed the current plugin active.
+Native agent discovery, Codex RPC capabilities, read-only quota and a read-only
+direct Codex smoke turn passed. The smoke session and completed browser
+investigation session were deleted through their native APIs. The primary
+checkout's generated build was refreshed.
+
+With no live references remaining, 32 obsolete immutable builds and one abandoned
+staging directory were removed, reclaiming 11.07 GiB. The current and rollback
+releases, persistent browser profile, browser dependencies and compact recovery
+evidence were retained. The coordinated rollback configuration points to the
+retained rollback plugin workspace. Protected operational evidence is under
+`~/.local/state/opencode-connect/cleanup-20261018T153707Z/`.

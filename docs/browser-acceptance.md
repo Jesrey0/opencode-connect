@@ -1,5 +1,10 @@
 # Browser acceptance — October 18, 2026
 
+This report records the initial 0.11.0 acceptance and subsequent Linux Chrome
+update. Its process IDs, configuration and rollback paths describe those cutovers.
+See [Windows compatibility and final integration](windows-browser-investigation.md)
+for 0.12.0 verification, current release ownership, publication and retirement.
+
 ## Source verification
 
 Node 24.16.0, Python 3.12.3, Nodriver 0.50.6, Google Chrome 149.0.7827.196,
@@ -108,7 +113,7 @@ The pre-feature build is `1ee740f1b0945db7`; the final activation's immediate
 previous build is `fd9f39c6a54185ed`. Connector rollback and removal of the added
 browser environment drop-in remain distinct operations.
 
-Git publication has not been performed. The live `/mcp` catalog contains 21 tools,
+At this initial acceptance, Git publication had not been performed. The live `/mcp` catalog contained 21 tools,
 including all nine browser operations. [OpenAI's documented refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)
 includes starting a new conversation after refreshing and checking the metadata.
 
@@ -160,8 +165,10 @@ The benchmark and original source acceptance above retain their measured Chrome
 
 ## Supported limits
 
-- Actual Windows Chrome attachment has not been exercised; it requires a reachable
-  explicitly configured loopback endpoint. Linux remains the default.
+- Windows permission-mode attachment and page actions were subsequently exercised
+  against the existing Windows profile through the 0.12.0 MCP handler. Native
+  browser consent and a configured reachable loopback endpoint are required.
+  Linux remains the default; see the linked compatibility report for evidence.
 - Same-origin iframe control is exercised. Out-of-process iframe AX availability
   is reported explicitly; comprehensive cross-origin frame control is unsupported.
 - Upload roots default to empty in production; enable only directories the
