@@ -58,6 +58,25 @@ preserve legacy HTTP behavior, exercise approval denial and delays longer than
 ten seconds, bound consent deadlines and competing operations, invalidate closed
 sockets and changed metadata, and verify cleanup sends no browser-close command.
 
-Source, automated fixtures, live adapter checks, release deployment and live MCP
-acceptance are separate evidence. Deployment and MCP results are recorded after
-their own checks; the source adapter result alone does not establish them.
+## Release verification
+
+Connector 0.12.0 build `fddd92c4615a79f7` was activated on 2026-10-18 from commit
+`bb6c03f3478398070fcf04afbc07ca77f154053b`. All 349 connector tests and 145 native
+plugin tests passed, with no failures or skips. Type checks, build and source/install
+integration verification passed. The immutable preparation independently built,
+pruned and verified the installation. Native plugin source and configuration were
+unchanged.
+
+The live service reports that exact healthy build and exposes 22 tools, including
+all ten browser tools. Its Windows configuration names the existing mounted Chrome
+user data directory. An unauthenticated production `browser.connect` call was
+rejected before dispatch. Linux Chrome remained reachable on its existing profile.
+The Linux launcher now supplies `--hide-crash-restore-bubble`; its process argument
+was verified in the real Chrome acceptance test. Existing running Chrome is reused;
+the flag takes effect on its next launch.
+
+The immutable release MCP handler passed passive Windows readiness. Its attempt to
+create an owned test tab then timed out waiting for native Chrome approval, before
+any tab was created. Full Windows MCP interaction for this release remains pending
+that browser-native consent. The earlier live adapter result and automated fixture
+checks do not substitute for this final check.
