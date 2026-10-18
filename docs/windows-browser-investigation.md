@@ -72,11 +72,23 @@ all ten browser tools. Its Windows configuration names the existing mounted Chro
 user data directory. An unauthenticated production `browser.connect` call was
 rejected before dispatch. Linux Chrome remained reachable on its existing profile.
 The Linux launcher now supplies `--hide-crash-restore-bubble`; its process argument
-was verified in the real Chrome acceptance test. Existing running Chrome is reused;
-the flag takes effect on its next launch.
+was verified in the real Chrome acceptance test. The dedicated Linux workspace,
+containing only a blank tab, was then gracefully closed and relaunched through the
+live connector. The active process includes the flag, the persistent profile's
+directory identity is unchanged, and Chrome recorded a normal prior exit. Routine
+launch calls continue to reuse the reachable browser.
 
-The immutable release MCP handler passed passive Windows readiness. Its attempt to
-create an owned test tab then timed out waiting for native Chrome approval, before
-any tab was created. Full Windows MCP interaction for this release remains pending
-that browser-native consent. The earlier live adapter result and automated fixture
-checks do not substitute for this final check.
+After an initial consent deadline expired without creating a tab, a fresh explicit
+attempt with a two-minute approval window completed all nine immutable release MCP
+checks against actual Windows Chrome 155.0.8059.85: passive readiness, approved
+connection, filtered discovery, exact target and caller ownership, verified
+fill/click, native screenshot content, verified navigation, transport-only detach
+and Linux readiness. Only the owned fixture tab was selected and closed. This test
+used the immutable release's MCP HTTP handler and a test ingress verifier; it did
+not claim to run from General Chat.
+
+The actual connected App independently verified production Linux status, discovery,
+observation attachment, accessibility snapshot and detach, and passive Windows
+`approval_required` status. Its conversation catalog still exposed the previous nine
+browser tools, so the new `browser.connect` requires catalog refresh before it can
+be called through that conversation. The production server itself exposes all ten.
