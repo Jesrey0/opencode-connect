@@ -108,15 +108,25 @@ The pre-feature build is `1ee740f1b0945db7`; the final activation's immediate
 previous build is `fd9f39c6a54185ed`. Connector rollback and removal of the added
 browser environment drop-in remain distinct operations.
 
-Git publication has not been performed. After the principal reported completing
-the ChatGPT connection refresh, this existing conversation still exposed the
-original 12 tools. A fresh live `/mcp` check returned 21 tools, including all nine
-browser operations. [OpenAI's documented refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)
+Git publication has not been performed. The live `/mcp` catalog contains 21 tools,
+including all nine browser operations. [OpenAI's documented refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)
 includes starting a new conversation after refreshing and checking the metadata.
-The pending platform acceptance therefore requires a new General Chat conversation
-with OpenCode Connect enabled. That final platform browser invocation is **not yet
-verified**; direct installed adapter acceptance and live MCP catalog availability
-do not substitute for it.
+
+## General Chat acceptance
+
+Evidence source: a General Chat report supplied by the principal on October 18,
+2026. The refreshed General Chat session reported all nine browser tools available
+through OpenCode Connect. It reported a running worker, reachable Chrome
+149.0.7827.196 and one Example Domain tab, followed by an observation-only lease,
+an accessibility snapshot with element references, successful detach and preserved
+Chrome. It reported no page mutation or navigation during that check.
+
+This supplies platform catalog and read-only workflow acceptance. Mutating actions,
+uploads and controlled disruption recovery were explicitly not exercised by that
+General Chat check. They passed the independent source/HTTP fixture and installed
+adapter checks above; that evidence does not establish their execution from General
+Chat. The deployment was independently rechecked as healthy version 0.11.0, build
+`6f98ddf8aba904fe`, after receipt of the platform report.
 
 ## Supported limits
 
