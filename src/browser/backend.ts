@@ -42,6 +42,7 @@ export class BrowserBackend {
   private nextStart = 0;
   private closed = false;
   private launchPromise?: Promise<Record<string, unknown>>;
+  private consentPending = false;
   constructor(private readonly options: Options = {}) {
     this.env = options.env ?? process.env;
     this.enabled = options.enabled ?? this.env.OPENCODE_CONNECT_BROWSER === "1";
@@ -53,12 +54,12 @@ export class BrowserBackend {
       this.idle.unref();
     }
   }
-  private stop(message: string) {
+  private stop(message: string, code = "worker_unavailable") {
     const worker = this.worker; this.worker = undefined;
     clearTimeout(this.idle); this.buffer = Buffer.alloc(0);
     for (const item of this.pending.values()) {
       clearTimeout(item.timer); item.cleanup();
-      item.reject(new BrowserError("worker_unavailable", message, item.mutation, item.mutation ? "inconclusive" : "rejected"));
+      item.reject(new BrowserError(code, message, item.mutation, code === "timed_out" ? "timed_out" : item.mutation ? "inconclusive" : "rejected"));
     }
     this.pending.clear();
     // Only the owned Python PID. Chrome is never a member of its process lifetime.
@@ -109,9 +110,13 @@ export class BrowserBackend {
       this.resetIdle();
     });
     try {
-      const hello = await this.send("hello", {}, "connector", 5000);
-      if (hello.protocol !== 1 || hello.nodriver !== "0.50.6") throw new Error();
-    } catch { this.stop("Browser protocol/dependency negotiation failed"); throw new BrowserError("version_mismatch", "Browser protocol or Nodriver version mismatch; rerun browser setup"); }
+      const hello = await this.send("hello", {}, "connector", 10000);
+      if (hello.protocol !== 1 || hello.nodriver !== "0.50.6") throw new BrowserError("version_mismatch", "Browser protocol or Nodriver version mismatch; rerun browser setup");
+    } catch (error) {
+      this.stop("Browser worker negotiation failed");
+      if (error instanceof BrowserError) throw error;
+      throw new BrowserError("worker_unavailable", "Browser worker negotiation failed");
+    }
   }
   private send(method: string, params: Record<string, unknown>, owner: string, timeoutMs: number, signal?: AbortSignal): Promise<Record<string, unknown>> {
     if (signal?.aborted) return Promise.reject(new BrowserError("cancelled", "Browser request cancelled"));
@@ -126,7 +131,7 @@ export class BrowserBackend {
         const item = this.pending.get(id); if (!item) return;
         this.pending.delete(id); item.cleanup();
         reject(new BrowserError("timed_out", "Browser request timed out; attach again and inspect before retrying", method === "action", "timed_out"));
-        this.stop("Browser deadline reached; leases invalidated");
+        this.stop("Browser deadline reached; leases invalidated", "timed_out");
       }, timeoutMs + 500);
       this.pending.set(id, { resolve, reject, timer, cleanup: () => signal?.removeEventListener("abort", abort), mutation: method === "action" });
       signal?.addEventListener("abort", abort, { once: true });
@@ -141,6 +146,9 @@ export class BrowserBackend {
     if (signal?.aborted) throw new BrowserError("cancelled", "Browser request cancelled");
     const parsed = browserInputs[method].safeParse(input);
     if (!parsed.success) throw new BrowserError("invalid_arguments", "Invalid browser arguments; consult the tool schema");
+    if (this.consentPending || (method === "connect" && this.pending.size)) throw new BrowserError("busy", "Browser request in progress; wait for the explicit connection result");
+    const consent = method === "connect";
+    if (consent) this.consentPending = true;
     try {
       if (method === "launch") {
         this.launchPromise ??= this.launch(parsed.data as { headless: boolean }, signal);
@@ -160,7 +168,7 @@ export class BrowserBackend {
         return { ...validated.data, image };
       }
       return validated.data;
-    } finally { this.resetIdle(); }
+    } finally { if (consent) this.consentPending = false; this.resetIdle(); }
   }
   private async launch(input: { headless: boolean }, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const check = () => {
@@ -184,7 +192,7 @@ export class BrowserBackend {
     const profile = join(this.env.XDG_DATA_HOME ?? join(homedir(), ".local/share"), "opencode-connect/chrome-linux");
     await mkdir(profile, { recursive: true, mode: 0o700 });
     check();
-    const args = [`--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=${new URL(url).port}`, `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", ...(input.headless ? ["--headless=new"] : []), "about:blank"];
+    const args = [`--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=${new URL(url).port}`, `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--hide-crash-restore-bubble", ...(input.headless ? ["--headless=new"] : []), "about:blank"];
     // Chrome is deliberately independent of Python and connector shutdown.
     const child = spawn(executable, args, { detached: true, stdio: "ignore", env: { ...this.env, DISPLAY: this.env.DISPLAY ?? ":0" } });
     let failed = false; child.on("error", () => { failed = true; }); child.unref();

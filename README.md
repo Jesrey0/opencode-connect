@@ -3,7 +3,7 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.11.0** projects native OpenCode HostPlane operations
+OpenCode Connect **0.12.0** projects native OpenCode HostPlane operations
 and the canonical WorkerPlane
 into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**.
 

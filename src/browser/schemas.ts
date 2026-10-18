@@ -5,6 +5,7 @@ const id = z.string().min(1).max(256);
 const lease = { leaseId: id };
 const timeout = { timeoutMs: z.number().int().min(100).max(30000).optional() };
 const browser = { browser: z.enum(["linux", "windows"]).default("linux") };
+const connection = { connectionId: id.optional() };
 export const conditionSchema = exposedUnion("type", [
   z.object({ type: z.literal("url"), value: z.url().max(4096) }),
   z.object({ type: z.literal("text"), value: z.string().min(1).max(1000) }),
@@ -24,21 +25,23 @@ export const actionSchema = exposedUnion("action", [
   z.object({ ...action, action: z.literal("navigate"), url: z.url().max(4096).refine(value => /^https?:\/\//.test(value), "HTTP/HTTPS navigation only") }),
 ]);
 export const browserInputs = {
-  status: z.object(browser).strict(),
-  tabs: z.object({ ...browser, filter: z.string().max(200).optional(), maxTabs: z.number().int().min(1).max(100).default(50) }).strict(),
+  status: z.object({ ...browser, ...connection }).strict(),
+  connect: z.object({ browser: z.literal("windows"), authorized: z.literal(true), timeoutMs: z.number().int().min(1000).max(120000).default(60000) }).strict(),
+  tabs: z.object({ ...browser, ...connection, filter: z.string().max(200).optional(), maxTabs: z.number().int().min(1).max(100).default(50) }).strict(),
   launch: z.object({ headless: z.boolean().default(false) }).strict(),
-  attach: z.object({ ...browser, targetId: id, controlMode: z.enum(["observe", "control"]) }).strict(),
+  attach: z.object({ ...browser, ...connection, targetId: id, controlMode: z.enum(["observe", "control"]) }).strict(),
   snapshot: z.object({ ...lease, maxNodes: z.number().int().min(1).max(300).default(100), frameId: id.optional(), filter: z.string().max(200).optional() }).strict(),
   action: actionSchema,
   wait: z.object({ ...lease, ...timeout, condition: conditionSchema }).strict(),
   screenshot: z.object({ ...lease, width: z.number().int().min(100).max(1920).default(1280), height: z.number().int().min(100).max(1080).default(720) }).strict(),
-  detach: z.object(lease).strict(),
+  detach: z.union([z.object(lease).strict(), z.object({ connectionId: id }).strict()]),
 };
 const target = z.object({ targetId: id, title: z.string(), url: z.string(), type: z.literal("page"), leased: z.boolean() }).strict();
 const verification = z.enum(["confirmed", "failed", "inconclusive", "rejected", "timed_out"]);
 export const browserErrorSchema = z.object({ error: z.string(), errorCode: z.string(), verification, dispatched: z.boolean(), mutationMayHaveOccurred: z.boolean() }).strict();
 export const browserOutputs = {
-  status: z.object({ enabled: z.boolean(), worker: z.string(), browser: z.enum(["linux", "windows"]), reachable: z.boolean(), attached: z.boolean(), version: z.string().nullable(), linuxProcesses: z.array(z.object({ pid: z.number(), debugging: z.boolean() }).strict()), lastError: z.string().nullable() }).strict(),
+  status: z.object({ enabled: z.boolean(), worker: z.string(), browser: z.enum(["linux", "windows"]), reachable: z.boolean(), attached: z.boolean(), version: z.string().nullable(), connectionState: z.enum(["not_configured", "unreachable", "approval_required", "connected", "ready"]), linuxProcesses: z.array(z.object({ pid: z.number(), debugging: z.boolean() }).strict()), lastError: z.string().nullable() }).strict(),
+  connect: z.object({ browser: z.literal("windows"), connectionId: id, version: z.string() }).strict(),
   tabs: z.object({ browser: z.enum(["linux", "windows"]), targets: z.array(target), truncated: z.boolean() }).strict(),
   launch: z.object({ browser: z.literal("linux"), reused: z.boolean(), reachable: z.literal(true), pid: z.number().nullable() }).strict(),
   attach: z.object({ leaseId: id, browser: z.enum(["linux", "windows"]), generation: id, controlMode: z.enum(["observe", "control"]), target, ownership: z.literal("external") }).strict(),

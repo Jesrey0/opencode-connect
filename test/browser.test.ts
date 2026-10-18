@@ -117,10 +117,12 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   let blockedRequest: (() => void) | undefined;
   let releaseBlocked: (() => void) | undefined;
   let iframeReloads = 0;
+  let releaseIframe: (() => void) | undefined;
   const host = httpServer((req, res) => {
     res.setHeader("content-type", "text/html");
     if (req.url === "/blocked") { releaseBlocked = () => res.end("Released fixture"); blockedRequest?.(); return; }
-    if (req.url === "/frame-auto") { res.end('<script>setTimeout(()=>location.replace("/frame?auto-reloaded"),500)</script>'); return; }
+    if (req.url === "/frame-auto") { res.end('<script>fetch("/frame-reload-gate").then(()=>location.replace("/frame?auto-reloaded"))</script>'); return; }
+    if (req.url === "/frame-reload-gate") { releaseIframe = () => res.end("Reload now"); return; }
     if (req.url === "/frame?auto-reloaded") { iframeReloads++; res.end("Reloaded iframe"); return; }
     if (req.url === "/ad-reload") { res.end('<title>Iframe reload</title><iframe src="/frame-auto"></iframe>'); return; }
     res.end(req.url === "/frame" ? '<button onclick="document.body.append(\'Frame clicked\')">Frame button</button><button onclick="location.reload()">Reload frame</button>' : req.url === "/next" ? "<title>Next</title><h1>Navigation complete</h1><button>New document</button>" : fixtureHtml);
@@ -147,6 +149,7 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   assert.equal((await backend.call("status", {})).reachable, false);
   const launched = await backend.call("launch", { headless: true });
   chromePid = launched.pid as number; assert.ok(chromePid);
+  assert.ok((await readFile(`/proc/${chromePid}/cmdline`, "utf8")).includes("--hide-crash-restore-bubble"));
   const running = await backend.call("status", {});
   assert.ok((running.linuxProcesses as { pid: number; debugging: boolean }[]).some(item => item.pid === chromePid && item.debugging), "Running Linux Chrome is detected even when it rewrites its process title");
   assert.equal((await backend.call("launch", { headless: true })).reused, true);
@@ -251,7 +254,12 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   await t.test("an unrelated iframe reload cannot confirm main-document navigation", async () => {
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
     await act({ action: "navigate", url: pageUrl + "/ad-reload", expected: { type: "readyState", value: "complete" } });
-    await assert.rejects(backend.call("wait", { leaseId, timeoutMs: 1200, condition: { type: "navigation", fromUrl: pageUrl + "/ad-reload" } }, "owner"), errorCode("timed_out"));
+    assert.ok(releaseIframe, "Iframe is loaded and waiting for the test trigger");
+    const waiting = assert.rejects(backend.call("wait", { leaseId, timeoutMs: 3000, condition: { type: "navigation", fromUrl: pageUrl + "/ad-reload" } }, "owner"), errorCode("timed_out"));
+    // The server releases the fetch; background-tab timer throttling cannot suppress the reload.
+    await sleep(250);
+    releaseIframe();
+    await waiting;
     assert.ok(iframeReloads > 0, "Fixture iframe actually reloaded");
   });
   await t.test("separate HTTP requests share a lease and enforce verified ingress ownership", async () => {

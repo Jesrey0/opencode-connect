@@ -14,6 +14,9 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+from websockets.asyncio.client import connect as WebSocketConnect
+from websockets.exceptions import InvalidStatus
+from websockets.protocol import State
 
 with contextlib.redirect_stdout(sys.stderr):
     from nodriver import cdp
@@ -22,10 +25,11 @@ with contextlib.redirect_stdout(sys.stderr):
 MAX_FRAME = 2 * 1024 * 1024
 MAX_SCREENSHOT = 1024 * 1024
 METHODS = {
-    "hello": set(), "status": {"browser"}, "tabs": {"browser", "filter", "maxTabs"},
-    "attach": {"browser", "targetId", "controlMode"},
+    "hello": set(), "status": {"browser", "connectionId"}, "tabs": {"browser", "connectionId", "filter", "maxTabs"},
+    "connect": {"browser", "authorized", "timeoutMs"},
+    "attach": {"browser", "connectionId", "targetId", "controlMode"},
     "snapshot": {"leaseId", "maxNodes", "frameId", "filter"},
-    "screenshot": {"leaseId", "width", "height"}, "detach": {"leaseId"},
+    "screenshot": {"leaseId", "width", "height"}, "detach": {"leaseId", "connectionId"},
     "wait": {"leaseId", "condition", "timeoutMs"},
     "action": {"leaseId", "action", "authorized", "expected", "timeoutMs", "elementRef", "value", "key", "url", "files", "deltaY"},
 }
@@ -65,14 +69,58 @@ def endpoint(browser):
     if browser not in ("linux", "windows"):
         reject("invalid_browser", "Select linux or windows")
     value = os.environ.get("OPENCODE_CONNECT_BROWSER_" + browser.upper() + "_ENDPOINT")
+    directory = os.environ.get("OPENCODE_CONNECT_BROWSER_WINDOWS_USER_DATA_DIR") if browser == "windows" else None
+    if directory:
+        if value or not Path(directory).is_absolute():
+            reject("invalid_endpoint", "Configure one Windows endpoint or an absolute Chrome user data directory")
+        try:
+            with (Path(directory) / "DevToolsActivePort").open() as file:
+                raw = file.read(4097)
+            lines = raw.splitlines()
+            if len(raw) > 4096 or len(lines) != 2 or not lines[0].isdigit() or not 0 < int(lines[0]) < 65536:
+                raise ValueError()
+            value = "ws://127.0.0.1:" + lines[0] + lines[1]
+        except OSError:
+            reject("not_configured", "Chrome debugging metadata unavailable; enable remote debugging in the selected Windows profile")
+        except ValueError:
+            reject("invalid_endpoint", "Chrome debugging metadata is invalid")
     if not value and browser == "linux":
         value = "http://127.0.0.1:9222"
     if not value:
         reject("not_configured", "Optional Windows Chrome endpoint is not configured")
-    p = urllib.parse.urlsplit(value)
-    if p.scheme != "http" or p.hostname not in ("127.0.0.1", "::1") or not p.port or p.username or p.password or p.query or p.fragment or p.path not in ("", "/"):
-        reject("invalid_endpoint", "CDP endpoint must be a configured loopback IP and explicit port")
-    return value.rstrip("/")
+    try:
+        p = urllib.parse.urlsplit(value)
+        path_ok = p.path in ("", "/") if p.scheme == "http" else browser == "windows" and bool(re.fullmatch(r"/devtools/browser(?:/[A-Za-z0-9-]*)?", p.path))
+        if p.scheme not in ("http", "ws") or p.hostname not in ("127.0.0.1", "::1") or not p.port or p.username or p.password or p.query or p.fragment or not path_ok:
+            raise ValueError()
+    except ValueError:
+        reject("invalid_endpoint", "CDP endpoint must be configured loopback HTTP or a Windows browser WebSocket without credentials")
+    return value.rstrip("/") if p.scheme == "http" else value
+
+
+def connected(conn):
+    return bool(conn and conn.socket and conn.socket.state == State.OPEN)
+
+
+def same_token(candidate, token):
+    # Generated capabilities are ASCII. Malformed caller input must reject
+    # without raising into the connection-cleanup exception path.
+    return isinstance(candidate, str) and candidate.isascii() and secrets.compare_digest(candidate, token)
+
+
+class BrowserConnection(Connection):
+    async def aopen(self):
+        # Only explicit connect/attach may open a socket. Nodriver send must
+        # never silently request consent or reconnect an expired lease.
+        if not connected(self):
+            reject("disconnected", "Chrome connection expired; connect or attach again")
+
+
+class NoRedirectConnect(WebSocketConnect):
+    def process_redirect(self, error):
+        # Validate before any outbound connection, including redirects. The
+        # configured loopback endpoint is the only permitted destination.
+        return error
 
 
 def fetch_json(url):
@@ -110,9 +158,11 @@ class Adapter:
         self.refs = {}
         self.epoch = 0
         self.dispatched = False
+        self.approval = None
 
     async def disconnect(self):
         conn, self.conn = self.conn, None
+        self.approval = None
         self.lease = None
         self.refs.clear()
         if conn:
@@ -132,10 +182,96 @@ class Adapter:
             return info
         except Rejected:
             raise
+        except urllib.error.HTTPError as error:
+            if browser == "windows" and error.code == 404:
+                reject("unsupported_discovery", "Chrome permission mode omits HTTP discovery; configure its browser WebSocket or user data directory")
+            reject("unreachable", "Chrome HTTP debugging endpoint is unavailable")
         except Exception:
-            reject("unreachable", "Chrome debugging endpoint unavailable; inspect browser status or launch Linux Chrome")
+            reject("unreachable", "Chrome debugging endpoint unavailable; inspect the selected browser connection")
 
-    async def targets(self, browser):
+    async def approved(self, args, owner, browser=None, check=True):
+        approval = self.approval
+        if not approval:
+            reject("approval_required", "Call browser.connect explicitly before Windows tab discovery")
+        if not same_token(args.get("connectionId"), approval["id"]) or owner != approval["owner"] or (browser and browser != approval["browser"]):
+            reject("invalid_connection", "Connection unavailable or owned by another caller")
+        if check:
+            try:
+                valid = connected(self.conn) and endpoint(approval["browser"]) == approval["endpoint"]
+            except Rejected:
+                valid = False
+            if not valid:
+                await self.disconnect()
+                reject("disconnected", "Approved Chrome connection changed; connect and attach again")
+        return approval
+
+    async def open_socket(self, url, timeout):
+        conn = BrowserConnection()
+        conn.websocket_url = url
+        self.conn = conn
+        conn.socket = await NoRedirectConnect(url, open_timeout=timeout, proxy=None, max_size=MAX_FRAME, ping_timeout=20)
+        # Reuse the pinned Nodriver listener/transactions with our bounded,
+        # non-redirecting socket. Its normal aopen also reconnects implicitly.
+        conn._listener_task = asyncio.create_task(conn._listener())
+        return conn
+
+    async def connect(self, args, owner):
+        if self.approval and not connected(self.conn):
+            await self.disconnect()
+        if self.lease or self.approval:
+            reject("lease_conflict", "Release the active browser lease or connection before connecting")
+        url = endpoint(args["browser"])
+        if urllib.parse.urlsplit(url).scheme != "ws":
+            reject("approval_unavailable", "Explicit connect requires a configured Windows permission-mode browser WebSocket")
+        try:
+            conn = await self.open_socket(url, args.get("timeoutMs", 60000) / 1000)
+            version = await conn.send(cdp.browser.get_version(), _attach=True)
+            product = str(version[1])
+            if not re.fullmatch(r"(?:Chrome|Chromium)/[0-9.]+", product):
+                reject("invalid_endpoint", "Endpoint is not a supported Chrome browser")
+            self.approval = {"id": secrets.token_urlsafe(32), "owner": owner, "browser": args["browser"], "endpoint": url, "version": product}
+            return {"browser": args["browser"], "connectionId": self.approval["id"], "version": product}
+        except InvalidStatus as error:
+            await self.disconnect()
+            reject("approval_denied" if error.response.status_code == 403 else "connection_failed", "Chrome rejected the connection; verify the browser approval dialog and selected profile")
+        except TimeoutError:
+            await self.disconnect()
+            reject("approval_timeout", "Chrome approval timed out; request a new explicit connection")
+        except BaseException:
+            await self.disconnect()
+            raise
+
+    async def status(self, browser, args, owner):
+        base = {"browser": browser, "attached": False, "version": None, "linuxProcesses": [], "lastError": None}
+        try:
+            url = endpoint(browser)
+            if urllib.parse.urlsplit(url).scheme == "ws":
+                if self.approval and self.approval["browser"] == browser and (not connected(self.conn) or self.approval["endpoint"] != url):
+                    await self.disconnect()
+                if self.approval and owner == self.approval["owner"] and same_token(args.get("connectionId"), self.approval["id"]):
+                    return {**base, "reachable": True, "attached": bool(self.lease), "version": self.approval["version"], "connectionState": "connected"}
+                parsed = urllib.parse.urlsplit(url)
+                try:
+                    _, writer = await asyncio.wait_for(asyncio.open_connection(parsed.hostname, parsed.port), 2)
+                    writer.close()
+                    await asyncio.wait_for(writer.wait_closed(), 1)
+                except (OSError, TimeoutError):
+                    reject("unreachable", "Windows Chrome loopback endpoint is unavailable")
+                return {**base, "reachable": True, "connectionState": "approval_required", "lastError": "Explicit browser.connect approval is required before tab discovery"}
+            info = await self.discover(browser)
+            if self.lease and self.lease["browser"] == browser and self.lease["identity"] != info["webSocketDebuggerUrl"]:
+                await self.disconnect()
+            return {**base, "reachable": True, "attached": bool(self.lease and self.lease["browser"] == browser), "version": info["Browser"], "connectionState": "ready"}
+        except Rejected as error:
+            if (self.lease and self.lease["browser"] == browser) or (self.approval and self.approval["browser"] == browser):
+                await self.disconnect()
+            return {**base, "reachable": False, "connectionState": "not_configured" if error.code == "not_configured" else "unreachable", "lastError": error.message}
+
+    async def targets(self, browser, args=None, owner=None):
+        if urllib.parse.urlsplit(endpoint(browser)).scheme == "ws":
+            await self.approved(args or {}, owner, browser)
+            targets = await self.conn.send(cdp.target.get_targets(), _attach=True)
+            return [{"id": str(row.target_id), "type": row.type_, "title": row.title, "url": row.url} for row in targets if row.type_ == "page"]
         await self.discover(browser)
         try:
             rows = await asyncio.to_thread(fetch_json, endpoint(browser) + "/json/list")
@@ -154,14 +290,19 @@ class Adapter:
 
     async def guard(self, args, owner, control=False):
         lease = self.lease
-        if not lease or not secrets.compare_digest(str(args.get("leaseId", "")), lease["id"]) or owner != lease["owner"]:
+        if not lease or not same_token(args.get("leaseId"), lease["id"]) or owner != lease["owner"]:
             reject("invalid_lease", "Lease unavailable or owned by another caller; attach explicitly")
         if control and lease["mode"] != "control":
             reject("observe_only", "Observe lease does not permit browser actions")
         try:
-            info = await self.discover(lease["browser"])
-            if info["webSocketDebuggerUrl"] != lease["identity"] or not self.conn or not self.conn.socket or self.conn.socket.close_code is not None:
-                reject("disconnected", "Browser identity or connection changed; attach again")
+            if self.approval:
+                approval = await self.approved({"connectionId": lease["connection"]}, owner, lease["browser"])
+                if approval["id"] != lease["identity"]:
+                    reject("disconnected", "Browser connection changed; attach again")
+            else:
+                info = await self.discover(lease["browser"])
+                if info["webSocketDebuggerUrl"] != lease["identity"] or not connected(self.conn):
+                    reject("disconnected", "Browser identity or connection changed; attach again")
             row = await self.current()
             if urllib.parse.urlsplit(row.get("url", "")).scheme not in ("http", "https", "about"):
                 reject("unsupported_page", "Only web pages and about:blank are supported")
@@ -400,17 +541,11 @@ class Adapter:
             return {"protocol": 1, "nodriver": importlib.metadata.version("nodriver")}
         browser = args.get("browser", "linux")
         if method == "status":
-            try:
-                info = await self.discover(browser)
-                if self.lease and self.lease["browser"] == browser and self.lease["identity"] != info["webSocketDebuggerUrl"]:
-                    await self.disconnect()
-                return {"browser": browser, "reachable": True, "attached": bool(self.lease and self.lease["browser"] == browser), "version": info["Browser"], "linuxProcesses": [], "lastError": None}
-            except Rejected as error:
-                if self.lease and self.lease["browser"] == browser:
-                    await self.disconnect()
-                return {"browser": browser, "reachable": False, "attached": False, "version": None, "linuxProcesses": [], "lastError": error.message}
+            return await self.status(browser, args, owner)
+        if method == "connect":
+            return await self.connect(args, owner)
         if method == "tabs":
-            rows = await self.targets(browser)
+            rows = await self.targets(browser, args, owner)
             summaries, budget, matched = [], 0, 0
             for row in rows:
                 item = self.summary(row)
@@ -426,26 +561,36 @@ class Adapter:
         if method == "attach":
             if self.lease:
                 reject("lease_conflict", "An active lease already owns this adapter; detach it before attaching")
-            info = await self.discover(browser)
-            rows = await self.targets(browser)
+            url = endpoint(browser)
+            permission = urllib.parse.urlsplit(url).scheme == "ws"
+            if self.approval and not permission:
+                reject("lease_conflict", "Release the approved browser connection before attaching another browser")
+            approval = await self.approved(args, owner, browser) if permission else None
+            info = None if permission else await self.discover(browser)
+            rows = await self.targets(browser, args, owner)
             row = next((row for row in rows if row["id"] == args["targetId"]), None)
             if not row:
                 reject("target_missing", "Exact page target ID unavailable")
             if row.get("url") != "about:blank" and urllib.parse.urlsplit(row.get("url", "")).scheme not in ("http", "https"):
                 reject("unsupported_page", "Attach supports HTTP/HTTPS pages and about:blank")
-            self.conn = Connection(target=cdp.target.TargetID(args["targetId"]))
-            self.conn.websocket_url = info["webSocketDebuggerUrl"]
             try:
-                await self.conn.attach()
+                if not permission:
+                    await self.open_socket(info["webSocketDebuggerUrl"], 10)
+                self.conn.target = cdp.target.TargetID(args["targetId"])
+                await self.conn.attach(cdp.target.TargetID(args["targetId"]))
                 await self.conn.send(cdp.page.enable())
                 await self.conn.send(cdp.dom.enable())
                 self.conn.add_handler(cdp.dom.DocumentUpdated, self.invalidate)
                 self.conn.add_handler(cdp.page.FrameNavigated, self.invalidate)
-                self.lease = {"id": secrets.token_urlsafe(32), "owner": owner, "browser": browser, "target": args["targetId"], "identity": info["webSocketDebuggerUrl"], "mode": args["controlMode"]}
+                self.lease = {"id": secrets.token_urlsafe(32), "owner": owner, "browser": browser, "target": args["targetId"], "identity": approval["id"] if approval else info["webSocketDebuggerUrl"], "connection": approval["id"] if approval else None, "mode": args["controlMode"]}
                 return {"leaseId": self.lease["id"], "browser": browser, "generation": self.generation(await self.frames()), "controlMode": args["controlMode"], "target": self.summary(row), "ownership": "external"}
             except Exception:
                 await self.disconnect()
                 raise
+        if method == "detach" and "connectionId" in args:
+            await self.approved(args, owner, check=False)
+            await self.disconnect()
+            return {"detached": True, "chromePreserved": True}
         await self.guard(args, owner, method == "action")
         if method == "detach":
             await self.disconnect()
@@ -470,20 +615,25 @@ def validate(method, args):
     if method not in METHODS or not isinstance(args, dict) or set(args) - METHODS[method]:
         reject("invalid_arguments", "Unknown browser operation or argument")
     if "browser" in args:
-        endpoint(args["browser"])
-    for field, minimum, maximum in (("maxNodes", 1, 300), ("maxTabs", 1, 100), ("width", 100, 1920), ("height", 100, 1080), ("timeoutMs", 100, 30000)):
+        if args["browser"] not in ("linux", "windows"):
+            reject("invalid_arguments", "Invalid browser selection")
+    for field, minimum, maximum in (("maxNodes", 1, 300), ("maxTabs", 1, 100), ("width", 100, 1920), ("height", 100, 1080), ("timeoutMs", 1000 if method == "connect" else 100, 120000 if method == "connect" else 30000)):
         if field in args and (type(args[field]) is not int or not minimum <= args[field] <= maximum):
             reject("invalid_arguments", "Invalid browser argument bound")
     if "filter" in args and (not isinstance(args["filter"], str) or len(args["filter"]) > 200):
         reject("invalid_arguments", "Invalid observation filter")
-    for field in ("leaseId", "targetId", "elementRef", "frameId"):
+    for field in ("leaseId", "connectionId", "targetId", "elementRef", "frameId"):
         if field in args and (not isinstance(args[field], str) or not 0 < len(args[field]) <= 256):
             reject("invalid_arguments", "Invalid browser identity")
-    required = {"attach": ("targetId", "controlMode"), "snapshot": ("leaseId",), "detach": ("leaseId",), "wait": ("leaseId", "condition"), "screenshot": ("leaseId",), "action": ("leaseId", "action", "authorized")}
+    required = {"connect": ("browser", "authorized"), "attach": ("targetId", "controlMode"), "snapshot": ("leaseId",), "wait": ("leaseId", "condition"), "screenshot": ("leaseId",), "action": ("leaseId", "action", "authorized")}
     if any(field not in args for field in required.get(method, ())):
         reject("invalid_arguments", "Missing required browser argument")
     if method == "attach" and args["controlMode"] not in ("observe", "control"):
         reject("invalid_arguments", "Invalid browser control mode")
+    if method == "connect" and (args["browser"] != "windows" or args["authorized"] is not True):
+        reject("invalid_arguments", "Windows connection requires explicit task authorization")
+    if method == "detach" and (("leaseId" in args) == ("connectionId" in args)):
+        reject("invalid_arguments", "Detach requires exactly one lease or connection handle")
     if method == "wait":
         validate_condition(args["condition"])
     if method == "action":
@@ -519,7 +669,7 @@ async def main():
                 deadline = request.get("deadline")
                 if type(deadline) not in (int, float):
                     reject("invalid_protocol", "Browser deadline required")
-                remaining = min(30, deadline / 1000 - time.time())
+                remaining = min(120 if method == "connect" else 30, deadline / 1000 - time.time())
                 if remaining <= 0:
                     raise TimeoutError()
                 async with asyncio.timeout(remaining):

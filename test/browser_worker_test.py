@@ -23,7 +23,7 @@ class BoundaryTests(unittest.TestCase):
 class OutputTests(unittest.IsolatedAsyncioTestCase):
     async def test_large_tab_lists_truncate_by_bytes_and_can_be_narrowed(self):
         class Adapter(worker.Adapter):
-            async def targets(self, browser):
+            async def targets(self, browser, *args):
                 return [{"id": str(index), "title": "target-" + str(index) + "界" * 190, "url": "https://example.test/" + "界" * 2048} for index in range(100)]
         adapter = Adapter()
         result = await adapter.run("tabs", {"maxTabs": 100}, "owner")

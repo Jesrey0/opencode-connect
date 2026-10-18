@@ -1,95 +1,63 @@
-# Everyday Windows Chrome connection
+# Everyday Windows Chrome compatibility
 
-Investigated on 2026-10-18. The current Windows selector supports a traditional HTTP
-CDP endpoint already reachable through WSL loopback. It does not implement Chrome's
-permission-based connection to the principal's everyday profile or a transport
-across WSL NAT. Both are required for the intended Windows workflow.
+OpenCode Connect 0.12.0 supports Chrome's permission-based WebSocket connection to
+the principal's existing Windows browser. Linux remains the default. Windows uses
+native mirrored-network loopback from WSL; no Windows helper, port proxy, extra
+profile or networking change is required.
 
-## Verified observations
+## Protocol and lifecycle
 
-| Surface | Evidence |
-| --- | --- |
-| Windows listener | Chrome PID 6292 listening on `127.0.0.1:56005` during initial inspection. |
-| HTTP discovery | Both `/json/version` and `/json/list` returned 404 from Windows. |
-| Native discovery | The existing profile's `DevToolsActivePort` contained a port and browser WebSocket path. |
-| WSL network | `wslinfo --networking-mode` returned `nat`; WSL loopback refused port 56005 and the Windows gateway connection timed out. |
-| Connector configuration | Browser support enabled; Windows endpoint unset. |
-| Windows-local connection | A Windows child process launched from WSL connected using the published WebSocket path and received `Browser.getVersion`: `Chrome/155.0.8059.85`, CDP 1.3. |
-| Diagnostic boundary | Only `Browser.getVersion` was sent. No targets were enumerated or attached. The socket closed normally without a browser-close command. |
-| Existing Linux runtime | Linux Chrome remained reachable at version 155.0.8059.84; connector build `6f98ddf8aba904fe` returned HTTP 200 health. |
+Chrome approval mode deliberately returns HTTP 404 for JSON discovery and uses
+ordinary CDP over a browser WebSocket. It accepts the socket only after browser
+approval. See the [Chromium handler](https://github.com/chromium/chromium/blob/155.0.8059.82/content/browser/devtools/devtools_http_handler.cc#L585).
+The relevant handler and consent source was compared between 155.0.8059.82 and
+155.0.8059.85 and was identical.
 
-An earlier Windows-local attempt returned 403 without a visible prompt. Its exact
-cause remains inconclusive; the subsequent successful connection establishes that
-the Windows WebSocket path can work. Windows PowerShell's .NET client also rejected
-an optional custom User-Agent locally before an initial connection attempt. The
-successful request used default headers and no proxy. A private fixture confirmed
-that this client sends no Origin header by default.
+The connector reads bounded `DevToolsActivePort` metadata from the explicitly
+configured mounted user data directory, matching [Puppeteer's discovery](https://github.com/puppeteer/puppeteer/blob/ff3103c8e46f1b97e00a6a4a72f8e2509cbc796f/packages/puppeteer-core/src/common/BrowserConnector.ts#L119).
+An exact configured loopback WebSocket is also supported. Passive status uses TCP
+readiness and never requests consent. Explicit `browser.connect` acquires approval,
+then a private caller-bound connection handle permits target discovery and exact
+tab attachment. Both use the same socket and existing Nodriver CDP machinery.
 
-The diagnostic did not launch or close Chrome, edit browser or service configuration,
-or create or copy a profile. Windows-local connection success is
-distinct from connector attachment and page-action acceptance, which remain unverified.
+The socket's generation is part of capability ownership: a browser URL alone does
+not revive a connection. Loss or replacement of the socket or discovery metadata
+invalidates leases and references. Recovery requires a fresh explicit connection,
+new tab selection and a new snapshot. Uncertain mutations are never replayed.
+Detach, cancellation and worker/connector cleanup close transport resources while
+preserving Chrome and its profile. Legacy HTTP discovery remains supported.
 
-## Protocol and implementation gaps
+## Verified environment
 
-Chrome's approval mode deliberately returns HTTP 404 for JSON discovery. It uses
-ordinary CDP over a browser WebSocket and accepts the connection after browser
-approval. Its approval branch does not enforce a GUID suffix as browser identity.
-See the [Chromium handler](https://github.com/chromium/chromium/blob/155.0.8059.82/content/browser/devtools/devtools_http_handler.cc#L585).
-The relevant handler and consent implementations were compared between 155.0.8059.82
-and 155.0.8059.85 and were identical.
+The initial 2026-10-18 investigation observed WSL NAT, where Windows loopback was
+unreachable. The environment subsequently changed to mirrored networking.
+Readback confirmed `wslinfo --networking-mode` returned `mirrored`, TCP to
+`127.0.0.1:56005` succeeded from WSL, and `/json/version` returned the expected 404.
+The remaining defect was application compatibility. See [Microsoft's networking
+contract](https://learn.microsoft.com/en-us/windows/wsl/networking).
 
-Official Puppeteer discovers this socket by reading the port and path from
-`DevToolsActivePort`, then connects directly. See
-[Puppeteer discovery](https://github.com/puppeteer/puppeteer/blob/ff3103c8e46f1b97e00a6a4a72f8e2509cbc796f/packages/puppeteer-core/src/common/BrowserConnector.ts#L119).
-WSL NAT and mirrored networking expose different localhost behavior; see
-[Microsoft's networking contract](https://learn.microsoft.com/en-us/windows/wsl/networking).
+A Windows-local diagnostic established a browser WebSocket and read
+`Browser.getVersion` as Chrome 155.0.8059.85, CDP 1.3. An earlier 403 without a
+visible prompt remains unexplained; subsequent connection success does not
+establish its cause. No private targets were enumerated by that diagnostic.
 
-The current adapter has these gaps:
+## Acceptance
 
-- `src/browser/worker.py` accepts only an HTTP loopback base, requires
-  `/json/version` in `discover`, and requires `/json/list` in `targets`. Each guarded
-  page operation repeats HTTP discovery. A WebSocket-only endpoint cannot pass.
-- No Windows-local transport exists. Changing the configured port cannot make the
-  Windows loopback listener reachable from this NAT environment.
-- Approval precedes tab discovery, but the public attachment tool requires an
-  already-discovered exact target. There is no explicit browser-connection phase
-  with a bounded human-consent deadline. Passive status must remain non-activating.
-- Endpoint-URL equality is insufficient identity in approval mode. An approved
-  socket/session needs its own generation; disconnect must invalidate leases and
-  references without automatically reconnecting an old lease.
-- Current acceptance exercises Linux's traditional debugging server. It does not
-  cover Windows approval, HTTP-404 discovery, NAT transport, consent denial or
-  Windows socket replacement. The generic unreachable diagnostic also incorrectly
-  suggests launching Linux Chrome for a Windows discovery failure.
+The updated source adapter was exercised over the actual mirrored connection
+against an explicitly created test tab in the existing Windows profile. It passed
+passive readiness, approval, CDP target discovery, exact attachment, accessibility
+snapshot, fill/click with an observed application result, selection, bounded
+screenshot, navigation, stale-reference rejection and transport-only detach.
+Only the owned fixture tab was selected and closed. No profile was created or
+copied, and no networking configuration changed.
 
-The discovery failure was reproduced against the actual worker using a private
-HTTP-404 fixture: status reported unreachable, tab discovery rejected with
-`unreachable`, and a directly configured WebSocket URL rejected as `invalid_endpoint`.
-With no Windows endpoint configured, status reports that limitation and tab
-discovery rejects with `not_configured` before attempting a connection.
+Automated permission-mode fixtures use the pinned Nodriver dependency and a local
+WebSocket server that returns HTTP 404 for discovery. Cases distinguish passive
+status from consent, enforce owner/token and lease identity, verify socket reuse,
+preserve legacy HTTP behavior, exercise approval denial and delays longer than
+ten seconds, bound consent deadlines and competing operations, invalidate closed
+sockets and changed metadata, and verify cleanup sends no browser-close command.
 
-## Required implementation and acceptance
-
-Keep Linux as the default and retain the existing Nodriver page-action layer,
-exact-target leases, authorization, bounded observations and mutation verification.
-The page-action layer's compatibility with an approved Windows target still needs
-live acceptance.
-
-Add a Windows-local connection helper over private, owned process pipes. It should
-discover the selected existing Chrome instance locally and connect to its loopback
-WebSocket. WSL can launch such a Windows process and receive CDP output, as the
-diagnostic demonstrated. This avoids changing WSL networking, exposing a debugger
-to the LAN or substituting another profile.
-
-Provide explicit consent acquisition before tab enumeration. Reuse the approved
-connection for `Browser.getVersion`, `Target.getTargets` and exact
-`Target.attachToTarget`; preserve observation/control modes and the single-lease
-contract. Detach, cancellation and worker cleanup close owned transport resources
-while preserving Chrome. Report missing discovery, transport failure, pending or
-denied approval, and lost connection distinctly.
-
-Acceptance must cover approval and denial; passive status; changed port and
-browser identity; socket loss and helper/connector termination; lease conflicts;
-stale references; uncertain mutations; actual Windows tab selection and page
-verification; and preservation of the default Linux workflow. Windows page tests
-require a deliberately selected target and their own authorized scope.
+Source, automated fixtures, live adapter checks, release deployment and live MCP
+acceptance are separate evidence. Deployment and MCP results are recorded after
+their own checks; the source adapter result alone does not establish them.

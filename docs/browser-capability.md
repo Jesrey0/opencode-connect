@@ -8,7 +8,7 @@ dedicated Linux Chrome profile. Windows Chrome attachment is optional.
 ## Setup
 
 Requirements: Node 24, Linux Python 3.11 or newer with `venv`/`pip`, and Chrome or
-Chromium. The tested host uses Python 3.12 and Google Chrome 149. Run:
+Chromium. The tested host uses Python 3.12 and Google Chrome 155. Run:
 
 ```sh
 npm ci --include=dev
@@ -32,16 +32,18 @@ Native Codex plugin configuration does not change for browser activation.
 | --- | --- |
 | `OPENCODE_CONNECT_BROWSER` | Disabled; `1` exposes browser tools. |
 | `OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT` | `http://127.0.0.1:9222`; configured Linux CDP endpoint. |
-| `OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT` | Unset; optional Windows CDP endpoint reachable through WSL loopback. |
+| `OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT` | Unset; optional loopback HTTP CDP endpoint or permission-mode browser WebSocket. |
+| `OPENCODE_CONNECT_BROWSER_WINDOWS_USER_DATA_DIR` | Unset; absolute mounted Windows Chrome user data directory. Reads only its bounded `DevToolsActivePort` metadata to discover the current loopback WebSocket; configure this or the Windows endpoint, not both. |
 | `OPENCODE_CONNECT_BROWSER_CHROME` | Auto-detect Linux Chrome/Chromium executable; optional absolute executable path. |
 | `OPENCODE_CONNECT_BROWSER_PYTHON` | Managed environment; optional preinstalled Python with the exact Nodriver version. |
 | `OPENCODE_CONNECT_BROWSER_SETUP_PYTHON` | `python3`; interpreter used for explicit environment creation. |
 | `OPENCODE_CONNECT_BROWSER_UPLOAD_ROOTS` | Empty (uploads denied); colon-separated absolute authorized directories. |
 | `XDG_DATA_HOME` | `~/.local/share`; managed environment and dedicated Chrome profile parent. |
 
-Debug endpoints must use an explicit loopback IP and port, HTTP, and no credentials,
-path, query or fragment. Discovery rejects redirects and a websocket outside the
-configured host/port. Never expose or proxy CDP publicly.
+Debug endpoints require an explicit loopback IP and port without credentials,
+query or fragment. HTTP discovery accepts no path and rejects redirects or a
+WebSocket outside the configured host/port. Windows permission-mode WebSockets
+accept only `/devtools/browser` paths. Never expose or proxy CDP publicly.
 
 ## Linux and optional Windows Chrome
 
@@ -56,9 +58,13 @@ reachable instance; otherwise it starts Linux Chrome with a dedicated persistent
 `opencode-connect/chrome-linux` profile under the data directory. It leaves the
 browser sandbox enabled, uses loopback CDP, and opens `about:blank`. The default is
 headed Chrome on the configured display (`DISPLAY=:0` fallback for WSLg);
-`headless:true` is available for host tests. Launching never attaches a tab. Browser
-shutdown remains the principal's responsibility, including browsers launched here.
-Detach and connector termination preserve them.
+`headless:true` is available for host tests. Launching never attaches a tab.
+The launcher passes `--hide-crash-restore-bubble` to suppress the startup recovery
+popup without rewriting profile state or disabling session recovery.
+0xOperator operates the persistent Linux browser within the authorized objective.
+Shutdown or restart is a deliberate lifecycle operation; detach, worker cleanup
+and connector termination preserve the browser, tabs and profile. Launch is on
+demand and does not explicitly request restoration of prior tabs.
 
 For an independently launched Linux debugging session:
 
@@ -67,20 +73,28 @@ google-chrome-stable --remote-debugging-address=127.0.0.1 \
   --remote-debugging-port=9222 --user-data-dir="$HOME/.local/share/chrome-operator"
 ```
 
-Windows attachment uses `browser:"windows"` explicitly on status, tabs and attach.
-The current adapter supports only a traditional HTTP CDP endpoint with
-`/json/version` and `/json/list`, reachable from WSL through loopback. This requires
-WSL-to-Windows localhost reachability, such as mirrored networking. Non-loopback
-Windows host addresses and new tunnels are unsupported.
+Windows attachment explicitly selects the principal's existing daily Chrome.
+Enable its browser-native remote debugging and configure the mounted user data
+directory, or its exact loopback browser WebSocket. Mirrored networking provides
+native WSL-to-Windows loopback reachability; no Windows helper, port proxy or WSL
+networking change is needed. A separate Windows profile does not provide that
+daily session. The connector never launches Windows Chrome or copies profile or
+authentication state.
 
-Chrome's permission-based debugging of an existing everyday profile intentionally
-omits HTTP discovery. That connection flow and a Windows-local transport for WSL
-NAT are not implemented. Launching a separate Windows profile does not provide the
-principal's everyday session. See the [Windows investigation](windows-browser-investigation.md)
-for verified protocol behavior, implementation gaps and acceptance requirements.
-The connector never launches Windows Chrome or copies profiles or authentication
-state. Actual Windows attachment needs host-specific acceptance; successful Linux
-browser acceptance does not establish it.
+Permission mode intentionally omits `/json/*`. Status performs a passive TCP check
+and reports `approval_required`; it never attempts a WebSocket handshake. Call
+`browser.connect` with explicit authorization, then accept Chrome's own Allow
+remote debugging dialog. Consent has a separate deadline of up to 120 seconds;
+other browser requests return `busy` while it is pending. The returned private
+`connectionId` binds the approved socket to its caller. Supply it to Windows tabs
+and attach; discovery uses `Browser.getVersion` and `Target.getTargets`, then exact
+target attachment reuses that socket. It does not request consent again.
+
+Detach with `leaseId` after selecting a page, or `connectionId` before selection.
+Both close only the transport and release control. Socket loss, metadata changes,
+worker expiry or connector restart invalidate capabilities and require a new
+explicit connect; an endpoint URL cannot revive an old lease. Legacy Windows HTTP
+CDP remains supported. See [Windows compatibility evidence](windows-browser-investigation.md).
 
 ## Tools and workflow
 
@@ -88,15 +102,16 @@ Names below are the native MCP names; ChatGPT may project punctuation differentl
 
 | Tool | Arguments / result |
 | --- | --- |
-| `browser.status` | Optional `browser` (`linux` default); reachability and worker diagnostics. |
-| `browser.tabs` | Optional `browser`, `filter` and `maxTabs` (1–100, default 50); exact target IDs, sanitized URLs/titles, lease flags and honest truncation. Narrow a truncated list with a title/URL filter. |
+| `browser.status` | Optional `browser` (`linux` default) and `connectionId`; passive reachability, `connectionState` and worker diagnostics. |
+| `browser.connect` | Explicit `browser:"windows"`, `authorized:true`, optional `timeoutMs` (1000–120000, default 60000); request Chrome consent and return private `connectionId` plus version. |
+| `browser.tabs` | Optional `browser`, `connectionId`, `filter` and `maxTabs` (1–100, default 50); exact target IDs, sanitized URLs/titles, lease flags and honest truncation. Narrow a truncated list with a title/URL filter. |
 | `browser.launch` | Optional `headless` (default false); `reused`, reachability and new process ID when applicable. Linux only. |
-| `browser.attach` | Exact `targetId`, `controlMode:observe|control`, optional `browser`; opaque `leaseId`, generation and target summary. |
+| `browser.attach` | Exact `targetId`, `controlMode:observe|control`, optional `browser` and `connectionId`; opaque `leaseId`, generation and target summary. |
 | `browser.snapshot` | `leaseId`, optional `maxNodes` (1–300, default 100), `frameId`, name/role substring `filter`; compact AX roles, names, states, references, document generation, frame summaries, truncation and observation errors. |
 | `browser.action` | `leaseId`, `authorized:true`, action-specific arguments, optional `expected`, `timeoutMs` (100–30000); dispatch/completion, verification, URL and evidence. |
 | `browser.wait` | `leaseId`, structured `condition`, optional `timeoutMs`; deadline-bounded observed condition. |
 | `browser.screenshot` | `leaseId`, optional `width`/`height` (default 1280×720; maximum 1920×1080); JPEG image content, maximum 1 MiB, no file persistence. |
-| `browser.detach` | Exact `leaseId`; release the connection while preserving Chrome and its tabs. |
+| `browser.detach` | Exactly one `leaseId` or `connectionId`; release control and transport while preserving Chrome and its tabs. |
 
 Select an exact target from `browser.tabs`, attach, then take a snapshot. Use the
 returned opaque `elementRef` for actions. Each snapshot replaces prior references;
@@ -145,7 +160,7 @@ they do not grant user activation. Browser tools expose no arbitrary JavaScript 
 
 ## Ownership, privacy and lifecycle
 
-One controller lease exists per connector, including observe leases. A second
+One controller lease or approved browser connection exists per connector, including observe leases. A second
 attachment is rejected until detach or worker expiry. The lease is bound to the
 browser websocket identity, exact target, control mode and verified ingress
 principal/client/grant hash. A shared OAuth grant does not identify individual
