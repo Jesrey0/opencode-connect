@@ -186,7 +186,10 @@ the same port. Test cleanup closes only its own fixture browser.
 Run `npm run browser:benchmark` with the installed `playwright-cli` for a controlled
 20-trial comparison. See [acceptance evidence](browser-acceptance.md) for measured
 results and deployment evidence. General Chat discovery, source tests and live
-deployment are separate checks; refresh the connector catalog if stale.
+deployment are separate checks. After refreshing a changed connector catalog,
+start a new General Chat conversation with OpenCode Connect enabled, as described
+in [OpenAI's connection testing guidance](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata).
+An existing conversation can still expose its earlier tool set.
 
 Nodriver is an unmodified **AGPL-3.0** dependency. Its installed distribution
 contains the license, and its source is available from

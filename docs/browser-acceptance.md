@@ -108,11 +108,15 @@ The pre-feature build is `1ee740f1b0945db7`; the final activation's immediate
 previous build is `fd9f39c6a54185ed`. Connector rollback and removal of the added
 browser environment drop-in remain distinct operations.
 
-Git publication has not been performed. At this acceptance point, this chat's
-connector catalog still contains the earlier tool set. A ChatGPT connection/catalog
-refresh is required before a new browser tool can be invoked from General Chat.
-That final platform browser invocation is **not yet verified**; direct installed
-adapter acceptance and live MCP catalog availability do not substitute for it.
+Git publication has not been performed. After the principal reported completing
+the ChatGPT connection refresh, this existing conversation still exposed the
+original 12 tools. A fresh live `/mcp` check returned 21 tools, including all nine
+browser operations. [OpenAI's documented refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)
+includes starting a new conversation after refreshing and checking the metadata.
+The pending platform acceptance therefore requires a new General Chat conversation
+with OpenCode Connect enabled. That final platform browser invocation is **not yet
+verified**; direct installed adapter acceptance and live MCP catalog availability
+do not substitute for it.
 
 ## Supported limits
 
