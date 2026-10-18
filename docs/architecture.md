@@ -21,6 +21,15 @@ There are two runtime components and one source/install lock. This repository is
 External ChatGPT -> opencode-connect HTTP/MCP -> OpenCode 2.0.24 native client -> OpenCode private service.
 For Codex: the connector calls the codex-sessions RPC, registered by the workspace plugin in the OpenCode service. Direct Codex uses ACP sessions. The plugin does not intercept OpenCode's native subagent tool. Quota reads call the installed Codex App Server with a short-lived read-only client.
 
+For optional browser operations: the existing MCP handler shares one connector-owned
+`src/browser/backend.ts` across requests. It supervises `src/browser/worker.py` over
+private pipes. The worker uses pinned Nodriver connection/CDP APIs to an explicitly
+selected Chrome target. `src/browser/schemas.ts` and `tools.ts` own validation and
+projection. Linux Chrome is launched independently when explicitly requested and
+survives worker/connector cleanup. Python source and lock are hashed release assets;
+the explicit setup environment lives outside immutable builds. See
+[browser capability](browser-capability.md) for configuration and ownership.
+
 ## Dependency rules
 - The root package pins @opencode/client and the plugin pins @opencode/plugin to exactly the same 2.0.24 release; scripts/verify-integration.mjs enforces this.
 - The connector must not import the plugin's implementation to run a Codex turn; RPC remains the sole runtime interface. The source verifier imports the real connector declaration using Node 24's native type stripping and the installed workspace's authoritative direct.js definition without running setup, checks installed/locked versions and exact method sets. test/codex.test.ts crosses the real native client/MCP boundary into injected plugin handlers, without a model turn. Plugin helper imports also go directly to their owners, not through index.js or direct.js aliases.

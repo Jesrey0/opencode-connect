@@ -34,6 +34,7 @@ app.get("/health", async (_req: Request, res: Response) => {
 app.get("/observe", (_req: Request, res: Response) => res.json({ events: events.snapshot() }));
 
 const mcp = createHttpHandler(backend, undefined, events);
+for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { void mcp.close().finally(() => process.exit(0)); });
 app.all("/mcp", (req: Request, res: Response) => {
   if (req.method === "OPTIONS") { res.status(204).end(); return; }
   return toNodeHandler(mcp)(req, res, req.body);

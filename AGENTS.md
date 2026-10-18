@@ -13,6 +13,7 @@ ChatGPT 0xOperator owns the orchestration of native HostPlane and WorkerPlane wo
 - packages/codex-plugin/src/usage.js: read-only Codex quota App Server client.
 - packages/codex-plugin/src/stdio.js: shared owned-child lifetime/stderr; protocol logic stays with ACP/quota.
 - src/host.ts, src/terminal.ts: host inspection and shell/PTY support.
+- src/browser/: optional native Chrome schemas, shared worker supervisor and private Nodriver adapter. Linux Chrome is the default; browser lifetime is independent of connector cleanup.
 - src/events*.ts: event subscription, diagnostics and reconciliation.
 - src/deployment.ts and src/deploy.ts: immutable release and rollback.
 - src/console*.ts: local development console, not the MCP control plane.

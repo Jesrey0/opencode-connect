@@ -3,11 +3,14 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.10.0** projects native OpenCode HostPlane operations
+OpenCode Connect **0.11.0** projects native OpenCode HostPlane operations
 and the canonical WorkerPlane
 into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**.
 
-This adapter exposes only OpenCode-backed HostPlane and WorkerPlane operations.
+This adapter exposes OpenCode-backed HostPlane and WorkerPlane operations and an
+optional [native Chrome capability](docs/browser-capability.md) powered by Nodriver.
+Linux Chrome in WSL2 is the default, with explicit launch/reuse and optional
+Windows Chrome attachment through a configured loopback debugging endpoint.
 Custom host applications are CLI-first and keep their code, process lifecycle,
 and optional future MCP endpoints outside this connector. The standalone
 `windows-print-bridge` project is not part of the OpenCode MCP catalog.

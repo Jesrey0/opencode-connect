@@ -11,6 +11,8 @@ import { Events, EVENT_NAME, eventArgumentsSchema } from "./events.js";
 import type { ServerContext, ContentBlock } from "@modelcontextprotocol/server";
 import { errorOutputSchema, outputSchemas } from "./results.js";
 import { CODEX_MODES } from "./codex.js";
+import { BrowserBackend } from "./browser/backend.js";
+import { registerBrowserTools } from "./browser/tools.js";
 
 const runtimeSchema = z.enum(["opencode", "codex"]).optional().describe("Session runtime; omission selects OpenCode. Codex uses native ACP session IDs and advertises its narrower capabilities.");
 const codexUnsupportedStartFields = ["model", "agent", "variant", "permissions", "forkFromSessionId", "beforeMessageId", "title", "files", "agents", "skills"] as const;
@@ -127,7 +129,7 @@ export function structuredResult(structuredContent: Record<string, unknown>, con
   return result;
 }
 
-export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events): McpServer {
+export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, browser?: BrowserBackend): McpServer {
   const capabilities = { tools: { listChanged: false }, ...(events ? { events: {} } : {}) };
   const server = new McpServer({ name: "opencode-connect", version: VERSION }, {
     capabilities, supportedProtocolVersions: ["2026-07-28"], inputRequired: { legacyShim: false },
@@ -332,5 +334,6 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
   }, async (input) => structuredResult(await backend.act(input)));
 
+  if (browser) registerBrowserTools(server, browser, events);
   return server;
 }

@@ -4,14 +4,15 @@ import { createServer } from "./mcp.js";
 import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
 import { Events } from "./events.js";
+import { BrowserBackend } from "./browser/backend.js";
 
 // The SDK owns per-request metadata, version selection and wire validation.
-export function createHttpHandler(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events) {
-  const handler = createMcpHandler(() => createServer(backend, host, events), {
+export function createHttpHandler(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, browser = new BrowserBackend()) {
+  const handler = createMcpHandler(() => createServer(backend, host, events, browser), {
     legacy: "reject",
     onerror: (error) => console.error("MCP request failed; details omitted", error instanceof ProtocolError ? { code: error.code } : {}),
   });
-  return { ...handler, fetch: async (request: Request, options?: McpHandlerRequestOptions): Promise<Response> => {
+  return { ...handler, close: async () => { browser.close(); await handler.close(); }, fetch: async (request: Request, options?: McpHandlerRequestOptions): Promise<Response> => {
     // The Node adapter passes Express's bounded, parsed body. Leave wire validation
     // to the SDK; this projection observes receipts before transport rejection.
     const body = options?.parsedBody as { method?: unknown; id?: unknown } | undefined;
