@@ -147,6 +147,8 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   assert.equal((await backend.call("status", {})).reachable, false);
   const launched = await backend.call("launch", { headless: true });
   chromePid = launched.pid as number; assert.ok(chromePid);
+  const running = await backend.call("status", {});
+  assert.ok((running.linuxProcesses as { pid: number; debugging: boolean }[]).some(item => item.pid === chromePid && item.debugging), "Running Linux Chrome is detected even when it rewrites its process title");
   assert.equal((await backend.call("launch", { headless: true })).reused, true);
   const newTab = async (url: string) => (await (await fetch(`${cdpUrl}/json/new?${encodeURIComponent(url)}`, { method: "PUT" })).json()) as { id: string };
   const one = await newTab(pageUrl + "/?token=private-token#private-fragment");

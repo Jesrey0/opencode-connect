@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFile, readdir, mkdir, access } from "node:fs/promises";
+import { readFile, readlink, readdir, mkdir, access } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -203,8 +203,12 @@ async function linuxProcesses() {
   for (const name of await readdir("/proc")) {
     if (!/^\d+$/.test(name)) continue;
     try {
+      const executable = await readlink(`/proc/${name}/exe`);
+      if (!/\/(chrome|google-chrome|chromium)(-browser|-stable)?$/.test(executable)) continue;
       const args = (await readFile(`/proc/${name}/cmdline`, "utf8")).split("\0");
-      if (/\/(chrome|google-chrome|chromium)(-browser|-stable)?$/.test(args[0] ?? "") && !args.some(arg => arg.startsWith("--type="))) found.push({ pid: Number(name), debugging: args.some(arg => arg.startsWith("--remote-debugging-port=")) });
+      // Chrome can rewrite argv into one space-separated process-title string.
+      const command = args.join(" ");
+      if (!/(?:^|\s)--type=/.test(command)) found.push({ pid: Number(name), debugging: /(?:^|\s)--remote-debugging-port=\d+/.test(command) });
     } catch {}
     if (found.length >= 20) break;
   }
