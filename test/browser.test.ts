@@ -55,6 +55,33 @@ test("Python worker and dependency lock participate in immutable build identity"
   assert.ok(!tree.files.some(name => name.includes("__pycache__") || name.includes(".venv")));
 });
 
+test("managed Chrome launch is independent of connector process and fails closed", async t => {
+  const temp = await mkdtemp(join(tmpdir(), "browser-systemd-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const script = join(temp, "systemd-run");
+  const trace = join(temp, "invocation.txt");
+  await writeFile(script, `#!/bin/sh
+printf '%s\n' "$@" > ${JSON.stringify(trace)}
+exit 7
+`, { mode: 0o755 });
+  const unavailable = httpServer((_req, res) => { res.statusCode = 503; res.end(); });
+  unavailable.listen(0, "127.0.0.1"); await once(unavailable, "listening");
+  t.after(() => new Promise<void>(resolve => unavailable.close(() => resolve())));
+  const address = unavailable.address(); assert.ok(address && typeof address !== "string");
+  const backend = new BrowserBackend({
+    enabled: true, chromeLaunchMode: "managed",
+    env: { ...process.env, PATH: temp + ":" + process.env.PATH, XDG_DATA_HOME: temp,
+      OPENCODE_CONNECT_BROWSER_CHROME: "/usr/bin/google-chrome-stable",
+      OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT: `http://127.0.0.1:${address.port}` },
+  });
+  t.after(() => backend.close());
+  await assert.rejects(backend.call("launch", { headless: true }), errorCode("launch_failed"));
+  const args = await readFile(trace, "utf8");
+  for (const expected of ["--user", "--unit=opencode-connect-chrome", "--collect", "--headless=new", "--remote-debugging-address=127.0.0.1", "--user-data-dir=" + temp]) {
+    assert.ok(args.includes(expected), expected);
+  }
+});
+
 test("managed worker uses only connection cleanup, without a Nodriver browser owner", async () => {
   const code = await readFile(join(root, "src/browser/worker.py"), "utf8");
   assert.doesNotMatch(code, /\bBrowser\s*\(|nodriver\.start\(|browser\.close\(|\.terminate\(|\.kill\(/);
@@ -101,6 +128,10 @@ test("worker death during concurrent pipe writes cannot terminate the connector"
 const fixtureHtml = `<!doctype html><title>Browser fixture</title><h1>Test page</h1>
 <label>Name <input aria-label="Name" id="name" oninput="document.getElementById('status').textContent='Name entered'"></label>
 <button id="save" onclick="document.getElementById('status').textContent='Saved '+document.getElementById('name').value">Save</button>
+<button id="trusted" onmousedown="document.getElementById('status').textContent='Trusted down '+event.isTrusted" onmousemove="document.getElementById('status').textContent='Trusted hover '+event.isTrusted" oncontextmenu="event.preventDefault();document.getElementById('status').textContent='Trusted context '+event.isTrusted" ondblclick="document.getElementById('status').textContent='Trusted double '+event.isTrusted">Native input test</button>
+<input aria-label="Key receiver" value="Original" oninput="document.getElementById('status').textContent='Typed '+this.value">
+<div draggable="true" role="button" aria-label="Drag source" ondragstart="event.dataTransfer.setData('text/plain','move')">Drag source</div>
+<div role="button" aria-label="Drop target" ondragover="event.preventDefault()" ondrop="event.preventDefault();document.getElementById('status').textContent='Drop '+event.dataTransfer.getData('text/plain')">Drop target</div>
 <select aria-label="Choice" onchange="document.getElementById('status').textContent='Choice '+this.value"><option value="a">Alpha</option><option value="b">Beta</option></select>
 <input aria-label="Upload" type="file" onchange="document.getElementById('status').textContent='Uploaded '+this.files[0].name">
 <input type="password" value="private-password" aria-label="Password">
@@ -108,7 +139,7 @@ const fixtureHtml = `<!doctype html><title>Browser fixture</title><h1>Test page<
 <input readonly aria-label="Readonly" value="Fixed value">
 <button onclick="this.remove()">Remove me</button><div id="status" role="status">Ready</div>
 <a href="/next">Next page</a><iframe title="Fixture frame" src="/frame"></iframe>
-<div style="height:80px;overflow:auto" role="region" aria-label="Scroll area"><div style="height:2000px">Scrollable</div></div>
+<div style="height:80px;overflow:auto" role="region" aria-label="Scroll area" onscroll="document.getElementById('status').textContent='Wheel scrolled '+this.scrollTop"><div style="height:2000px">Scrollable</div></div>
 <script>${"/* unneeded script data */".repeat(5000)}</script>`;
 
 test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE_CONNECT_BROWSER_TEST !== "1", timeout: 180000 }, async t => {
@@ -138,7 +169,9 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   const { mkdir } = await import("node:fs/promises"); await mkdir(uploadRoot);
   await writeFile(join(uploadRoot, "sample.txt"), "fixture upload");
   const env = { ...process.env, XDG_DATA_HOME: temp, OPENCODE_CONNECT_BROWSER_PYTHON: python, OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT: cdpUrl, OPENCODE_CONNECT_BROWSER_UPLOAD_ROOTS: uploadRoot };
-  let backend = new BrowserBackend({ enabled: true, env, restartBackoffMs: 10 });
+  // The fixture owns an isolated process group; production systemd ownership
+  // is exercised separately because Chrome must survive connector restarts.
+  let backend = new BrowserBackend({ enabled: true, env, restartBackoffMs: 10, chromeLaunchMode: "direct" });
   let chromePid: number | null = null;
   t.after(async () => {
     backend.close();
@@ -184,6 +217,20 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     assert.ok(!JSON.stringify(snap).includes("private-token"));
     assert.ok(snap.nodes.find((node: any) => node.name === "Disabled button").states.includes("disabled"));
     assert.equal((await backend.call("snapshot", { leaseId, maxNodes: 1 }, "owner")).truncated, true);
+  });
+  await t.test("native CDP events satisfy trusted pointer and keyboard interactions", async () => {
+    assert.equal((await act({ action: "hover", elementRef: await getRef("Native input test"), expected: { type: "text", value: "Trusted hover true" } })).verification, "confirmed");
+    assert.equal((await act({ action: "click", elementRef: await getRef("Native input test"), expected: { type: "text", value: "Trusted down true" } })).verification, "confirmed");
+    assert.equal((await act({ action: "rightClick", elementRef: await getRef("Native input test"), expected: { type: "text", value: "Trusted context true" } })).verification, "confirmed");
+    assert.equal((await act({ action: "doubleClick", elementRef: await getRef("Native input test"), expected: { type: "text", value: "Trusted double true" } })).verification, "confirmed");
+    assert.equal((await act({ action: "keyCombo", elementRef: await getRef("Key receiver"), key: "A", modifiers: ["Control"] })).verification, "inconclusive");
+    assert.equal((await act({ action: "typeText", elementRef: await getRef("Key receiver"), value: "New", expected: { type: "text", value: "Typed New" } })).verification, "confirmed");
+    const refs = await snapshot();
+    const sourceRef = refs.nodes.find((node: any) => node.name === "Drag source" && node.ref)?.ref;
+    const targetRef = refs.nodes.find((node: any) => node.name === "Drop target" && node.ref)?.ref;
+    assert.ok(sourceRef && targetRef);
+    assert.equal((await act({ action: "drag", sourceRef, targetRef, expected: { type: "text", value: "Drop move" } })).verification, "confirmed");
+    assert.equal((await act({ action: "wheel", elementRef: await getRef("Scroll area"), deltaX: 0, deltaY: 120 })).verification, "inconclusive");
   });
   await t.test("fill, click and expected conditions distinguish dispatch from success", async () => {
     assert.equal((await act({ action: "fill", elementRef: await getRef("Name"), value: "Operator", expected: { type: "text", value: "Name entered" } })).verification, "confirmed");
@@ -272,6 +319,26 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
       return (await response.json()) as any;
     };
     try {
+      const listResponse = await handler.fetch(new Request("http://localhost/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json", "mcp-protocol-version": version, "mcp-method": "tools/list", "x-host-ingress-auth-context": "owner" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: ++id, method: "tools/list", params: { _meta: { "io.modelcontextprotocol/protocolVersion": version, "io.modelcontextprotocol/clientInfo": { name: "browser-test", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {} } } })
+      }));
+      const listed = (await listResponse.json()) as any;
+      assert.equal(listResponse.status, 200, JSON.stringify(listed));
+      const exposed = listed.result.tools as any[];
+      assert.ok(!exposed.some(tool => tool.name === "browser.action"), "No generic action executor is exposed");
+      for (const name of ["browser.hover", "browser.click", "browser.double_click", "browser.right_click", "browser.drag", "browser.key_combo", "browser.type_text", "browser.scroll_xy", "browser.scroll", "browser.navigate", "browser.fill", "browser.upload"]) {
+        const tool = exposed.find(item => item.name === name);
+        assert.ok(tool, "Missing MCP tool: "+name);
+        for (const hint of ["readOnlyHint", "destructiveHint", "openWorldHint"]) assert.equal(typeof tool.annotations[hint], "boolean", name+" "+hint);
+        assert.equal(tool.annotations.readOnlyHint, false, name);
+        assert.equal(tool.annotations.openWorldHint, true, name);
+      }
+      assert.equal(exposed.find(item => item.name === "browser.click").annotations.destructiveHint, true);
+      assert.equal(exposed.find(item => item.name === "browser.hover").annotations.destructiveHint, false);
+      assert.equal(exposed.find(item => item.name === "browser.snapshot").annotations.readOnlyHint, true);
+      assert.equal(exposed.find(item => item.name === "browser.snapshot").annotations.idempotentHint, false, "A fresh snapshot invalidates prior element refs");
       const reply = await request("browser.attach", { targetId: one.id, controlMode: "observe" });
       assert.ok(reply.result?.structuredContent?.leaseId, JSON.stringify(reply));
       const httpLease = reply.result.structuredContent.leaseId;
@@ -279,13 +346,26 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
       assert.equal(snap.result.structuredContent.targetId, one.id);
       const denied = await request("browser.snapshot", { leaseId: httpLease }, "intruder");
       assert.equal(denied.result.structuredContent.errorCode, "invalid_lease");
+      const refused = await request("browser.click", { leaseId: httpLease, authorized: true, elementRef: "e-not-observed" });
+      assert.equal(refused.result.structuredContent.errorCode, "observe_only", "Named mutation tool honors observe-only lease");
       const shot = await request("browser.screenshot", { leaseId: httpLease, width: 300, height: 200 });
       assert.equal(shot.result.content[0].type, "image");
       assert.equal("image" in shot.result.structuredContent, false);
       await request("browser.detach", { leaseId: httpLease });
+      const controlReply = await request("browser.attach", { targetId: one.id, controlMode: "control" });
+      const controlId = controlReply.result?.structuredContent?.leaseId;
+      assert.ok(controlId, JSON.stringify(controlReply));
+      const nav = await request("browser.navigate", { leaseId: controlId, authorized: true, url: pageUrl, expected: { type: "text", value: "Test page" } });
+      assert.equal(nav.result.structuredContent.verification, "confirmed");
+      const visible = await request("browser.snapshot", { leaseId: controlId, filter: "Save" });
+      const buttonRef = visible.result.structuredContent.nodes.find((node: any) => node.name === "Save" && node.ref)?.ref;
+      assert.ok(buttonRef, "Observed click target through MCP");
+      const clicked = await request("browser.click", { leaseId: controlId, authorized: true, elementRef: buttonRef, expected: { type: "text", value: "Saved" } });
+      assert.equal(clicked.result.structuredContent.verification, "confirmed", JSON.stringify(clicked));
+      await request("browser.detach", { leaseId: controlId });
     } finally { await handler.close(); await events.close(); }
     assert.equal((await fetch(cdpUrl + "/json/version")).ok, true);
-    backend = new BrowserBackend({ enabled: true, env });
+    backend = new BrowserBackend({ enabled: true, env, chromeLaunchMode: "direct" });
   });
   await t.test("connector child normal and forced termination never closes Chrome", async () => {
     const script = `import {BrowserBackend} from ${JSON.stringify(join(root, "src/browser/backend.ts"))};const b=new BrowserBackend({enabled:true});await b.call('attach',{targetId:${JSON.stringify(one.id)},controlMode:'observe'});console.log('attached');process.stdin.resume();process.stdin.on('end',()=>{b.close();process.exit(0)});`;
@@ -322,7 +402,7 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
     const worker = (backend as any).worker; process.kill(worker.pid, "SIGTERM"); await once(worker, "exit");
     assert.deepEqual(await pageIds(), baseline);
-    backend.close(); backend = new BrowserBackend({ enabled: true, env });
+    backend.close(); backend = new BrowserBackend({ enabled: true, env, chromeLaunchMode: "direct" });
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
     await backend.call("detach", { leaseId }, "owner");
   });

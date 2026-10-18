@@ -27,7 +27,7 @@ export class BrowserError extends Error {
   result() { return { error: this.message, errorCode: this.code, verification: this.verification, dispatched: this.dispatched, mutationMayHaveOccurred: this.dispatched }; }
 }
 type Pending = { resolve: (value: Record<string, unknown>) => void; reject: (error: unknown) => void; timer: NodeJS.Timeout; cleanup: () => void; mutation: boolean };
-type Options = { enabled?: boolean; env?: NodeJS.ProcessEnv; idleMs?: number; workerPath?: string; restartBackoffMs?: number };
+type Options = { enabled?: boolean; env?: NodeJS.ProcessEnv; idleMs?: number; workerPath?: string; restartBackoffMs?: number; chromeLaunchMode?: "auto" | "direct" | "managed" };
 
 export class BrowserBackend {
   readonly enabled: boolean;
@@ -193,16 +193,40 @@ export class BrowserBackend {
     await mkdir(profile, { recursive: true, mode: 0o700 });
     check();
     const args = [`--remote-debugging-address=127.0.0.1`, `--remote-debugging-port=${new URL(url).port}`, `--user-data-dir=${profile}`, "--no-first-run", "--no-default-browser-check", "--hide-crash-restore-bubble", ...(input.headless ? ["--headless=new"] : []), "about:blank"];
-    // Chrome is deliberately independent of Python and connector shutdown.
-    const child = spawn(executable, args, { detached: true, stdio: "ignore", env: { ...this.env, DISPLAY: this.env.DISPLAY ?? ":0" } });
-    let failed = false; child.on("error", () => { failed = true; }); child.unref();
+    // Detached children still belong to a systemd service's control group.
+    // A connector restart kills them unless Chrome is started in its own unit.
+    // Preserve direct process-group ownership outside this managed service
+    // (including isolated integration tests and ordinary standalone CLI use).
+    const cgroup = await readFile("/proc/self/cgroup", "utf8").catch(() => "");
+    const managed = this.options.chromeLaunchMode === "managed"
+      || (this.options.chromeLaunchMode !== "direct" && cgroup.includes("/opencode-connect.service"));
+    let pid: number | null = null;
+    let failed = false;
+    if (managed) {
+      const launchArgs = ["--user", "--unit=opencode-connect-chrome", "--collect",
+        `--setenv=DISPLAY=${this.env.DISPLAY ?? ":0"}`,
+        ...(this.env.XAUTHORITY ? [`--setenv=XAUTHORITY=${this.env.XAUTHORITY}`] : []),
+        executable, ...args];
+      const launched = spawn("systemd-run", launchArgs, { stdio: "ignore", env: this.env });
+      const started = await new Promise<boolean>(resolve => {
+        launched.once("error", () => resolve(false));
+        launched.once("close", code => resolve(code === 0));
+      });
+      check();
+      if (!started) throw new BrowserError("launch_failed", "Could not start systemd-managed Chrome; inspect the opencode-connect-chrome user unit");
+    } else {
+      const child = spawn(executable, args, { detached: true, stdio: "ignore", env: { ...this.env, DISPLAY: this.env.DISPLAY ?? ":0" } });
+      child.on("error", () => { failed = true; });
+      pid = child.pid ?? null;
+      child.unref();
+    }
     const until = Date.now() + 10000;
     while (Date.now() < until && !failed) {
       check();
-      if (await reachable()) return { browser: "linux", reused: false, reachable: true, pid: child.pid ?? null };
+      if (await reachable()) return { browser: "linux", reused: false, reachable: true, pid };
       await new Promise(resolve => setTimeout(resolve, 100));
     }
-    throw new BrowserError("launch_failed", "Chrome debug endpoint unavailable after launch; inspect the dedicated Linux profile and display; Chrome was preserved");
+    throw new BrowserError("launch_failed", "Chrome debug endpoint unavailable after launch; inspect the dedicated Linux profile, display and process unit; Chrome was preserved");
   }
 }
 

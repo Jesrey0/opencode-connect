@@ -96,6 +96,21 @@ worker expiry or connector restart invalidate capabilities and require a new
 explicit connect; an endpoint URL cannot revive an old lease. Legacy Windows HTTP
 CDP remains supported. See [Windows compatibility evidence](windows-browser-investigation.md).
 
+
+
+### Linux Chrome process ownership
+
+When the connector runs as the managed `opencode-connect.service`, newly
+launched Linux Chrome runs in its own transient `opencode-connect-chrome`
+user systemd unit. A detached child **within** the connector's cgroup would
+be terminated by systemd on connector restart, so process detachment alone
+is insufficient. The independent Chrome unit keeps the persistent profile,
+tabs and authenticated session alive across connector releases. It is started
+on demand and not enabled at boot; `browser.launch` reuses an already healthy
+debugging endpoint. Direct CLI and isolated tests retain their own detached
+process-group lifecycle. Inspect `systemctl --user status
+opencode-connect-chrome.service` and the Chrome endpoint after any cutover.
+
 ## Tools and workflow
 
 Names below are the native MCP names; ChatGPT may project punctuation differently.
@@ -108,7 +123,12 @@ Names below are the native MCP names; ChatGPT may project punctuation differentl
 | `browser.launch` | Optional `headless` (default false); `reused`, reachability and new process ID when applicable. Linux only. |
 | `browser.attach` | Exact `targetId`, `controlMode:observe|control`, optional `browser` and `connectionId`; opaque `leaseId`, generation and target summary. |
 | `browser.snapshot` | `leaseId`, optional `maxNodes` (1–300, default 100), `frameId`, name/role substring `filter`; compact AX roles, names, states, references, document generation, frame summaries, truncation and observation errors. |
-| `browser.action` | `leaseId`, `authorized:true`, action-specific arguments, optional `expected`, `timeoutMs` (100–30000); dispatch/completion, verification, URL and evidence. |
+| `browser.click`, `browser.right_click`, `browser.double_click`, `browser.hover` | `leaseId`, `elementRef`, `authorized:true`; native Chrome mouse input on the observed element. |
+| `browser.drag` | Drag between observed `sourceRef` and `targetRef` using Chrome mouse events. |
+| `browser.key_combo`, `browser.type_text`, `browser.keypress` | Focus observed field and send a bounded shortcut, Unicode text, or single key via Chrome input. |
+| `browser.scroll`, `browser.scroll_xy` | Scroll a selected element programmatically, using safe bounded vertical or XY deltas. These do not produce a trusted mouse-wheel event. |
+| `browser.fill`, `browser.select`, `browser.upload` | Programmatic form fill, selection, or authorized file input; may trigger autosave/uploads. |
+| `browser.navigate` | Navigate the attached tab to HTTP/HTTPS, potentially discarding unsaved form state. |
 | `browser.wait` | `leaseId`, structured `condition`, optional `timeoutMs`; deadline-bounded observed condition. |
 | `browser.screenshot` | `leaseId`, optional `width`/`height` (default 1280×720; maximum 1920×1080); JPEG image content, maximum 1 MiB, no file persistence. |
 | `browser.detach` | Exactly one `leaseId` or `connectionId`; release control and transport while preserving Chrome and its tabs. |
@@ -121,25 +141,24 @@ document epoch. Rejections require a new observation, never a guessed replacemen
 `frameId` must belong to the selected tab. Same-origin iframes are supported;
 unavailable out-of-process frame trees produce explicit observation errors.
 
-Actions: `click(elementRef)`, `fill(elementRef,value)`,
-`select(elementRef,value)`, `keypress(elementRef,key)`,
-`scroll(elementRef,deltaY)`, `navigate(url)`, and
-`upload(elementRef,files[])`. Keypress supports Enter, Tab, Escape, Backspace,
-Delete, arrows, Home, End and Space. Fill rejects disabled, hidden, read-only and
-password controls. Uploads require a visible file input, explicitly selected
-absolute regular files within configured roots, and reject protected dot paths and
-key/certificate files. Navigation allows HTTP/HTTPS without embedded credentials;
-navigating to the exact current URL reloads the document.
+Model-visible tools use distinct, explicitly described operations. The legacy
+action union remains an **internal** backend contract, not a generic MCP executor.
 
-Example sequence, after selecting an exact target:
+Native input support: `click`, `right_click`, `double_click`, `hover` and
+`drag` use Chrome's CDP mouse events instead of JavaScript `element.click()`.
+`key_combo` and `type_text` use CDP keyboard/text events. Normal `keypress`
+supports Enter, Tab, Escape, Backspace, Delete, arrows, Home, End and Space.
+`scroll` and `scroll_xy` use bounded DOM scrolling. They report dispatch rather than verified scroll position; native wheel-event injection is not yet accepted by the Chrome fixture and is not advertised.
 
-```json
-{"leaseId":"<lease>","action":"fill","elementRef":"<name-ref>","value":"Example","authorized":true}
-```
-
-```json
-{"leaseId":"<lease>","action":"click","elementRef":"<save-ref>","authorized":true,"expected":{"type":"text","value":"Saved Example"}}
-```
+`fill` and `select` remain programmatic DOM operations that raise input/change
+events, but may not satisfy sites demanding trusted user activation. Fields must
+be visible and enabled; fill rejects read-only and password controls.
+Uploads require a visible file input, explicitly selected absolute regular files
+under configured roots, and reject protected paths or key/certificate files.
+Navigation allows HTTP/HTTPS without embedded credentials; navigating to the
+exact current URL reloads the document. All action outputs distinguish dispatch
+from a confirmed application result. The model must supply authorization and
+an appropriate observable expected condition for consequential operations.
 
 Expected/wait conditions: `text(value)` for visible main-document text,
 `url(value)` for an exact URL, `elementAppears(selector,frameId?)`,

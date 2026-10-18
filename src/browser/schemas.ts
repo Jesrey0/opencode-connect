@@ -17,6 +17,13 @@ const action = { ...lease, ...timeout, authorized: z.literal(true).describe("The
 const ref = { elementRef: id };
 export const actionSchema = exposedUnion("action", [
   z.object({ ...action, action: z.literal("click"), ...ref }),
+  z.object({ ...action, action: z.literal("rightClick"), ...ref }),
+  z.object({ ...action, action: z.literal("doubleClick"), ...ref }),
+  z.object({ ...action, action: z.literal("hover"), ...ref }),
+  z.object({ ...action, action: z.literal("drag"), sourceRef: id, targetRef: id }),
+  z.object({ ...action, action: z.literal("typeText"), ...ref, value: z.string().min(1).max(12000) }),
+  z.object({ ...action, action: z.literal("keyCombo"), ...ref, key: z.enum(["A","C","V","X","Z","Enter","Escape","Tab","Backspace","Delete","ArrowLeft","ArrowRight","ArrowUp","ArrowDown"]), modifiers: z.array(z.enum(["Control","Alt","Meta","Shift"])).min(1).max(4).refine(items => new Set(items).size === items.length, "Duplicate modifier") }),
+  z.object({ ...action, action: z.literal("wheel"), ...ref, deltaX: z.number().int().min(-10000).max(10000), deltaY: z.number().int().min(-10000).max(10000) }),
   z.object({ ...action, action: z.literal("fill"), ...ref, value: z.string().max(12000) }),
   z.object({ ...action, action: z.literal("select"), ...ref, value: z.string().max(1000) }),
   z.object({ ...action, action: z.literal("upload"), ...ref, files: z.array(z.string().min(1).max(4096)).min(1).max(10) }),
@@ -24,6 +31,12 @@ export const actionSchema = exposedUnion("action", [
   z.object({ ...action, action: z.literal("scroll"), ...ref, deltaY: z.number().int().min(-10000).max(10000) }),
   z.object({ ...action, action: z.literal("navigate"), url: z.url().max(4096).refine(value => /^https?:\/\//.test(value), "HTTP/HTTPS navigation only") }),
 ]);
+// Distinct MCP tool contracts: explicit, bounded actions, without a generic
+// model-visible operation selector. The union remains our private backend wire.
+export const browserActionInputs = Object.fromEntries(actionSchema.options.map(variant => [
+  variant.shape.action.value as string,
+  (variant as z.ZodObject).omit({ action: true }),
+])) as Record<string, z.ZodObject>;
 export const browserInputs = {
   status: z.object({ ...browser, ...connection }).strict(),
   connect: z.object({ browser: z.literal("windows"), authorized: z.literal(true), timeoutMs: z.number().int().min(1000).max(120000).default(60000) }).strict(),

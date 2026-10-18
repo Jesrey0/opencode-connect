@@ -15,6 +15,7 @@ import { createHttpHandler } from "../src/http.js";
 import { OpenCodeBackend } from "../src/opencode.js";
 import { HostBackend } from "../src/host.js";
 import { Events } from "../src/events.js";
+import { BrowserBackend } from "../src/browser/backend.js";
 import { nativeFixture, session, user, assistant, FakeSocket, binary, meta as replayMeta } from "./native-fixture.js";
 
 const version = "2026-07-28";
@@ -24,7 +25,9 @@ const meta = { "io.modelcontextprotocol/protocolVersion": version,
 const authorization = { principal: "operator", clientId: "chatgpt", grantId: "grant", resource: "https://ingress.example/opencode-connect/mcp", scope: "opencode-connect:access", grantContext: "opaque" };
 
 async function httpFixture(native: ReturnType<typeof nativeFixture>, events?: Events, waitTimeoutMs = 20, host = new HostBackend(native.connect)) {
-  const handler = createHttpHandler(new OpenCodeBackend(native.connect, waitTimeoutMs), host, events);
+  // Protocol tests exercise the base OpenCode/Host catalog independently of
+  // whether a developer's host has optional browser support enabled.
+  const handler = createHttpHandler(new OpenCodeBackend(native.connect, waitTimeoutMs), host, events, new BrowserBackend({ enabled: false }));
   const app = createMcpExpressApp();
   app.all("/mcp", (req, res) => toNodeHandler(handler)(req, res, req.body));
   const server = app.listen(0, "127.0.0.1");

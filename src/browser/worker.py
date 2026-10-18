@@ -31,7 +31,7 @@ METHODS = {
     "snapshot": {"leaseId", "maxNodes", "frameId", "filter"},
     "screenshot": {"leaseId", "width", "height"}, "detach": {"leaseId", "connectionId"},
     "wait": {"leaseId", "condition", "timeoutMs"},
-    "action": {"leaseId", "action", "authorized", "expected", "timeoutMs", "elementRef", "value", "key", "url", "files", "deltaY"},
+    "action": {"leaseId", "action", "authorized", "expected", "timeoutMs", "elementRef", "sourceRef", "targetRef", "value", "key", "modifiers", "url", "files", "deltaX", "deltaY"},
 }
 
 
@@ -357,6 +357,72 @@ class Adapter:
         except Exception:
             reject("stale_reference", "Element identity lost; request a new snapshot")
 
+    async def point(self, ref):
+        obj, state = await self.element(ref)
+        # The returned point is in the top frame's CSS viewport, which is the
+        # coordinate space required by Input.dispatchMouseEvent.
+        pos = await self.function(obj, """function(){
+          this.scrollIntoView({block:'center',inline:'center'});
+          const r=this.getBoundingClientRect(), w=this.ownerDocument.defaultView;
+          const hit=this.ownerDocument.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
+          if(!hit || !(hit===this || this.contains(hit))) return null;
+          let x=r.left+r.width/2,y=r.top+r.height/2,v=w;
+          try {
+            while(v!==v.top){
+              const f=v.frameElement;
+              if(!f) return null;
+              const q=f.getBoundingClientRect();
+              x+=q.left+f.clientLeft;y+=q.top+f.clientTop;v=v.parent;
+            }
+            if(x<0 || y<0 || x>=v.innerWidth || y>=v.innerHeight) return null;
+            return {x,y};
+          } catch(e){return null;}
+        }""")
+        if not pos or not all(isinstance(pos.get(k), (int,float)) for k in ("x","y")):
+            reject("not_actionable", "Element is covered, outside the viewport, or in an unsupported frame")
+        return pos
+
+    async def mouse(self, event, x, y, button=cdp.input_.MouseButton.NONE, buttons=0, click_count=0, delta_x=None, delta_y=None):
+        await self.conn.send(cdp.input_.dispatch_mouse_event(event, x, y, button=button, buttons=buttons, click_count=click_count, delta_x=delta_x, delta_y=delta_y))
+
+    async def native_click(self, pos, kind):
+        button = cdp.input_.MouseButton.RIGHT if kind == "rightClick" else cdp.input_.MouseButton.LEFT
+        pressed = 2 if kind == "rightClick" else 1
+        x,y=pos["x"],pos["y"]
+        # A native press is located at its coordinates; no standalone
+        # mouse move is required (Nodriver's mouse_click uses this sequence).
+        for count in range(1, 3 if kind=="doubleClick" else 2):
+            down=False
+            try:
+                down=True
+                await self.mouse("mousePressed",x,y,button,pressed,count)
+            finally:
+                if down:
+                    await self.mouse("mouseReleased",x,y,button,0,count)
+
+    async def native_drag(self, start, end):
+        sx,sy=start["x"],start["y"]
+        tx,ty=end["x"],end["y"]
+        pressed=False
+        moves=[]
+        try:
+            pressed=True
+            await self.mouse("mousePressed",sx,sy,cdp.input_.MouseButton.LEFT,1,1)
+            # The renderer can hold a move response while the HTML5 drag is in
+            # progress; queue the bounded pointer path, then release to complete it.
+            for step in range(1, 13):
+                f=step/12
+                moves.append(asyncio.create_task(self.mouse("mouseMoved",sx+(tx-sx)*f,sy+(ty-sy)*f,cdp.input_.MouseButton.LEFT,1)))
+                await asyncio.sleep(0.02)
+        finally:
+            if pressed:
+                await self.mouse("mouseReleased",tx,ty,cdp.input_.MouseButton.LEFT,0,1)
+            if moves:
+                results=await asyncio.gather(*moves,return_exceptions=True)
+                for result in results:
+                    if isinstance(result,BaseException):
+                        raise result
+
     async def snapshot(self, args):
         frames = await self.frames()
         epoch = self.epoch
@@ -487,7 +553,14 @@ class Adapter:
                 if error:
                     return {"dispatched": True, "completed": False, "verification": "failed", "url": safe_url((await self.current())["url"]), "evidence": "Chrome reported navigation failure", "mutationMayHaveOccurred": True}
             else:
-                obj, state = await self.element(args["elementRef"])
+                if kind == "drag":
+                    start = await self.point(args["sourceRef"])
+                    end = await self.point(args["targetRef"])
+                    self.dispatched = True
+                    await self.native_drag(start, end)
+                    obj, state = None, None
+                else:
+                    obj, state = await self.element(args["elementRef"])
                 if kind == "upload":
                     if state["tag"] != "INPUT" or state["type"] != "file":
                         reject("invalid_upload", "Reference is not a file input")
@@ -503,26 +576,54 @@ class Adapter:
                         files.append(str(file))
                     self.dispatched = True
                     await self.conn.send(cdp.dom.set_file_input_files(files, object_id=obj))
-                else:
+                elif kind != "drag":
                     if kind == "fill" and (state["readonly"] or state["tag"] not in ("INPUT", "TEXTAREA") or state["type"] in ("file", "hidden", "submit", "button", "checkbox", "radio")):
                         reject("invalid_element", "Fill requires an editable text control")
                     if kind == "select" and state["tag"] != "SELECT":
                         reject("invalid_element", "Select requires a native select element")
-                    self.dispatched = True
-                    if kind == "click":
-                        clicked = await self.function(obj, "function(){this.scrollIntoView({block:'center'});const r=this.getBoundingClientRect();const hit=this.ownerDocument.elementFromPoint(r.x+r.width/2,r.y+r.height/2);if(!hit||!(hit===this||this.contains(hit)))return false;this.click();return true;}")
-                        if not clicked:
-                            reject("not_actionable", "Element is covered; no click was dispatched")
+                    if kind in ("click", "rightClick", "doubleClick", "hover", "scroll", "wheel"):
+                        pos = await self.point(args["elementRef"])
+                        self.dispatched = True
+                        if kind in ("click", "rightClick", "doubleClick"):
+                            await self.native_click(pos, kind)
+                        elif kind == "hover":
+                            # Nodriver's native mouse_move finishes with a release
+                            # event (no button is held). Deliver both as one bounded
+                            # gesture to avoid a dangling isolated move response.
+                            await asyncio.gather(
+                                self.mouse("mouseMoved",pos["x"],pos["y"]),
+                                self.mouse("mouseReleased",pos["x"],pos["y"]))
+
+                        elif kind == "scroll":
+                            await self.function(obj, "function(delta){this.scrollBy({top:delta,behavior:'instant'});}", [args["deltaY"]])
+                        else:
+                            await self.function(obj, "function(dx,dy){this.scrollLeft+=dx;this.scrollTop+=dy;}", [args["deltaX"], args["deltaY"]])
+                    elif kind == "typeText":
+                        if state["readonly"] or not (state["tag"] in ("INPUT","TEXTAREA") and state["type"] not in ("file","hidden") or await self.function(obj,"function(){return this.isContentEditable;}")):
+                            reject("invalid_element", "Typing requires editable text or contenteditable")
+                        await self.function(obj, "function(){this.focus();}")
+                        self.dispatched = True
+                        await self.conn.send(cdp.input_.insert_text(args["value"]))
+                    elif kind == "keyCombo":
+                        await self.function(obj, "function(){this.focus();}")
+                        bits={"Alt":1,"Control":2,"Meta":4,"Shift":8}
+                        mask=sum(bits[m] for m in args["modifiers"])
+                        key=args["key"]
+                        vk=ord(key) if len(key)==1 else {"Enter":13,"Escape":27,"Tab":9,"Backspace":8,"Delete":46,"ArrowLeft":37,"ArrowUp":38,"ArrowRight":39,"ArrowDown":40}[key]
+                        self.dispatched = True
+                        await self.conn.send(cdp.input_.dispatch_key_event("rawKeyDown",key=key,code="Key"+key if len(key)==1 else key,modifiers=mask,windows_virtual_key_code=vk))
+                        await self.conn.send(cdp.input_.dispatch_key_event("keyUp",key=key,code="Key"+key if len(key)==1 else key,modifiers=mask,windows_virtual_key_code=vk))
                     elif kind == "fill":
+                        self.dispatched = True
                         await self.function(obj, "function(value){this.focus();const proto=this.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(this,value);this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));}", [args["value"]])
                     elif kind == "select":
+                        self.dispatched = True
                         result = await self.function(obj, "function(value){if(!Array.from(this.options).some(o=>o.value===value&&!o.disabled))return false;this.value=value;this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));return true;}", [args["value"]])
                         if not result:
                             reject("invalid_option", "Requested select option unavailable")
-                    elif kind == "scroll":
-                        await self.function(obj, "function(delta){this.scrollBy({top:delta,behavior:'instant'});}", [args["deltaY"]])
                     elif kind == "keypress":
                         await self.function(obj, "function(){this.focus();}")
+                        self.dispatched = True
                         key = args["key"]
                         codes = {"Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8, "Delete": 46, "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40, "Home": 36, "End": 35, "Space": 32}
                         await self.conn.send(cdp.input_.dispatch_key_event("keyDown", key=" " if key == "Space" else key, windows_virtual_key_code=codes[key], text="\r" if key == "Enter" else " " if key == "Space" else None))
@@ -622,7 +723,7 @@ def validate(method, args):
             reject("invalid_arguments", "Invalid browser argument bound")
     if "filter" in args and (not isinstance(args["filter"], str) or len(args["filter"]) > 200):
         reject("invalid_arguments", "Invalid observation filter")
-    for field in ("leaseId", "connectionId", "targetId", "elementRef", "frameId"):
+    for field in ("leaseId", "connectionId", "targetId", "elementRef", "sourceRef", "targetRef", "frameId"):
         if field in args and (not isinstance(args[field], str) or not 0 < len(args[field]) <= 256):
             reject("invalid_arguments", "Invalid browser identity")
     required = {"connect": ("browser", "authorized"), "attach": ("targetId", "controlMode"), "snapshot": ("leaseId",), "wait": ("leaseId", "condition"), "screenshot": ("leaseId",), "action": ("leaseId", "action", "authorized")}
@@ -638,7 +739,7 @@ def validate(method, args):
         validate_condition(args["condition"])
     if method == "action":
         kind = args["action"]
-        variants = {"navigate": {"url"}, "click": {"elementRef"}, "fill": {"elementRef", "value"}, "select": {"elementRef", "value"}, "upload": {"elementRef", "files"}, "keypress": {"elementRef", "key"}, "scroll": {"elementRef", "deltaY"}}
+        variants = {"navigate": {"url"}, "click": {"elementRef"}, "rightClick": {"elementRef"}, "doubleClick": {"elementRef"}, "hover": {"elementRef"}, "drag": {"sourceRef", "targetRef"}, "typeText": {"elementRef","value"}, "keyCombo": {"elementRef","key","modifiers"}, "wheel": {"elementRef","deltaX","deltaY"}, "fill": {"elementRef", "value"}, "select": {"elementRef", "value"}, "upload": {"elementRef", "files"}, "keypress": {"elementRef", "key"}, "scroll": {"elementRef", "deltaY"}}
         common = {"leaseId", "action", "authorized", "expected", "timeoutMs"}
         if args["authorized"] is not True or kind not in variants or set(args) - common - variants[kind] or variants[kind] - set(args):
             reject("invalid_arguments", "Invalid or unauthorized browser action")
@@ -647,7 +748,16 @@ def validate(method, args):
                 reject("invalid_arguments", "Invalid action value")
         if kind == "upload" and (not isinstance(args["files"], list) or not 1 <= len(args["files"]) <= 10 or any(not isinstance(file, str) or len(file) > 4096 for file in args["files"])):
             reject("invalid_arguments", "Invalid upload files")
-        if kind == "scroll" and (type(args["deltaY"]) is not int or abs(args["deltaY"]) > 10000):
+        if kind == "keyCombo" and (
+            args["key"] not in ("A","C","V","X","Z","Enter","Escape","Tab","Backspace","Delete","ArrowLeft","ArrowRight","ArrowUp","ArrowDown")
+            or not isinstance(args["modifiers"], list) or not 1 <= len(args["modifiers"]) <= 4
+            or len(set(str(m) for m in args["modifiers"])) != len(args["modifiers"])
+            or any(m not in ("Control","Alt","Shift","Meta") for m in args["modifiers"])
+        ):
+            reject("invalid_arguments", "Invalid shortcut key or modifiers")
+        if kind == "wheel" and (type(args["deltaX"]) is not int or abs(args["deltaX"]) > 10000):
+            reject("invalid_arguments", "Invalid wheel delta")
+        if kind in ("scroll", "wheel") and (type(args["deltaY"]) is not int or abs(args["deltaY"]) > 10000):
             reject("invalid_arguments", "Invalid scroll amount")
         if kind == "keypress" and args["key"] not in ("Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "Space"):
             reject("invalid_arguments", "Unsupported key")
