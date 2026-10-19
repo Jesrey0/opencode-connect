@@ -127,9 +127,12 @@ Names below are the native MCP names; ChatGPT may project punctuation differentl
 | `browser.drag` | Drag between observed `sourceRef` and `targetRef` using Chrome mouse events. |
 | `browser.key_combo`, `browser.type_text`, `browser.keypress` | Focus observed field and send a bounded shortcut, Unicode text, or single key via Chrome input. |
 | `browser.scroll`, `browser.scroll_xy` | Scroll a selected element programmatically, using safe bounded vertical or XY deltas. These do not produce a trusted mouse-wheel event. |
-| `browser.fill`, `browser.select`, `browser.upload` | Programmatic form fill, selection, or authorized file input; may trigger autosave/uploads. |
+| `browser.fill`, `browser.select`, `browser.upload` | Programmatic form fill, selection, or files supplied to an observed input/chooser button; may trigger autosave/uploads. |
 | `browser.navigate` | Navigate the attached tab to HTTP/HTTPS, potentially discarding unsaved form state. |
-| `browser.wait` | `leaseId`, structured `condition`, optional `timeoutMs`; deadline-bounded observed condition. |
+| `browser.workflow` | `leaseId`, `authorized:true`, 1–12 `steps`, optional total `timeoutMs` (100–30000, default 10000); fresh exact role/name targets, required postconditions, partial progress on failure. |
+| `browser.wait` | `leaseId`, structured `condition`, optional `timeoutMs`; normal condition timeout preserves the lease. |
+| `browser.media` | `leaseId`, optional `maxItems` (1–20, default 10); audio/video references, sanitized source URLs, duration, readiness and errors, including hidden players. |
+| `browser.media_download` | `leaseId`, observed media `elementRef`, `authorized:true`, optional `maxBytes` (1024–33554432), `timeoutMs`; private host artifact path, MIME type, byte count and SHA-256. |
 | `browser.screenshot` | `leaseId`, optional `width`/`height` (default 1280×720; maximum 1920×1080); JPEG image content, maximum 1 MiB, no file persistence. |
 | `browser.detach` | Exactly one `leaseId` or `connectionId`; release control and transport while preserving Chrome and its tabs. |
 
@@ -153,8 +156,21 @@ supports Enter, Tab, Escape, Backspace, Delete, arrows, Home, End and Space.
 `fill` and `select` remain programmatic DOM operations that raise input/change
 events, but may not satisfy sites demanding trusted user activation. Fields must
 be visible and enabled; fill rejects read-only and password controls.
-Uploads require a visible file input, explicitly selected absolute regular files
-under configured roots, and reject protected paths or key/certificate files.
+Uploads accept a visible file input or an observed visible button that opens one.
+All files must be explicitly selected absolute regular files under configured
+roots; protected paths and key/certificate files are rejected before clicking.
+The button path temporarily intercepts Chrome's file chooser, validates its frame,
+document, backend input and single/multiple selection mode, then sets those files.
+Interception is removed after success or failure. A chooser without an input
+backend ID (such as a File System Access picker) fails explicitly. Directory
+pickers are unsupported. No-chooser failure can follow a dispatched click;
+inspect the page before retrying.
+
+Paths belong to Chrome's operating system. Linux Chrome uses validated Linux
+paths. Windows Chrome accepts validated mounted-drive paths such as
+`/mnt/c/Users/.../paper.pdf`, translated to `C:\Users\...\paper.pdf` after
+authorization; Linux-only paths cannot be uploaded to Windows Chrome.
+Upload roots remain an operator-configured allowlist and default to empty.
 Navigation allows HTTP/HTTPS without embedded credentials; navigating to the
 exact current URL reloads the document. All action outputs distinguish dispatch
 from a confirmed application result. The model must supply authorization and
@@ -162,19 +178,67 @@ an appropriate observable expected condition for consequential operations.
 
 Expected/wait conditions: `text(value)` for visible main-document text,
 `url(value)` for an exact URL, `elementAppears(selector,frameId?)`,
-`elementDisappears(selector,frameId?)`, `readyState(interactive|complete)`, and
+`elementDisappears(selector,frameId?)`, `mediaReady(selector,frameId?)`, `readyState(interactive|complete)`, and
 `navigation(fromUrl)`. Navigation uses the main document's loader change or a
 changed sanitized URL plus complete readiness. An unrelated iframe reload cannot
 confirm it. Same-URL navigation must be observed from before the change; a standalone
 wait cannot prove a reload that already finished. CSS selectors are used only for
 read-only conditions, never guessed action targets.
 
+`mediaReady` requires an audio/video element with current data (`readyState >= 2`)
+and no media error; the player may be hidden. It does not establish that an
+application's generation job finished or that spoken content is correct. Choose
+an application-specific text/element condition when generation has another signal.
+A normal wait or action-postcondition timeout returns `verification:"timed_out"`
+and retains the lease. Continue observation with another wait or snapshot; do not
+replay a mutation merely because its postcondition timed out. Cancellation,
+transport failure and the outer request deadline still invalidate leases.
+
+### Bounded workflows
+
+Each step uses `action` (`click`, `fill`, `typeText`, `select`, `keypress`, or
+`upload`), `target:{role,name,frameId?}`, the action's values, a required `expected`
+condition and optional `timeoutMs`. Roles and names match exactly against a fresh
+accessibility observation immediately before that step. Missing elements are
+observed until the step deadline; ambiguous or incomplete observations stop the
+workflow. Document/element identity is checked by the ordinary action path.
+Fresh snapshots rotate prior references, including references held by callers.
+
+The total deadline caps all steps; it does not multiply by the step count.
+Results report `completedSteps` (confirmed postconditions), zero-based `failedStep`
+or null, `errorCode`, verification and whether any mutation may have occurred.
+No action is retried. A failed step can already have changed the page, so reconcile
+its current state before constructing a continuation. This batches known UI
+interactions without an embedded script or another model turn.
+
+### Generated media
+
+Inspect media after the application reports completion, then retrieve the chosen
+reference. Media observations rotate only media references; snapshots and document
+changes expire them. Downloads stream the player's current HTTP(S) or Blob source
+through an isolated frame world using normal browser CORS permissions. No cookie
+export, arbitrary caller URL, browser-global download policy, DRM bypass or
+MediaSource extraction is provided. Source changes and byte overflow abort the
+transfer and remove partial artifacts.
+
+Artifacts use random filenames under
+`$XDG_DATA_HOME/opencode-connect/browser-media/` (default `~/.local/share/`),
+directory mode 0700 and file mode 0600. Successful artifacts remain available for
+authorized host playback, decoding or transcription; remove them when finished.
+Duration/readiness and successful download establish media availability, not
+language, intelligibility or content quality. Those require examining the audio.
+
+The pinned Nodriver 0.50.6 bindings already expose
+[`Page.setInterceptFileChooserDialog` and `fileChooserOpened`](https://ultrafunkamsterdam.github.io/nodriver/nodriver/cdp/page.html),
+plus [`DOM.setFileInputFiles`](https://chromedevtools.github.io/devtools-protocol/tot/DOM/#method-setFileInputFiles).
+These operations use the existing selected-target connection and lease.
+
 `confirmed` means the supplied observable condition was met. Without an expected
 condition, a completed command returns `inconclusive`. Browser/app errors,
 preflight rejection and deadline expiry remain distinct. A timeout, cancellation
 or broken transport can leave an action outcome uncertain. Never automatically
-retry a submission or other mutation; reattach and inspect first. Programmatic DOM
-click/fill/select operations may be rejected by sites requiring trusted user gestures;
+retry a submission or other mutation; inspect first, reattaching if the lease was
+invalidated. Programmatic fill/select operations may be rejected by sites requiring trusted user gestures;
 they do not grant user activation. Browser tools expose no arbitrary JavaScript API.
 
 ## Ownership, privacy and lifecycle

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, writeFile, rm, stat } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createServer as httpServer } from "node:http";
@@ -27,6 +28,13 @@ test("browser schemas reject ambiguous targets, arbitrary script, unsafe navigat
   ]) assert.equal(browserInputs.action.safeParse(input).success, false);
   assert.equal(browserInputs.wait.safeParse({ leaseId: "l", condition: { type: "text", value: "done" }, timeoutMs: 30001 }).success, false);
   assert.equal(browserInputs.screenshot.safeParse({ leaseId: "l", width: 1921 }).success, false);
+  const step = { action: "click", target: { role: "button", name: "Add source" }, expected: { type: "text", value: "Editor" } };
+  assert.equal(browserInputs.workflow.safeParse({ leaseId: "l", authorized: true, steps: [step] }).success, true);
+  for (const steps of [[], Array(13).fill(step), [{ ...step, expected: undefined }], [step, { ...step, target: { selector: "button" } }], [{ ...step, elementRef: "old-ref" }]]) {
+    assert.equal(browserInputs.workflow.safeParse({ leaseId: "l", authorized: true, steps }).success, false);
+  }
+  assert.equal(browserInputs.media_download.safeParse({ leaseId: "l", elementRef: "e", authorized: true, maxBytes: 33554433 }).success, false);
+  assert.equal(browserInputs.media_download.safeParse({ leaseId: "l", elementRef: "e" }).success, false);
 });
 
 test("CDP endpoints require explicit loopback IP, port and no redirects/credentials/path", () => {
@@ -90,7 +98,7 @@ test("managed worker uses only connection cleanup, without a Nodriver browser ow
 
 test("Python boundary tests reject invalid commands and bound sensitive observations", { skip: process.env.OPENCODE_CONNECT_BROWSER_TEST !== "1" }, async () => {
   const python = await browserPython();
-  const result = spawnSync(python, ["-B", "-m", "unittest", "discover", "-s", "test", "-p", "browser_worker_test.py"], { cwd: root, encoding: "utf8" });
+  const result = spawnSync(python, ["-B", "-m", "unittest", "discover", "-s", "test", "-p", "browser_*_test.py"], { cwd: root, encoding: "utf8" });
   assert.equal(result.status, 0, result.stdout + result.stderr);
 });
 
@@ -134,13 +142,21 @@ const fixtureHtml = `<!doctype html><title>Browser fixture</title><h1>Test page<
 <div role="button" aria-label="Drop target" ondragover="event.preventDefault()" ondrop="event.preventDefault();document.getElementById('status').textContent='Drop '+event.dataTransfer.getData('text/plain')">Drop target</div>
 <select aria-label="Choice" onchange="document.getElementById('status').textContent='Choice '+this.value"><option value="a">Alpha</option><option value="b">Beta</option></select>
 <input aria-label="Upload" type="file" onchange="document.getElementById('status').textContent='Uploaded '+this.files[0].name">
+<input aria-label="Directory upload" type="file" webkitdirectory>
+<input id="hidden-upload" hidden type="file" multiple onchange="document.getElementById('status').textContent='Chosen '+Array.from(this.files,f=>f.name).join(',')">
+<button onclick="document.getElementById('hidden-upload').click()">Upload files</button>
+<button onclick="document.getElementById('status').textContent='No chooser clicked'">No chooser</button>
+<button onclick="openSourceEditor()">Add source</button>
+<div id="editor"></div><div id="sources"></div>
+<audio id="fixture-audio" hidden preload="auto" src="/tone.wav"></audio><audio id="blob-audio" hidden preload="auto"></audio>
+<button>Duplicate</button><button>Duplicate</button>
 <input type="password" value="private-password" aria-label="Password">
 <button disabled>Disabled button</button>
 <input readonly aria-label="Readonly" value="Fixed value">
 <button onclick="this.remove()">Remove me</button><div id="status" role="status">Ready</div>
 <a href="/next">Next page</a><iframe title="Fixture frame" src="/frame"></iframe>
 <div style="height:80px;overflow:auto" role="region" aria-label="Scroll area" onscroll="document.getElementById('status').textContent='Wheel scrolled '+this.scrollTop"><div style="height:2000px">Scrollable</div></div>
-<script>${"/* unneeded script data */".repeat(5000)}</script>`;
+<script>fetch('/tone.wav').then(r=>r.blob()).then(b=>document.getElementById('blob-audio').src=URL.createObjectURL(b));let count=0;function openSourceEditor(){const field=document.createElement('textarea');field.id='source-text';field.setAttribute('aria-label','Source text');field.oninput=()=>document.getElementById('status').textContent='Source entered';const button=document.createElement('button');button.textContent='Insert source';button.onclick=addSource;document.getElementById('editor').replaceChildren(field,button);}function addSource(){const p=document.createElement('p');p.textContent='Source '+(++count)+': '+document.getElementById('source-text').value;document.getElementById('sources').append(p);document.getElementById('editor').replaceChildren();}${"/* unneeded script data */".repeat(5000)}</script>`;
 
 test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE_CONNECT_BROWSER_TEST !== "1", timeout: 180000 }, async t => {
   const temp = await mkdtemp(join(tmpdir(), "browser-acceptance-"));
@@ -149,8 +165,16 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   let releaseBlocked: (() => void) | undefined;
   let iframeReloads = 0;
   let releaseIframe: (() => void) | undefined;
+  const wav = Buffer.alloc(16044);
+  wav.write("RIFF"); wav.writeUInt32LE(wav.length - 8, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(16000, 40);
+  const crossHost = httpServer((_req, res) => { res.setHeader("content-type", "audio/wav"); res.end(wav); });
+  crossHost.listen(0, "127.0.0.1"); await once(crossHost, "listening");
+  t.after(() => new Promise<void>(resolve => crossHost.close(() => resolve())));
+  const crossAddr = crossHost.address(); assert.ok(crossAddr && typeof crossAddr !== "string");
   const host = httpServer((req, res) => {
+    if (req.url === "/tone.wav") { res.setHeader("content-type", "audio/wav"); res.end(wav); return; }
     res.setHeader("content-type", "text/html");
+    if (req.url === "/cors-media") { res.end(`<audio preload="auto" id="cross-audio" src="http://127.0.0.1:${crossAddr.port}/tone.wav"></audio>`); return; }
     if (req.url === "/blocked") { releaseBlocked = () => res.end("Released fixture"); blockedRequest?.(); return; }
     if (req.url === "/frame-auto") { res.end('<script>fetch("/frame-reload-gate").then(()=>location.replace("/frame?auto-reloaded"))</script>'); return; }
     if (req.url === "/frame-reload-gate") { releaseIframe = () => res.end("Reload now"); return; }
@@ -168,6 +192,7 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   const uploadRoot = join(temp, "uploads");
   const { mkdir } = await import("node:fs/promises"); await mkdir(uploadRoot);
   await writeFile(join(uploadRoot, "sample.txt"), "fixture upload");
+  await writeFile(join(uploadRoot, "second.pdf"), "%PDF-fixture");
   const env = { ...process.env, XDG_DATA_HOME: temp, OPENCODE_CONNECT_BROWSER_PYTHON: python, OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT: cdpUrl, OPENCODE_CONNECT_BROWSER_UPLOAD_ROOTS: uploadRoot };
   // The fixture owns an isolated process group; production systemd ownership
   // is exercised separately because Chrome must survive connector restarts.
@@ -246,6 +271,65 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     await assert.rejects(act({ action: "upload", elementRef, files: ["/etc/passwd"] }), errorCode("upload_denied"));
     assert.equal((await act({ action: "upload", elementRef, files: [join(uploadRoot, "sample.txt")], expected: { type: "text", value: "Uploaded sample.txt" } })).verification, "confirmed");
   });
+  await t.test("button uploads intercept the actual hidden chooser input and clean up after failure", async () => {
+    const files = [join(uploadRoot, "sample.txt"), join(uploadRoot, "second.pdf")];
+    await assert.rejects(act({ action: "upload", elementRef: await getRef("No chooser"), files: ["/etc/passwd"] }), errorCode("upload_denied"));
+    await assert.rejects(act({ action: "upload", elementRef: await getRef("Upload files"), files: [join(uploadRoot, "missing.pdf")] }), errorCode("upload_denied"));
+    assert.equal((await backend.call("wait", { leaseId, condition: { type: "text", value: "No chooser clicked" }, timeoutMs: 300 }, "owner")).verification, "timed_out", "Denied paths must not click the supplied button");
+    assert.equal((await act({ action: "upload", elementRef: await getRef("Upload files"), files, expected: { type: "text", value: "Chosen sample.txt,second.pdf" } })).verification, "confirmed");
+    await assert.rejects(act({ action: "upload", elementRef: await getRef("Upload"), files }), errorCode("invalid_upload"));
+    await assert.rejects(act({ action: "upload", elementRef: await getRef("Directory upload"), files }), errorCode("unsupported_chooser"));
+    await assert.rejects(act({ action: "upload", elementRef: await getRef("No chooser"), files }), errorCode("file_chooser_timeout"));
+    assert.equal((await act({ action: "upload", elementRef: await getRef("Upload files"), files: [files[1]], expected: { type: "text", value: "Chosen second.pdf" } })).verification, "confirmed");
+  });
+  await t.test("bounded workflows resolve replacement elements and stop at the first unconfirmed step", async () => {
+    const target = (role: string, name: string) => ({ role, name });
+    const steps = ["First", "Second"].flatMap((value, index) => [
+      { action: "click", target: target("button", "Add source"), expected: { type: "elementAppears", selector: "#source-text" } },
+      { action: "fill", target: target("textbox", "Source text"), value, expected: { type: "text", value: "Source entered" } },
+      { action: "click", target: target("button", "Insert source"), expected: { type: "text", value: `Source ${index + 1}: ${value}` } },
+    ]);
+    const result = await backend.call("workflow", { leaseId, authorized: true, steps, timeoutMs: 20000 }, "owner");
+    assert.equal(result.verification, "confirmed", JSON.stringify(result));
+    assert.equal(result.completedSteps, 6);
+    const ambiguous = await backend.call("workflow", { leaseId, authorized: true, steps: [{ action: "click", target: target("button", "Duplicate"), expected: { type: "text", value: "never" } }] }, "owner");
+    assert.equal(ambiguous.errorCode, "ambiguous_target"); assert.equal(ambiguous.dispatched, false);
+    const partial = await backend.call("workflow", { leaseId, authorized: true, steps: [
+      { action: "fill", target: target("textbox", "Name"), value: "Partial", expected: { type: "text", value: "Name entered" } },
+      { action: "click", target: target("button", "Save"), timeoutMs: 500, expected: { type: "text", value: "Never confirmed" } },
+      { action: "fill", target: target("textbox", "Name"), value: "Should not execute", expected: { type: "text", value: "Name entered" } },
+    ] }, "owner");
+    assert.equal(partial.verification, "timed_out"); assert.equal(partial.completedSteps, 1); assert.equal(partial.failedStep, 1); assert.equal(partial.mutationMayHaveOccurred, true);
+    assert.equal((await backend.call("wait", { leaseId, condition: { type: "text", value: "Saved Partial" } }, "owner")).verification, "confirmed");
+  });
+  await t.test("hidden HTTP and Blob audio can be awaited, inspected and retrieved without bypassing CORS", async () => {
+    // Chrome limits preload in background tabs. This isolated fixture explicitly
+    // activates its page; attachment itself must never change the active tab.
+    await fetch(cdpUrl + "/json/activate/" + one.id);
+    for (const selector of ["#fixture-audio", "#blob-audio"]) {
+      const ready = await backend.call("wait", { leaseId, condition: { type: "mediaReady", selector } }, "owner");
+      assert.equal(ready.verification, "confirmed", selector + " " + JSON.stringify(await backend.call("media", { leaseId }, "owner")));
+    }
+    const media = await backend.call("media", { leaseId }, "owner") as any;
+    assert.equal(media.items.length, 2, JSON.stringify(media));
+    assert.ok(media.items.every((item: any) => item.duration === 1 && item.readyState >= 2));
+    assert.equal((await backend.call("media", { leaseId, maxItems: 1 }, "owner")).truncated, true);
+    await assert.rejects(backend.call("media_download", { leaseId, elementRef: media.items[0].elementRef, authorized: true }, "owner"), errorCode("stale_reference"));
+    const fresh = await backend.call("media", { leaseId }, "owner") as any;
+    for (const item of fresh.items) {
+      const artifact = await backend.call("media_download", { leaseId, elementRef: item.elementRef, authorized: true }, "owner");
+      assert.deepEqual(await readFile(artifact.path as string), wav);
+      assert.equal(artifact.sha256, createHash("sha256").update(wav).digest("hex"));
+      assert.equal((await stat(artifact.path as string)).mode & 0o777, 0o600);
+      await rm(artifact.path as string);
+    }
+    await assert.rejects(backend.call("media_download", { leaseId, elementRef: fresh.items[0].elementRef, authorized: true, maxBytes: 1024 }, "owner"), errorCode("media_too_large"));
+    await act({ action: "navigate", url: pageUrl + "/cors-media", expected: { type: "readyState", value: "complete" } });
+    assert.equal((await backend.call("wait", { leaseId, condition: { type: "mediaReady", selector: "#cross-audio" } }, "owner")).verification, "confirmed");
+    const cross = await backend.call("media", { leaseId }, "owner") as any;
+    await assert.rejects(backend.call("media_download", { leaseId, elementRef: cross.items[0].elementRef, authorized: true }, "owner"), errorCode("media_fetch_failed"));
+    await act({ action: "navigate", url: pageUrl, expected: { type: "text", value: "Test page" } });
+  });
   await t.test("same-origin iframe references resolve in their own document", async () => {
     assert.equal((await act({ action: "click", elementRef: await getRef("Frame button") })).verification, "inconclusive");
     assert.ok((await snapshot()).nodes.some((node: any) => node.name.includes("Frame clicked")));
@@ -280,21 +364,21 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     await backend.call("detach", { leaseId }, "owner");
     assert.deepEqual(await pageIds(), baseline);
   });
-  await t.test("worker crash and timeout recovery preserve Chrome and invalidate leases", async () => {
+  await t.test("worker crash invalidates leases while ordinary wait timeout preserves observation", async () => {
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
     const worker = (backend as any).worker; process.kill(worker.pid, "SIGKILL"); await once(worker, "exit"); await sleep(20);
     await assert.rejects(snapshot(), errorCode("invalid_lease"));
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
-    await assert.rejects(backend.call("wait", { leaseId, timeoutMs: 200, condition: { type: "text", value: "Never appears" } }, "owner"), errorCode("timed_out"));
-    await assert.rejects(snapshot(), errorCode("invalid_lease"));
+    assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "text", value: "Never appears" } }, "owner")).verification, "timed_out");
+    assert.equal((await snapshot()).targetId, one.id);
+    await backend.call("detach", { leaseId }, "owner");
     assert.equal((await backend.call("status", {})).reachable, true);
   });
   await t.test("redacted URL cannot confirm navigation without a document change", async () => {
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
     await act({ action: "navigate", url: pageUrl + "/?token=hidden#fragment", expected: { type: "readyState", value: "complete" } });
     const observed = (await snapshot()).url;
-    await assert.rejects(backend.call("wait", { leaseId, timeoutMs: 250, condition: { type: "navigation", fromUrl: observed } }, "owner"), errorCode("timed_out"));
-    attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
+    assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "navigation", fromUrl: observed } }, "owner")).verification, "timed_out");
     assert.equal((await act({ action: "navigate", url: pageUrl + "/?token=hidden#fragment", expected: { type: "navigation", fromUrl: observed } })).verification, "confirmed");
     await backend.call("detach", { leaseId }, "owner");
   });
@@ -302,12 +386,13 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
     await act({ action: "navigate", url: pageUrl + "/ad-reload", expected: { type: "readyState", value: "complete" } });
     assert.ok(releaseIframe, "Iframe is loaded and waiting for the test trigger");
-    const waiting = assert.rejects(backend.call("wait", { leaseId, timeoutMs: 3000, condition: { type: "navigation", fromUrl: pageUrl + "/ad-reload" } }, "owner"), errorCode("timed_out"));
+    const waiting = backend.call("wait", { leaseId, timeoutMs: 3000, condition: { type: "navigation", fromUrl: pageUrl + "/ad-reload" } }, "owner");
     // The server releases the fetch; background-tab timer throttling cannot suppress the reload.
     await sleep(250);
     releaseIframe();
-    await waiting;
+    assert.equal((await waiting).verification, "timed_out");
     assert.ok(iframeReloads > 0, "Fixture iframe actually reloaded");
+    await backend.call("detach", { leaseId }, "owner");
   });
   await t.test("separate HTTP requests share a lease and enforce verified ingress ownership", async () => {
     const events = await Events.open(join(temp, "events/store.json"), { authenticate: async context => ({ principal: context, clientId: "chatgpt", grantId: context, resource: "https://example.test/opencode-connect/mcp", scope: "opencode-connect:access", grantContext: "opaque" }) });

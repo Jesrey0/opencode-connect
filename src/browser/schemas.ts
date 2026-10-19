@@ -9,7 +9,7 @@ const connection = { connectionId: id.optional() };
 export const conditionSchema = exposedUnion("type", [
   z.object({ type: z.literal("url"), value: z.url().max(4096) }),
   z.object({ type: z.literal("text"), value: z.string().min(1).max(1000) }),
-  z.object({ type: z.enum(["elementAppears", "elementDisappears"]), selector: z.string().min(1).max(1000), frameId: id.optional() }),
+  z.object({ type: z.enum(["elementAppears", "elementDisappears", "mediaReady"]), selector: z.string().min(1).max(1000), frameId: id.optional() }),
   z.object({ type: z.literal("readyState"), value: z.enum(["interactive", "complete"]) }),
   z.object({ type: z.literal("navigation"), fromUrl: z.url().max(4096) }),
 ]);
@@ -37,6 +37,9 @@ export const browserActionInputs = Object.fromEntries(actionSchema.options.map(v
   variant.shape.action.value as string,
   (variant as z.ZodObject).omit({ action: true }),
 ])) as Record<string, z.ZodObject>;
+const workflowTarget = z.object({ role: z.string().min(1).max(100), name: z.string().min(1).max(200), frameId: id.optional() }).strict();
+const workflowSteps = actionSchema.options.filter(variant => ["click", "fill", "typeText", "select", "keypress", "upload"].includes(variant.shape.action.value)).map(variant =>
+  (variant as z.ZodObject).omit({ leaseId: true, authorized: true, elementRef: true }).extend({ target: workflowTarget, expected: conditionSchema }).strict());
 export const browserInputs = {
   status: z.object({ ...browser, ...connection }).strict(),
   connect: z.object({ browser: z.literal("windows"), authorized: z.literal(true), timeoutMs: z.number().int().min(1000).max(120000).default(60000) }).strict(),
@@ -45,7 +48,10 @@ export const browserInputs = {
   attach: z.object({ ...browser, ...connection, targetId: id, controlMode: z.enum(["observe", "control"]) }).strict(),
   snapshot: z.object({ ...lease, maxNodes: z.number().int().min(1).max(300).default(100), frameId: id.optional(), filter: z.string().max(200).optional() }).strict(),
   action: actionSchema,
+  workflow: z.object({ ...lease, authorized: action.authorized, ...timeout, steps: z.array(z.union(workflowSteps)).min(1).max(12) }).strict(),
   wait: z.object({ ...lease, ...timeout, condition: conditionSchema }).strict(),
+  media: z.object({ ...lease, maxItems: z.number().int().min(1).max(20).default(10) }).strict(),
+  media_download: z.object({ ...lease, ...ref, ...timeout, authorized: action.authorized, maxBytes: z.number().int().min(1024).max(33554432).default(33554432) }).strict(),
   screenshot: z.object({ ...lease, width: z.number().int().min(100).max(1920).default(1280), height: z.number().int().min(100).max(1080).default(720) }).strict(),
   detach: z.union([z.object(lease).strict(), z.object({ connectionId: id }).strict()]),
 };
@@ -60,7 +66,10 @@ export const browserOutputs = {
   attach: z.object({ leaseId: id, browser: z.enum(["linux", "windows"]), generation: id, controlMode: z.enum(["observe", "control"]), target, ownership: z.literal("external") }).strict(),
   snapshot: z.object({ targetId: id, generation: id, url: z.string(), title: z.string(), nodes: z.array(z.object({ role: z.string(), name: z.string(), ref: id.optional(), frameId: id, states: z.array(z.string()) }).strict()), frames: z.array(z.object({ frameId: id, url: z.string() }).strict()), truncated: z.boolean(), totalNodes: z.number(), observationErrors: z.array(z.string()), untrustedPageContent: z.literal(true) }).strict(),
   action: z.object({ dispatched: z.boolean(), completed: z.boolean(), verification, url: z.string(), evidence: z.string(), mutationMayHaveOccurred: z.boolean() }).strict(),
+  workflow: z.object({ completedSteps: z.number().int(), failedStep: z.number().int().nullable(), verification, dispatched: z.boolean(), mutationMayHaveOccurred: z.boolean(), url: z.string(), evidence: z.string(), errorCode: z.string().nullable() }).strict(),
   wait: z.object({ verification, url: z.string(), evidence: z.string() }).strict(),
+  media: z.object({ items: z.array(z.object({ elementRef: id, kind: z.enum(["audio", "video"]), sourceUrl: z.string().nullable(), duration: z.number().nullable(), readyState: z.number().int(), paused: z.boolean(), ended: z.boolean(), error: z.number().nullable() }).strict()), truncated: z.boolean(), untrustedPageContent: z.literal(true) }).strict(),
+  media_download: z.object({ path: z.string(), mimeType: z.string(), bytes: z.number().int(), sha256: z.string(), untrustedPageContent: z.literal(true) }).strict(),
   screenshot: z.object({ targetId: id, mimeType: z.literal("image/jpeg"), bytes: z.number(), width: z.number(), height: z.number() }).strict(),
   detach: z.object({ detached: z.literal(true), chromePreserved: z.literal(true) }).strict(),
 };

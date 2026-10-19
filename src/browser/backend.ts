@@ -130,10 +130,10 @@ export class BrowserBackend {
       const timer = setTimeout(() => {
         const item = this.pending.get(id); if (!item) return;
         this.pending.delete(id); item.cleanup();
-        reject(new BrowserError("timed_out", "Browser request timed out; attach again and inspect before retrying", method === "action", "timed_out"));
+        reject(new BrowserError("timed_out", "Browser request timed out; attach again and inspect before retrying", method === "action" || method === "workflow", "timed_out"));
         this.stop("Browser deadline reached; leases invalidated", "timed_out");
       }, timeoutMs + 500);
-      this.pending.set(id, { resolve, reject, timer, cleanup: () => signal?.removeEventListener("abort", abort), mutation: method === "action" });
+      this.pending.set(id, { resolve, reject, timer, cleanup: () => signal?.removeEventListener("abort", abort), mutation: method === "action" || method === "workflow" });
       signal?.addEventListener("abort", abort, { once: true });
       if (signal?.aborted) { abort(); return; }
       const worker = this.worker!;

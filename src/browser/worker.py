@@ -17,10 +17,12 @@ import urllib.request
 from websockets.asyncio.client import connect as WebSocketConnect
 from websockets.exceptions import InvalidStatus
 from websockets.protocol import State
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 with contextlib.redirect_stdout(sys.stderr):
     from nodriver import cdp
     from nodriver.core.connection import Connection
+    from media import MediaError, inspect_media, download_media
 
 MAX_FRAME = 2 * 1024 * 1024
 MAX_SCREENSHOT = 1024 * 1024
@@ -31,6 +33,9 @@ METHODS = {
     "snapshot": {"leaseId", "maxNodes", "frameId", "filter"},
     "screenshot": {"leaseId", "width", "height"}, "detach": {"leaseId", "connectionId"},
     "wait": {"leaseId", "condition", "timeoutMs"},
+    "workflow": {"leaseId", "authorized", "steps", "timeoutMs"},
+    "media": {"leaseId", "maxItems"},
+    "media_download": {"leaseId", "elementRef", "authorized", "maxBytes", "timeoutMs"},
     "action": {"leaseId", "action", "authorized", "expected", "timeoutMs", "elementRef", "sourceRef", "targetRef", "value", "key", "modifiers", "url", "files", "deltaX", "deltaY"},
 }
 
@@ -141,17 +146,48 @@ def validate_condition(condition):
     if not isinstance(condition, dict):
         reject("invalid_arguments", "Expected condition must be an object")
     kind = condition.get("type")
-    fields = {"url": {"type", "value"}, "text": {"type", "value"}, "elementAppears": {"type", "selector", "frameId"}, "elementDisappears": {"type", "selector", "frameId"}, "readyState": {"type", "value"}, "navigation": {"type", "fromUrl"}}
+    fields = {"url": {"type", "value"}, "text": {"type", "value"}, "elementAppears": {"type", "selector", "frameId"}, "elementDisappears": {"type", "selector", "frameId"}, "mediaReady": {"type", "selector", "frameId"}, "readyState": {"type", "value"}, "navigation": {"type", "fromUrl"}}
     if kind not in fields or set(condition) - fields[kind]:
         reject("invalid_arguments", "Unsupported expected condition")
-    field = "selector" if kind.startswith("element") else "fromUrl" if kind == "navigation" else "value"
+    field = "selector" if kind.startswith("element") or kind == "mediaReady" else "fromUrl" if kind == "navigation" else "value"
     if not isinstance(condition.get(field), str) or not 0 < len(condition[field]) <= 4096:
         reject("invalid_arguments", "Expected condition requires a bounded value")
     if kind == "readyState" and condition[field] not in ("interactive", "complete"):
         reject("invalid_arguments", "Invalid ready state")
 
 
+def upload_files(names, browser):
+    roots = []
+    for name in os.environ.get("OPENCODE_CONNECT_BROWSER_UPLOAD_ROOTS", "").split(os.pathsep):
+        if name:
+            if not Path(name).is_absolute():
+                reject("upload_denied", "Upload roots must be absolute")
+            roots.append(Path(name).resolve())
+    files = []
+    for name in names:
+        file = Path(name)
+        try:
+            if not file.is_absolute():
+                raise ValueError()
+            file = file.resolve(strict=True)
+            if not any(file.is_relative_to(root) for root in roots) or not file.is_file() or any(part.startswith(".") for part in file.parts[1:]) or file.suffix.lower() in (".pem", ".key", ".p12", ".pfx"):
+                raise ValueError()
+        except (OSError, ValueError, RuntimeError):
+            reject("upload_denied", "File is unavailable, outside authorized upload roots, or protected")
+        if browser == "windows":
+            # CDP opens paths on Chrome's host, not on the connector host.
+            match = re.fullmatch(r"/mnt/([a-zA-Z])/(.+)", str(file))
+            if not match:
+                reject("upload_denied", "Windows Chrome requires an authorized file on a mounted Windows drive")
+            files.append(match[1].upper() + ":\\" + match[2].replace("/", "\\"))
+        else:
+            files.append(str(file))
+    return files
+
+
 class Adapter:
+    safe_url = staticmethod(safe_url)
+
     def __init__(self):
         self.lease = None
         self.conn = None
@@ -159,6 +195,7 @@ class Adapter:
         self.epoch = 0
         self.dispatched = False
         self.approval = None
+        self.deadline = float("inf")
 
     async def disconnect(self):
         conn, self.conn = self.conn, None
@@ -513,26 +550,112 @@ class Adapter:
         if frame_id not in frames:
             reject("invalid_frame", "Wait frame is outside the selected tab")
         world = await self.conn.send(cdp.page.create_isolated_world(cdp.page.FrameId(frame_id), world_name="opencode-browser-observe"))
-        expression = "(()=>{const e=document.querySelector(" + json.dumps(condition["selector"]) + ");return !!e&&!!(e.getClientRects().length)&&getComputedStyle(e).visibility!=='hidden';})()"
+        predicate = "['AUDIO','VIDEO'].includes(e.tagName)&&e.readyState>=2&&!e.error" if kind == "mediaReady" else "!!e.getClientRects().length&&getComputedStyle(e).visibility!=='hidden'"
+        expression = "(()=>{const e=document.querySelector(" + json.dumps(condition["selector"]) + ");return !!e&&(" + predicate + ");})()"
         obj, error = await self.conn.send(cdp.runtime.evaluate(expression, context_id=world, return_by_value=True, silent=True))
         if error:
             reject("invalid_selector", "Wait selector could not be evaluated")
-        return bool(obj.value) if kind == "elementAppears" else not bool(obj.value)
+        return bool(obj.value) if kind in ("elementAppears", "mediaReady") else not bool(obj.value)
 
-    async def wait(self, condition, navigation_before=None):
+    async def wait(self, condition, navigation_before=None, timeout_ms=10000):
         validate_condition(condition)
         if condition["type"] == "navigation" and navigation_before is None:
             frames = await self.frames()
             top = next(iter(frames))
             navigation_before = (top, frames[top]["loader"])
-        while True:
-            if await self.condition(condition, navigation_before):
-                return {"verification": "confirmed", "url": safe_url((await self.current())["url"]), "evidence": "Requested observable condition met"}
-            # Deadline-bounded adaptive observation; no action retries.
-            await asyncio.sleep(0.1)
+        url = safe_url((await self.current())["url"])
+        try:
+            async with asyncio.timeout_at(min(self.deadline, asyncio.get_running_loop().time() + timeout_ms / 1000)):
+                while True:
+                    if await self.condition(condition, navigation_before):
+                        return {"verification": "confirmed", "url": safe_url((await self.current())["url"]), "evidence": "Requested observable condition met"}
+                    # Observation continues within this call; mutations are never retried.
+                    await asyncio.sleep(0.1)
+        except TimeoutError:
+            return {"verification": "timed_out", "url": url, "evidence": "Condition not observed before deadline; lease preserved; observation may continue"}
+
+    async def upload(self, args, obj, state, files):
+        if state["tag"] == "INPUT" and state["type"] == "file":
+            settings = await self.function(obj, "function(){return {multiple:this.multiple,directory:this.webkitdirectory};}")
+            if settings["directory"]:
+                reject("unsupported_chooser", "Directory uploads are unsupported")
+            if len(files) > 1 and not settings["multiple"]:
+                reject("invalid_upload", "This input accepts only one file")
+            self.dispatched = True
+            await self.conn.send(cdp.dom.set_file_input_files(files, object_id=obj))
+            return
+        ref_data = dict(self.refs[args["elementRef"]])
+        pos = await self.point(args["elementRef"])
+        chooser = asyncio.get_running_loop().create_future()
+        def opened(event):
+            if not chooser.done():
+                chooser.set_result(event)
+        self.conn.add_handler(cdp.page.FileChooserOpened, opened)
+        try:
+            await self.conn.send(cdp.page.set_intercept_file_chooser_dialog(True))
+            self.dispatched = True
+            await self.native_click(pos, "click")
+            try:
+                event = await asyncio.wait_for(chooser, 3)
+            except TimeoutError:
+                reject("file_chooser_timeout", "No file chooser observed after the authorized click; inspect before retrying")
+            frames = await self.frames()
+            frame = frames.get(ref_data["frame"])
+            if str(event.frame_id) != ref_data["frame"] or not frame or frame["loader"] != ref_data["loader"] or ref_data["epoch"] != self.epoch:
+                reject("invalid_upload", "File chooser belongs to a different frame or document")
+            if event.backend_node_id is None:
+                reject("unsupported_chooser", "This chooser has no file input; File System Access pickers are unsupported")
+            if event.mode != "selectMultiple" and len(files) > 1:
+                reject("invalid_upload", "This chooser accepts only one file")
+            # Only the input identified by Chrome's intercepted event is writable.
+            node = await self.conn.send(cdp.dom.describe_node(backend_node_id=event.backend_node_id))
+            attributes = dict(zip((node.attributes or [])[::2], (node.attributes or [])[1::2]))
+            if node.node_name != "INPUT" or attributes.get("type", "").lower() != "file" or "disabled" in attributes or "webkitdirectory" in attributes:
+                reject("unsupported_chooser", "Chooser does not identify a supported file input")
+            await self.conn.send(cdp.dom.set_file_input_files(files, backend_node_id=event.backend_node_id))
+        finally:
+            self.conn.remove_handler(cdp.page.FileChooserOpened, opened)
+            if not chooser.done():
+                chooser.cancel()
+            # Always restore native chooser behavior, including rejection/cancellation.
+            await asyncio.wait_for(self.conn.send(cdp.page.set_intercept_file_chooser_dialog(False)), 1)
+
+    async def workflow(self, args, owner):
+        completed = 0
+        url = ""
+        for index, step in enumerate(args["steps"]):
+            try:
+                deadline = min(self.deadline, asyncio.get_running_loop().time() + step.get("timeoutMs", 10000) / 1000)
+                async with asyncio.timeout_at(deadline):
+                    row = await self.guard(args, owner, True)
+                    url = safe_url(row["url"])
+                    target = step["target"]
+                    while True:
+                        snap = await self.snapshot({"maxNodes": 300, "filter": target["name"], **({"frameId": target["frameId"]} if "frameId" in target else {})})
+                        matches = [node for node in snap["nodes"] if node["role"] == target["role"] and node["name"] == target["name"] and "ref" in node]
+                        if snap["truncated"] or snap["observationErrors"]:
+                            reject("incomplete_observation", "Workflow target observation is incomplete; narrow the target or frame")
+                        if len(matches) > 1:
+                            reject("ambiguous_target", "Workflow target must match exactly one observed element")
+                        if matches:
+                            break
+                        await asyncio.sleep(0.1)
+                    action_args = {key: value for key, value in step.items() if key != "target"}
+                    result = await self.action({**action_args, "elementRef": matches[0]["ref"], "leaseId": args["leaseId"], "authorized": True})
+                    url = result["url"]
+                    if result["verification"] != "confirmed":
+                        return {"completedSteps": completed, "failedStep": index, "verification": result["verification"], "dispatched": self.dispatched, "mutationMayHaveOccurred": self.dispatched, "url": result["url"], "evidence": result["evidence"], "errorCode": "postcondition_unconfirmed"}
+                completed += 1
+            except (Rejected, TimeoutError) as error:
+                return {"completedSteps": completed, "failedStep": index, "verification": "timed_out" if isinstance(error, TimeoutError) else "inconclusive" if self.dispatched else "rejected", "dispatched": self.dispatched, "mutationMayHaveOccurred": self.dispatched, "url": url, "evidence": error.message if isinstance(error, Rejected) else "Workflow step deadline reached; inspect before continuing", "errorCode": error.code if isinstance(error, Rejected) else "timed_out"}
+            except Exception:
+                await self.disconnect()
+                return {"completedSteps": completed, "failedStep": index, "verification": "inconclusive" if self.dispatched else "failed", "dispatched": self.dispatched, "mutationMayHaveOccurred": self.dispatched, "url": url, "evidence": "Browser operation failed; lease released; attach and inspect before continuing", "errorCode": "browser_error"}
+        return {"completedSteps": completed, "failedStep": None, "verification": "confirmed", "dispatched": self.dispatched, "mutationMayHaveOccurred": self.dispatched, "url": url, "evidence": "All step postconditions confirmed", "errorCode": None}
 
     async def action(self, args):
         kind = args["action"]
+        files = upload_files(args["files"], self.lease["browser"]) if kind == "upload" else None
         navigation_before = None
         if args.get("expected", {}).get("type") == "navigation":
             frames = await self.frames()
@@ -562,20 +685,7 @@ class Adapter:
                 else:
                     obj, state = await self.element(args["elementRef"])
                 if kind == "upload":
-                    if state["tag"] != "INPUT" or state["type"] != "file":
-                        reject("invalid_upload", "Reference is not a file input")
-                    roots = [Path(root).resolve() for root in os.environ.get("OPENCODE_CONNECT_BROWSER_UPLOAD_ROOTS", "").split(os.pathsep) if root]
-                    files = []
-                    for name in args["files"]:
-                        file = Path(name)
-                        if not file.is_absolute():
-                            reject("upload_denied", "Upload paths must be absolute")
-                        file = file.resolve(strict=True)
-                        if not any(file.is_relative_to(root) for root in roots) or not file.is_file() or any(part.startswith(".") for part in file.parts[1:]) or file.suffix in (".pem", ".key", ".p12", ".pfx"):
-                            reject("upload_denied", "File is outside authorized upload roots or is protected")
-                        files.append(str(file))
-                    self.dispatched = True
-                    await self.conn.send(cdp.dom.set_file_input_files(files, object_id=obj))
+                    await self.upload(args, obj, state, files)
                 elif kind != "drag":
                     if kind == "fill" and (state["readonly"] or state["tag"] not in ("INPUT", "TEXTAREA") or state["type"] in ("file", "hidden", "submit", "button", "checkbox", "radio")):
                         reject("invalid_element", "Fill requires an editable text control")
@@ -629,7 +739,7 @@ class Adapter:
                         await self.conn.send(cdp.input_.dispatch_key_event("keyDown", key=" " if key == "Space" else key, windows_virtual_key_code=codes[key], text="\r" if key == "Enter" else " " if key == "Space" else None))
                         await self.conn.send(cdp.input_.dispatch_key_event("keyUp", key=key, windows_virtual_key_code=codes[key]))
             if args.get("expected"):
-                result = await self.wait(args["expected"], navigation_before)
+                result = await self.wait(args["expected"], navigation_before, args.get("timeoutMs", 10000))
                 return {**result, "dispatched": True, "completed": True, "mutationMayHaveOccurred": True}
             return {"dispatched": True, "completed": True, "verification": "inconclusive", "url": safe_url((await self.current())["url"]), "evidence": "Command completed; application outcome requires an expected condition", "mutationMayHaveOccurred": True}
         finally:
@@ -692,14 +802,20 @@ class Adapter:
             await self.approved(args, owner, check=False)
             await self.disconnect()
             return {"detached": True, "chromePreserved": True}
-        await self.guard(args, owner, method == "action")
+        await self.guard(args, owner, method in ("action", "workflow"))
         if method == "detach":
             await self.disconnect()
             return {"detached": True, "chromePreserved": True}
         if method == "snapshot":
             return await self.snapshot(args)
         if method == "wait":
-            return await self.wait(args["condition"])
+            return await self.wait(args["condition"], timeout_ms=args.get("timeoutMs", 10000))
+        if method == "workflow":
+            return await self.workflow(args, owner)
+        if method == "media":
+            return await inspect_media(self, args)
+        if method == "media_download":
+            return await download_media(self, args)
         if method == "action":
             return await self.action(args)
         if method == "screenshot":
@@ -718,7 +834,7 @@ def validate(method, args):
     if "browser" in args:
         if args["browser"] not in ("linux", "windows"):
             reject("invalid_arguments", "Invalid browser selection")
-    for field, minimum, maximum in (("maxNodes", 1, 300), ("maxTabs", 1, 100), ("width", 100, 1920), ("height", 100, 1080), ("timeoutMs", 1000 if method == "connect" else 100, 120000 if method == "connect" else 30000)):
+    for field, minimum, maximum in (("maxItems", 1, 20), ("maxBytes", 1024, 33554432), ("maxNodes", 1, 300), ("maxTabs", 1, 100), ("width", 100, 1920), ("height", 100, 1080), ("timeoutMs", 1000 if method == "connect" else 100, 120000 if method == "connect" else 30000)):
         if field in args and (type(args[field]) is not int or not minimum <= args[field] <= maximum):
             reject("invalid_arguments", "Invalid browser argument bound")
     if "filter" in args and (not isinstance(args["filter"], str) or len(args["filter"]) > 200):
@@ -726,7 +842,7 @@ def validate(method, args):
     for field in ("leaseId", "connectionId", "targetId", "elementRef", "sourceRef", "targetRef", "frameId"):
         if field in args and (not isinstance(args[field], str) or not 0 < len(args[field]) <= 256):
             reject("invalid_arguments", "Invalid browser identity")
-    required = {"connect": ("browser", "authorized"), "attach": ("targetId", "controlMode"), "snapshot": ("leaseId",), "wait": ("leaseId", "condition"), "screenshot": ("leaseId",), "action": ("leaseId", "action", "authorized")}
+    required = {"connect": ("browser", "authorized"), "attach": ("targetId", "controlMode"), "snapshot": ("leaseId",), "wait": ("leaseId", "condition"), "workflow": ("leaseId", "authorized", "steps"), "media": ("leaseId",), "media_download": ("leaseId", "elementRef", "authorized"), "screenshot": ("leaseId",), "action": ("leaseId", "action", "authorized")}
     if any(field not in args for field in required.get(method, ())):
         reject("invalid_arguments", "Missing required browser argument")
     if method == "attach" and args["controlMode"] not in ("observe", "control"):
@@ -737,6 +853,21 @@ def validate(method, args):
         reject("invalid_arguments", "Detach requires exactly one lease or connection handle")
     if method == "wait":
         validate_condition(args["condition"])
+    if method == "media_download" and args["authorized"] is not True:
+        reject("invalid_arguments", "Media retrieval requires explicit authorization")
+    if method == "workflow":
+        steps = args["steps"]
+        if args["authorized"] is not True or not isinstance(steps, list) or not 1 <= len(steps) <= 12:
+            reject("invalid_arguments", "Workflow requires authorization and 1 to 12 steps")
+        for step in steps:
+            if not isinstance(step, dict) or step.get("action") not in ("click", "fill", "typeText", "select", "keypress", "upload") or "expected" not in step or set(step) & {"leaseId", "authorized", "elementRef"}:
+                reject("invalid_arguments", "Workflow steps require a target and postcondition")
+            target = step.get("target")
+            if not isinstance(target, dict) or set(target) - {"role", "name", "frameId"} or any(not isinstance(target.get(key), str) or not 0 < len(target[key]) <= bound for key, bound in (("role", 100), ("name", 200))):
+                reject("invalid_arguments", "Workflow requires a bounded exact role/name target")
+            if "frameId" in target and (not isinstance(target["frameId"], str) or not 0 < len(target["frameId"]) <= 256):
+                reject("invalid_arguments", "Invalid workflow frame")
+            validate("action", {**{key: value for key, value in step.items() if key != "target"}, "leaseId": args["leaseId"], "authorized": True, "elementRef": "workflow-observation"})
     if method == "action":
         kind = args["action"]
         variants = {"navigate": {"url"}, "click": {"elementRef"}, "rightClick": {"elementRef"}, "doubleClick": {"elementRef"}, "hover": {"elementRef"}, "drag": {"sourceRef", "targetRef"}, "typeText": {"elementRef","value"}, "keyCombo": {"elementRef","key","modifiers"}, "wheel": {"elementRef","deltaX","deltaY"}, "fill": {"elementRef", "value"}, "select": {"elementRef", "value"}, "upload": {"elementRef", "files"}, "keypress": {"elementRef", "key"}, "scroll": {"elementRef", "deltaY"}}
@@ -782,11 +913,14 @@ async def main():
                 remaining = min(120 if method == "connect" else 30, deadline / 1000 - time.time())
                 if remaining <= 0:
                     raise TimeoutError()
+                adapter.deadline = asyncio.get_running_loop().time() + remaining - min(0.2, remaining / 5)
                 async with asyncio.timeout(remaining):
                     result = await adapter.run(method, args, request["owner"])
                 reply = {"id": request_id, "ok": True, "result": result}
             except Rejected as error:
                 reply = {"id": request_id, "ok": False, "error": {"code": error.code, "message": error.message, "dispatched": adapter.dispatched, "verification": "inconclusive" if adapter.dispatched else "rejected"}}
+            except MediaError as error:
+                reply = {"id": request_id, "ok": False, "error": {"code": error.code, "message": error.message, "dispatched": False, "verification": "failed"}}
             except TimeoutError:
                 dispatched = adapter.dispatched
                 await adapter.disconnect()
