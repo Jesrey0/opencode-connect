@@ -1,4 +1,5 @@
 """Private worker boundary tests, run with the explicitly installed environment."""
+import asyncio
 import importlib.util
 import json
 import os
@@ -37,6 +38,27 @@ class BoundaryTests(unittest.TestCase):
             with self.subTest(step=malformed), self.assertRaises(worker.Rejected):
                 worker.validate("workflow", {"leaseId": "lease", "authorized": True, "steps": [step, malformed]})
 
+    def test_scoped_targets_and_value_assertions_reject_unbounded_or_unknown_fields(self):
+        target = {"role": "textbox", "name": "Title", "within": {"role": "dialog", "name": "Rename recording"}}
+        worker.validate_condition({"type": "element", "target": target, "value": "界😀", "state": "editable"})
+        for condition in [
+            {"type": "element", "target": {**target, "within": {"role": "dialog", "name": "x", "within": target}}},
+            {"type": "element", "target": target, "state": "guess"},
+            {"type": "element", "target": target, "value": "😀" * 6001},
+            {"type": "element", "target": target, "value": "x", "script": "1+1"},
+        ]:
+            with self.subTest(condition=condition), self.assertRaises(worker.Rejected):
+                worker.validate_condition(condition)
+        with self.assertRaises(worker.Rejected) as caught:
+            worker.validate("action", {"leaseId": "lease", "action": "fill", "elementRef": "ref", "authorized": True, "value": "😀" * 6001})
+        self.assertIn("12000", caught.exception.message)
+
+    def test_native_failures_have_sanitized_infrastructure_classification(self):
+        for error, code, layer in [(ConnectionError("private-url"), "disconnected", "browser"), (worker.ProtocolException({"code": -32602, "message": "private-value"}), "cdp_error", "input"), (RuntimeError("private-value"), "browser_error", "browser")]:
+            actual_code, message, actual_layer = worker.operation_error(error)
+            self.assertEqual((actual_code, actual_layer), (code, layer))
+            self.assertNotIn("private", message)
+
     def test_sensitive_url_and_text_values_are_omitted(self):
         self.assertEqual(worker.safe_url("https://user:password@example.test/path?access_token=secret#token"), "https://example.test/path")
         self.assertNotIn("secret", worker.safe_text("token=secret Bearer secret https://example.test/?secret=secret"))
@@ -48,6 +70,41 @@ class BoundaryTests(unittest.TestCase):
 
 
 class OutputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_outer_workflow_deadline_preserves_earlier_dispatch_evidence(self):
+        class Adapter(worker.Adapter):
+            async def guard(self, args, owner, control=False):
+                if getattr(self, "acted", False):
+                    await asyncio.Event().wait()
+                return {"url": "https://example.test/"}
+
+            async def resolve_target(self, target):
+                return "observed"
+
+            async def action(self, args):
+                self.acted = self.dispatched = True
+                return {"verification": "confirmed", "url": "https://example.test/", "evidence": "done"}
+        adapter = Adapter()
+        step = {"action": "click", "target": {"role": "button", "name": "Save"}, "expected": {"type": "text", "value": "done"}}
+        with self.assertRaises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await adapter.workflow({"leaseId": "lease", "steps": [step, step]}, "owner")
+        self.assertTrue(adapter.dispatched)
+
+    async def test_socket_loss_is_not_misclassified_as_stale_reference_or_closed_target(self):
+        class Connection:
+            async def send(self, command):
+                raise ConnectionError("private connection diagnostics")
+        class Adapter(worker.Adapter):
+            async def frames(self):
+                return {"top": {"loader": "load"}}
+        adapter = Adapter()
+        adapter.conn = Connection()
+        adapter.lease = {"target": "selected"}
+        adapter.refs = {"ref": {"backend": 7, "epoch": 0, "frame": "top", "loader": "load"}}
+        for operation in (lambda: adapter.element("ref"), adapter.current):
+            with self.assertRaises(ConnectionError):
+                await operation()
+
     async def test_workflow_keeps_partial_progress_when_connection_disappears(self):
         for native_error in (False, True):
             class Adapter(worker.Adapter):
@@ -59,8 +116,8 @@ class OutputTests(unittest.IsolatedAsyncioTestCase):
                         worker.reject("disconnected", "Connection expired")
                     return {"url": "https://example.test/?token=secret"}
 
-                async def snapshot(self, args):
-                    return {"nodes": [{"role": "button", "name": "Add", "ref": "observed"}], "truncated": False, "observationErrors": []}
+                async def resolve_target(self, target):
+                    return "observed"
 
                 async def action(self, args):
                     self.acted = self.dispatched = True
@@ -75,8 +132,21 @@ class OutputTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result["completedSteps"], 1)
             self.assertEqual(result["failedStep"], 1)
             self.assertTrue(result["mutationMayHaveOccurred"])
+            self.assertFalse(result["stepDispatched"])
             self.assertEqual(result["url"], "https://example.test/")
             self.assertNotIn("private", json.dumps(result))
+
+    async def test_status_does_not_report_a_dead_attachment_as_connected(self):
+        class Adapter(worker.Adapter):
+            async def discover(self, browser):
+                return {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/id", "Browser": "Chrome/155.0"}
+        adapter = Adapter()
+        adapter.lease = {"browser": "linux", "identity": "ws://127.0.0.1:9222/devtools/browser/id"}
+        result = await adapter.status("linux", {}, "owner")
+        self.assertTrue(result["reachable"])
+        self.assertFalse(result["attached"])
+        self.assertIsNone(adapter.lease)
+        self.assertIn("Attachment connection lost", result["lastError"])
 
     async def test_large_tab_lists_truncate_by_bytes_and_can_be_narrowed(self):
         class Adapter(worker.Adapter):

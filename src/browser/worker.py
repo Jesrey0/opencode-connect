@@ -15,13 +15,13 @@ import time
 import urllib.parse
 import urllib.request
 from websockets.asyncio.client import connect as WebSocketConnect
-from websockets.exceptions import InvalidStatus
+from websockets.exceptions import InvalidStatus, ConnectionClosed
 from websockets.protocol import State
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 with contextlib.redirect_stdout(sys.stderr):
     from nodriver import cdp
-    from nodriver.core.connection import Connection
+    from nodriver.core.connection import Connection, ProtocolException
     from media import MediaError, inspect_media, download_media
 
 MAX_FRAME = 2 * 1024 * 1024
@@ -30,7 +30,7 @@ METHODS = {
     "hello": set(), "status": {"browser", "connectionId"}, "tabs": {"browser", "connectionId", "filter", "maxTabs"},
     "connect": {"browser", "authorized", "timeoutMs"},
     "attach": {"browser", "connectionId", "targetId", "controlMode"},
-    "snapshot": {"leaseId", "maxNodes", "frameId", "filter"},
+    "snapshot": {"leaseId", "maxNodes", "frameId", "scopeRef", "filter"},
     "screenshot": {"leaseId", "width", "height"}, "detach": {"leaseId", "connectionId"},
     "wait": {"leaseId", "condition", "timeoutMs"},
     "workflow": {"leaseId", "authorized", "steps", "timeoutMs"},
@@ -47,6 +47,43 @@ class Rejected(Exception):
 
 def reject(code, message):
     raise Rejected(code, message)
+
+
+def operation_error(error):
+    # Classify only known infrastructure failures. Never expose CDP exception
+    # text: it can contain URLs, page content or submitted values.
+    if isinstance(error, (ConnectionClosed, ConnectionError, OSError)):
+        return "disconnected", "Chrome connection lost; attach and inspect before continuing", "browser"
+    if isinstance(error, ProtocolException):
+        return "cdp_error", "Chrome rejected a protocol operation; inspect the target before continuing", "input"
+    return "browser_error", "Browser operation failed; connection released; attach and inspect before continuing", "browser"
+
+
+def ax_identity(node):
+    return hashlib.sha256(json.dumps([node.role.value if node.role else "", node.name.value if node.name else ""], ensure_ascii=True).encode()).hexdigest()
+
+
+def ax_ancestors(node, by_id):
+    ancestors, seen = [], set()
+    while node.parent_id and str(node.parent_id) not in seen:
+        seen.add(str(node.parent_id))
+        node = by_id.get(str(node.parent_id))
+        if node is None:
+            break
+        ancestors.append(node)
+    return ancestors
+
+
+def validate_target(target):
+    if not isinstance(target, dict) or set(target) - {"role", "name", "frameId", "within"} or any(not isinstance(target.get(key), str) or not 0 < len(target[key]) <= bound for key, bound in (("role", 100), ("name", 200))):
+        reject("invalid_arguments", "Target requires a bounded exact role/name")
+    if "frameId" in target and (not isinstance(target["frameId"], str) or not 0 < len(target["frameId"]) <= 256):
+        reject("invalid_arguments", "Invalid target frame")
+    if "within" in target:
+        scope = target["within"]
+        if not isinstance(scope, dict) or set(scope) != {"role", "name"}:
+            reject("invalid_arguments", "Target within requires an exact ancestor role/name")
+        validate_target(scope)
 
 
 def safe_url(value):
@@ -146,9 +183,16 @@ def validate_condition(condition):
     if not isinstance(condition, dict):
         reject("invalid_arguments", "Expected condition must be an object")
     kind = condition.get("type")
-    fields = {"url": {"type", "value"}, "text": {"type", "value"}, "elementAppears": {"type", "selector", "frameId"}, "elementDisappears": {"type", "selector", "frameId"}, "mediaReady": {"type", "selector", "frameId"}, "readyState": {"type", "value"}, "navigation": {"type", "fromUrl"}}
+    fields = {"url": {"type", "value"}, "text": {"type", "value"}, "elementAppears": {"type", "selector", "frameId"}, "elementDisappears": {"type", "selector", "frameId"}, "mediaReady": {"type", "selector", "frameId"}, "readyState": {"type", "value"}, "navigation": {"type", "fromUrl"}, "element": {"type", "target", "value", "state"}}
     if kind not in fields or set(condition) - fields[kind]:
         reject("invalid_arguments", "Unsupported expected condition")
+    if kind == "element":
+        validate_target(condition.get("target"))
+        if "value" in condition and (not isinstance(condition["value"], str) or len(condition["value"].encode("utf-16-le", "surrogatepass")) // 2 > 12000):
+            reject("invalid_arguments", "Element value limit is 12000 UTF-16 code units")
+        if "state" in condition and condition["state"] not in ("enabled", "disabled", "focused", "checked", "unchecked", "expanded", "collapsed", "selected", "editable"):
+            reject("invalid_arguments", "Unsupported element state")
+        return
     field = "selector" if kind.startswith("element") or kind == "mediaReady" else "fromUrl" if kind == "navigation" else "value"
     if not isinstance(condition.get(field), str) or not 0 < len(condition[field]) <= 4096:
         reject("invalid_arguments", "Expected condition requires a bounded value")
@@ -296,8 +340,9 @@ class Adapter:
                     reject("unreachable", "Windows Chrome loopback endpoint is unavailable")
                 return {**base, "reachable": True, "connectionState": "approval_required", "lastError": "Explicit browser.connect approval is required before tab discovery"}
             info = await self.discover(browser)
-            if self.lease and self.lease["browser"] == browser and self.lease["identity"] != info["webSocketDebuggerUrl"]:
+            if self.lease and self.lease["browser"] == browser and (self.lease["identity"] != info["webSocketDebuggerUrl"] or not connected(self.conn)):
                 await self.disconnect()
+                base["lastError"] = "Attachment connection lost; attach explicitly. Endpoint readiness does not verify the MCP action path."
             return {**base, "reachable": True, "attached": bool(self.lease and self.lease["browser"] == browser), "version": info["Browser"], "connectionState": "ready"}
         except Rejected as error:
             if (self.lease and self.lease["browser"] == browser) or (self.approval and self.approval["browser"] == browser):
@@ -370,7 +415,12 @@ class Adapter:
             reject("element_unavailable", "Element operation failed; take a new snapshot")
         return obj.value
 
-    async def element(self, ref):
+    async def release_objects(self):
+        if self.conn:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self.conn.send(cdp.runtime.release_object_group("browser-action")), 1)
+
+    async def element(self, ref, actionable=True):
         data = self.refs.get(ref)
         if not data:
             reject("stale_reference", "Element reference expired; request a new snapshot")
@@ -381,25 +431,48 @@ class Adapter:
             reject("stale_reference", "Element document or frame changed; request a new snapshot")
         try:
             obj = await self.conn.send(cdp.dom.resolve_node(backend_node_id=cdp.dom.BackendNodeId(data["backend"]), object_group="browser-action"))
+            if "identity" in data:
+                tree = await self.conn.send(cdp.accessibility.get_partial_ax_tree(backend_node_id=cdp.dom.BackendNodeId(data["backend"]), fetch_relatives=True))
+                node = next((node for node in tree if node.backend_dom_node_id == data["backend"]), None)
+                by_id = {str(node.node_id): node for node in tree}
+                ancestors = [(int(parent.backend_dom_node_id), ax_identity(parent)) for parent in ax_ancestors(node, by_id) if parent.backend_dom_node_id and parent.name and parent.name.value and parent.role and parent.role.value not in ("RootWebArea", "WebArea")] if node else []
+                if not node or ax_identity(node) != data["identity"] or ancestors != data["ancestors"]:
+                    reject("stale_reference", "Element role, name or named container changed; request a new snapshot")
             state = await self.function(obj.object_id, "function(){const r=this.getBoundingClientRect();const s=getComputedStyle(this);return {connected:this.isConnected,visible:r.width>0&&r.height>0&&s.visibility!=='hidden'&&s.display!=='none',enabled:!this.matches(':disabled')&&this.getAttribute('aria-disabled')!=='true',readonly:!!this.readOnly||this.getAttribute('aria-readonly')==='true',password:this.type==='password',tag:this.tagName,type:this.type};}")
             if not state or not state["connected"]:
                 reject("stale_reference", "Element removed; request a new snapshot")
-            if not state["visible"] or not state["enabled"]:
+            if actionable and (not state["visible"] or not state["enabled"]):
                 reject("not_actionable", "Element is hidden or disabled")
             if state["password"]:
                 reject("protected_input", "Password controls are outside the browser tool interface")
             return obj.object_id, state
         except Rejected:
             raise
-        except Exception:
-            reject("stale_reference", "Element identity lost; request a new snapshot")
+        except ProtocolException as error:
+            if any(message in str(error).lower() for message in ("no node with given", "could not find node", "could not find object", "cannot find context", "no node found")):
+                reject("stale_reference", "Element identity lost; request a new snapshot")
+            raise
+
+    async def focus(self, ref, obj, editable=False):
+        focused = await self.function(obj, "function(){this.focus();return this.isConnected&&this.getRootNode().activeElement===this;}")
+        if not focused:
+            reject("focus_changed", "Focus moved or the editor was replaced; inspect before editing")
+        # Focus handlers can repurpose the same node or its container.
+        obj, state = await self.element(ref)
+        if editable and state["readonly"]:
+            reject("invalid_element", "Focus handler made the editor read-only; inspect before editing")
+        if not await self.function(obj, "function(){return this.isConnected&&this.getRootNode().activeElement===this;}"):
+            reject("focus_changed", "Focus moved before input; inspect before editing")
+        return obj
 
     async def point(self, ref):
         obj, state = await self.element(ref)
         # The returned point is in the top frame's CSS viewport, which is the
         # coordinate space required by Input.dispatchMouseEvent.
+        await self.function(obj, "function(){this.scrollIntoView({block:'center',inline:'center',behavior:'instant'});}")
+        obj, _ = await self.element(ref)
         pos = await self.function(obj, """function(){
-          this.scrollIntoView({block:'center',inline:'center'});
+          if(!this.isConnected) return null;
           const r=this.getBoundingClientRect(), w=this.ownerDocument.defaultView;
           const hit=this.ownerDocument.elementFromPoint(r.left+r.width/2,r.top+r.height/2);
           if(!hit || !(hit===this || this.contains(hit))) return null;
@@ -460,16 +533,27 @@ class Adapter:
                     if isinstance(result,BaseException):
                         raise result
 
-    async def snapshot(self, args):
+    async def snapshot(self, args, target=None, rotate=True):
+        scope = None
+        if args.get("scopeRef"):
+            try:
+                await self.element(args["scopeRef"], actionable=False)
+            finally:
+                await self.release_objects()
+            scope = dict(self.refs[args["scopeRef"]])
+            if args.get("frameId") and args["frameId"] != scope["frame"]:
+                reject("invalid_frame", "Scope reference belongs to a different frame")
         frames = await self.frames()
         epoch = self.epoch
-        selected = args.get("frameId")
+        selected = scope["frame"] if scope else args.get("frameId")
         if selected and selected not in frames:
             reject("invalid_frame", "Frame is not part of the selected tab")
         nodes, errors, total, budget = [], [], 0, 0
         limit = args.get("maxNodes", 100)
         # Every snapshot rotates reference IDs; an old ID is never reused.
-        self.refs.clear()
+        if rotate:
+            self.refs.clear()
+        scope_count = 0
         scoped_frames = {selected: frames[selected]} if selected else frames
         for frame_index, (frame_id, frame) in enumerate(scoped_frames.items()):
             if frame_index >= 100:
@@ -479,11 +563,23 @@ class Adapter:
                 continue
             try:
                 tree = await self.conn.send(cdp.accessibility.get_full_ax_tree(frame_id=cdp.page.FrameId(frame_id)))
+                by_id = {str(node.node_id): node for node in tree}
+                scopes = {scope["backend"]} if scope else set()
+                if target and target.get("within"):
+                    within = target["within"]
+                    containers = [node for node in tree if not node.ignored and node.backend_dom_node_id and node.role and node.role.value == within["role"] and node.name and node.name.value == within["name"]]
+                    scope_count += len(containers)
+                    scopes = {int(node.backend_dom_node_id) for node in containers}
                 for node in tree:
                     if node.ignored:
                         continue
                     role = str(node.role.value if node.role else "")
                     name = safe_text(node.name.value if node.name else "")
+                    ancestors = ax_ancestors(node, by_id)
+                    if (scope or target and target.get("within")) and not any(int(parent.backend_dom_node_id) in scopes for parent in ancestors if parent.backend_dom_node_id):
+                        continue
+                    if target and (role != target["role"] or (node.name.value if node.name else "") != target["name"]):
+                        continue
                     if role in ("none", "generic", "InlineTextBox") or not name and not node.backend_dom_node_id:
                         continue
                     props = {prop.name.value: prop.value.value for prop in node.properties or []}
@@ -496,10 +592,12 @@ class Adapter:
                     item = {"role": role, "name": name, "frameId": frame_id, "states": [key for key in ("disabled", "expanded", "checked", "selected", "required", "focused") if props.get(key) is True or props.get(key) == "true"]}
                     if node.backend_dom_node_id and role not in ("StaticText", "RootWebArea", "Iframe"):
                         ref = "e-" + secrets.token_hex(10)
-                        self.refs[ref] = {"backend": int(node.backend_dom_node_id), "frame": frame_id, "loader": frame["loader"], "epoch": epoch}
+                        self.refs[ref] = {"backend": int(node.backend_dom_node_id), "frame": frame_id, "loader": frame["loader"], "epoch": epoch, "identity": ax_identity(node), "ancestors": [(int(parent.backend_dom_node_id), ax_identity(parent)) for parent in ancestors if parent.backend_dom_node_id and parent.name and parent.name.value and parent.role and parent.role.value not in ("RootWebArea", "WebArea")]}
                         item["ref"] = ref
                     nodes.append(item)
                     budget += len(json.dumps(item, ensure_ascii=True))
+            except (ConnectionClosed, ConnectionError, OSError):
+                raise
             except Exception:
                 errors.append("Frame " + frame_id + " accessibility unavailable (possibly an out-of-process frame)")
         after = await self.frames()
@@ -515,7 +613,25 @@ class Adapter:
                 break
             summaries.append(item)
             frame_budget += cost
+        if target and target.get("within") and scope_count > 1:
+            reject("ambiguous_target", "Named ancestor matched " + str(scope_count) + " containers; use a unique ancestor name or exact frameId")
         return {"targetId": self.lease["target"], "generation": self.generation(frames), "url": safe_url(row["url"]), "title": safe_text(row.get("title")), "nodes": nodes, "frames": summaries, "truncated": total > len(nodes) or len(frames) > len(summaries), "totalNodes": total, "observationErrors": errors, "untrustedPageContent": True}
+
+    async def resolve_target(self, target):
+        before = set(self.refs)
+        try:
+            snap = await self.snapshot({"maxNodes": 300, **({"frameId": target["frameId"]} if "frameId" in target else {})}, target=target, rotate=False)
+            matches = [node for node in snap["nodes"] if "ref" in node]
+            if snap["truncated"] or snap["observationErrors"]:
+                reject("incomplete_observation", "Target observation incomplete; narrow the named ancestor or frame")
+            if len(matches) > 1:
+                frames = sorted({node["frameId"] for node in matches})
+                reject("ambiguous_target", "Target matched " + str(len(matches)) + " elements across " + str(len(frames)) + " frame(s); specify within or frameId, or inspect a scoped snapshot")
+            return matches[0]["ref"] if matches else None
+        except BaseException:
+            for ref in set(self.refs) - before:
+                self.refs.pop(ref, None)
+            raise
 
     def generation(self, frames):
         return hashlib.sha256((self.lease["id"] + str(self.epoch) + repr([(key, val["loader"]) for key, val in frames.items()])).encode()).hexdigest()[:24]
@@ -523,14 +639,37 @@ class Adapter:
     async def current(self):
         try:
             info = await self.conn.send(cdp.target.get_target_info(cdp.target.TargetID(self.lease["target"])))
-        except Exception:
-            reject("target_closed", "Selected tab closed")
+        except ProtocolException as error:
+            if any(message in str(error).lower() for message in ("no target with given", "target closed", "session with given id not found")):
+                reject("target_closed", "Selected tab closed; select and attach explicitly")
+            raise
         if str(info.target_id) != self.lease["target"] or info.type_ != "page":
             reject("target_closed", "Selected tab identity changed")
         return {"id": str(info.target_id), "url": info.url, "title": info.title, "type": info.type_}
 
     async def condition(self, condition, navigation_before=None):
         kind = condition["type"]
+        if kind == "element":
+            ref = await self.resolve_target(condition["target"])
+            if ref is None:
+                return False
+            try:
+                obj, state = await self.element(ref, actionable=False)
+                if not state["visible"]:
+                    return False
+                return bool(await self.function(obj, """function(value,state,checkValue){
+                  if(checkValue && (this.isContentEditable?this.innerText:this.value)!==value) return false;
+                  const attr=n=>this.getAttribute('aria-'+n), enabled=!this.matches(':disabled')&&attr('disabled')!=='true';
+                  const checked=attr('checked')??(('checked' in this)?String(this.checked):null);
+                  const states={enabled,disabled:!enabled,focused:this.getRootNode().activeElement===this,
+                    checked:checked==='true',unchecked:checked==='false',expanded:attr('expanded')==='true',collapsed:attr('expanded')==='false',
+                    selected:attr('selected')==='true'||this.selected===true,
+                    editable:enabled&&!this.readOnly&&attr('readonly')!=='true'&&(this.isContentEditable||this.tagName==='TEXTAREA'||this.tagName==='INPUT'&&!['button','submit','file','hidden','checkbox','radio'].includes(this.type))};
+                  return !state||states[state]===true;
+                }""", [condition.get("value", ""), condition.get("state", ""), "value" in condition]))
+            finally:
+                self.refs.pop(ref, None)
+                await self.release_objects()
         row = await self.current()
         if kind == "url":
             return row["url"] == condition["value"]
@@ -621,37 +760,56 @@ class Adapter:
             await asyncio.wait_for(self.conn.send(cdp.page.set_intercept_file_chooser_dialog(False)), 1)
 
     async def workflow(self, args, owner):
-        completed = 0
-        url = ""
-        for index, step in enumerate(args["steps"]):
-            try:
-                deadline = min(self.deadline, asyncio.get_running_loop().time() + step.get("timeoutMs", 10000) / 1000)
-                async with asyncio.timeout_at(deadline):
-                    row = await self.guard(args, owner, True)
-                    url = safe_url(row["url"])
-                    target = step["target"]
-                    while True:
-                        snap = await self.snapshot({"maxNodes": 300, "filter": target["name"], **({"frameId": target["frameId"]} if "frameId" in target else {})})
-                        matches = [node for node in snap["nodes"] if node["role"] == target["role"] and node["name"] == target["name"] and "ref" in node]
-                        if snap["truncated"] or snap["observationErrors"]:
-                            reject("incomplete_observation", "Workflow target observation is incomplete; narrow the target or frame")
-                        if len(matches) > 1:
-                            reject("ambiguous_target", "Workflow target must match exactly one observed element")
-                        if matches:
-                            break
-                        await asyncio.sleep(0.1)
-                    action_args = {key: value for key, value in step.items() if key != "target"}
-                    result = await self.action({**action_args, "elementRef": matches[0]["ref"], "leaseId": args["leaseId"], "authorized": True})
-                    url = result["url"]
-                    if result["verification"] != "confirmed":
-                        return {"completedSteps": completed, "failedStep": index, "verification": result["verification"], "dispatched": self.dispatched, "mutationMayHaveOccurred": self.dispatched, "url": result["url"], "evidence": result["evidence"], "errorCode": "postcondition_unconfirmed"}
-                completed += 1
-            except (Rejected, TimeoutError) as error:
-                return {"completedSteps": completed, "failedStep": index, "verification": "timed_out" if isinstance(error, TimeoutError) else "inconclusive" if self.dispatched else "rejected", "dispatched": self.dispatched, "mutationMayHaveOccurred": self.dispatched, "url": url, "evidence": error.message if isinstance(error, Rejected) else "Workflow step deadline reached; inspect before continuing", "errorCode": error.code if isinstance(error, Rejected) else "timed_out"}
-            except Exception:
-                await self.disconnect()
-                return {"completedSteps": completed, "failedStep": index, "verification": "inconclusive" if self.dispatched else "failed", "dispatched": self.dispatched, "mutationMayHaveOccurred": self.dispatched, "url": url, "evidence": "Browser operation failed; lease released; attach and inspect before continuing", "errorCode": "browser_error"}
-        return {"completedSteps": completed, "failedStep": None, "verification": "confirmed", "dispatched": self.dispatched, "mutationMayHaveOccurred": self.dispatched, "url": url, "evidence": "All step postconditions confirmed", "errorCode": None}
+        completed, any_dispatched, url = 0, False, ""
+
+        def report(index, verification, evidence, code, layer):
+            step_dispatched = self.dispatched
+            self.dispatched = any_dispatched or step_dispatched
+            return {"completedSteps": completed, "failedStep": index, "verification": verification,
+                    "dispatched": self.dispatched, "stepDispatched": step_dispatched,
+                    "mutationMayHaveOccurred": self.dispatched, "url": url,
+                    "evidence": evidence, "errorCode": code, "errorLayer": layer}
+
+        try:
+            for index, step in enumerate(args["steps"]):
+                self.dispatched = False
+                layer = "lease"
+                try:
+                    deadline = min(self.deadline, asyncio.get_running_loop().time() + step.get("timeoutMs", 10000) / 1000)
+                    async with asyncio.timeout_at(deadline):
+                        row = await self.guard(args, owner, True)
+                        url = safe_url(row["url"])
+                        layer = "target"
+                        self.refs.clear()
+                        while True:
+                            ref = await self.resolve_target(step["target"])
+                            if ref:
+                                break
+                            await asyncio.sleep(0.1)
+                        layer = "input"
+                        action_args = {key: value for key, value in step.items() if key != "target"}
+                        result = await self.action({**action_args, "elementRef": ref, "leaseId": args["leaseId"], "authorized": True})
+                        url = result["url"]
+                        if result["verification"] != "confirmed":
+                            return report(index, result["verification"], result["evidence"], "postcondition_unconfirmed", "observation")
+                    any_dispatched |= self.dispatched
+                    completed += 1
+                except TimeoutError:
+                    return report(index, "timed_out", "Step deadline reached; inspect before continuing", "target_not_found" if layer == "target" else "timed_out", layer)
+                except Rejected as error:
+                    if error.code in ("stale_reference", "ambiguous_target", "not_actionable", "incomplete_observation"):
+                        layer = "target"
+                    return report(index, "inconclusive" if self.dispatched else "rejected", error.message, error.code, layer)
+                except Exception as error:
+                    code, message, layer = operation_error(error)
+                    await self.disconnect()
+                    return report(index, "inconclusive" if self.dispatched else "failed", message, code, layer)
+            self.dispatched = any_dispatched
+            return {"completedSteps": completed, "failedStep": None, "verification": "confirmed", "dispatched": any_dispatched, "stepDispatched": False, "mutationMayHaveOccurred": any_dispatched, "url": url, "evidence": "All step postconditions confirmed", "errorCode": None, "errorLayer": None}
+        finally:
+            # Outer request timeout/cancellation can escape a later step. Keep
+            # dispatch evidence from earlier confirmed steps at the IPC owner.
+            self.dispatched = any_dispatched or self.dispatched
 
     async def action(self, args):
         kind = args["action"]
@@ -711,11 +869,11 @@ class Adapter:
                     elif kind == "typeText":
                         if state["readonly"] or not (state["tag"] in ("INPUT","TEXTAREA") and state["type"] not in ("file","hidden") or await self.function(obj,"function(){return this.isContentEditable;}")):
                             reject("invalid_element", "Typing requires editable text or contenteditable")
-                        await self.function(obj, "function(){this.focus();}")
+                        obj = await self.focus(args["elementRef"], obj, editable=True)
                         self.dispatched = True
                         await self.conn.send(cdp.input_.insert_text(args["value"]))
                     elif kind == "keyCombo":
-                        await self.function(obj, "function(){this.focus();}")
+                        obj = await self.focus(args["elementRef"], obj)
                         bits={"Alt":1,"Control":2,"Meta":4,"Shift":8}
                         mask=sum(bits[m] for m in args["modifiers"])
                         key=args["key"]
@@ -724,15 +882,18 @@ class Adapter:
                         await self.conn.send(cdp.input_.dispatch_key_event("rawKeyDown",key=key,code="Key"+key if len(key)==1 else key,modifiers=mask,windows_virtual_key_code=vk))
                         await self.conn.send(cdp.input_.dispatch_key_event("keyUp",key=key,code="Key"+key if len(key)==1 else key,modifiers=mask,windows_virtual_key_code=vk))
                     elif kind == "fill":
+                        obj = await self.focus(args["elementRef"], obj, editable=True)
                         self.dispatched = True
-                        await self.function(obj, "function(value){this.focus();const proto=this.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(this,value);this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));}", [args["value"]])
+                        result = await self.function(obj, "function(value){if(!this.isConnected||this.getRootNode().activeElement!==this||this.readOnly||this.getAttribute('aria-readonly')==='true'||this.matches(':disabled')||this.getAttribute('aria-disabled')==='true')return false;const proto=this.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(this,value);this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));return true;}", [args["value"]])
+                        if not result:
+                            reject("focus_changed", "Editor changed before filling; inspect before continuing")
                     elif kind == "select":
                         self.dispatched = True
                         result = await self.function(obj, "function(value){if(!Array.from(this.options).some(o=>o.value===value&&!o.disabled))return false;this.value=value;this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));return true;}", [args["value"]])
                         if not result:
                             reject("invalid_option", "Requested select option unavailable")
                     elif kind == "keypress":
-                        await self.function(obj, "function(){this.focus();}")
+                        obj = await self.focus(args["elementRef"], obj)
                         self.dispatched = True
                         key = args["key"]
                         codes = {"Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8, "Delete": 46, "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40, "Home": 36, "End": 35, "Space": 32}
@@ -743,9 +904,7 @@ class Adapter:
                 return {**result, "dispatched": True, "completed": True, "mutationMayHaveOccurred": True}
             return {"dispatched": True, "completed": True, "verification": "inconclusive", "url": safe_url((await self.current())["url"]), "evidence": "Command completed; application outcome requires an expected condition", "mutationMayHaveOccurred": True}
         finally:
-            if self.conn:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(self.conn.send(cdp.runtime.release_object_group("browser-action")), 1)
+            await self.release_objects()
 
     async def run(self, method, args, owner):
         if method == "hello":
@@ -839,7 +998,7 @@ def validate(method, args):
             reject("invalid_arguments", "Invalid browser argument bound")
     if "filter" in args and (not isinstance(args["filter"], str) or len(args["filter"]) > 200):
         reject("invalid_arguments", "Invalid observation filter")
-    for field in ("leaseId", "connectionId", "targetId", "elementRef", "sourceRef", "targetRef", "frameId"):
+    for field in ("leaseId", "connectionId", "targetId", "elementRef", "sourceRef", "targetRef", "frameId", "scopeRef"):
         if field in args and (not isinstance(args[field], str) or not 0 < len(args[field]) <= 256):
             reject("invalid_arguments", "Invalid browser identity")
     required = {"connect": ("browser", "authorized"), "attach": ("targetId", "controlMode"), "snapshot": ("leaseId",), "wait": ("leaseId", "condition"), "workflow": ("leaseId", "authorized", "steps"), "media": ("leaseId",), "media_download": ("leaseId", "elementRef", "authorized"), "screenshot": ("leaseId",), "action": ("leaseId", "action", "authorized")}
@@ -862,11 +1021,7 @@ def validate(method, args):
         for step in steps:
             if not isinstance(step, dict) or step.get("action") not in ("click", "fill", "typeText", "select", "keypress", "upload") or "expected" not in step or set(step) & {"leaseId", "authorized", "elementRef"}:
                 reject("invalid_arguments", "Workflow steps require a target and postcondition")
-            target = step.get("target")
-            if not isinstance(target, dict) or set(target) - {"role", "name", "frameId"} or any(not isinstance(target.get(key), str) or not 0 < len(target[key]) <= bound for key, bound in (("role", 100), ("name", 200))):
-                reject("invalid_arguments", "Workflow requires a bounded exact role/name target")
-            if "frameId" in target and (not isinstance(target["frameId"], str) or not 0 < len(target["frameId"]) <= 256):
-                reject("invalid_arguments", "Invalid workflow frame")
+            validate_target(step.get("target"))
             validate("action", {**{key: value for key, value in step.items() if key != "target"}, "leaseId": args["leaseId"], "authorized": True, "elementRef": "workflow-observation"})
     if method == "action":
         kind = args["action"]
@@ -875,8 +1030,8 @@ def validate(method, args):
         if args["authorized"] is not True or kind not in variants or set(args) - common - variants[kind] or variants[kind] - set(args):
             reject("invalid_arguments", "Invalid or unauthorized browser action")
         for field in ("value", "url", "key"):
-            if field in args and (not isinstance(args[field], str) or len(args[field]) > 12000):
-                reject("invalid_arguments", "Invalid action value")
+            if field in args and (not isinstance(args[field], str) or len(args[field].encode("utf-16-le", "surrogatepass")) // 2 > 12000):
+                reject("invalid_arguments", "Action value limit is 12000 UTF-16 code units")
         if kind == "upload" and (not isinstance(args["files"], list) or not 1 <= len(args["files"]) <= 10 or any(not isinstance(file, str) or len(file) > 4096 for file in args["files"])):
             reject("invalid_arguments", "Invalid upload files")
         if kind == "keyCombo" and (
@@ -927,10 +1082,11 @@ async def main():
                 reply = {"id": request_id, "ok": False, "error": {"code": "timed_out", "message": "Browser deadline reached; leases invalidated; inspect before retrying", "dispatched": dispatched, "verification": "timed_out"}}
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 dispatched = adapter.dispatched
+                code, message, _ = operation_error(error)
                 await adapter.disconnect()
-                reply = {"id": request_id, "ok": False, "error": {"code": "browser_error", "message": "Browser operation failed; connection released; attach again", "dispatched": dispatched, "verification": "inconclusive" if dispatched else "failed"}}
+                reply = {"id": request_id, "ok": False, "error": {"code": code, "message": message, "dispatched": dispatched, "verification": "inconclusive" if dispatched else "failed"}}
             wire = json.dumps(reply, separators=(",", ":"), ensure_ascii=True)
             if len(wire) > MAX_FRAME:
                 wire = json.dumps({"id": request_id, "ok": False, "error": {"code": "too_large", "message": "Browser response exceeds IPC limit"}})

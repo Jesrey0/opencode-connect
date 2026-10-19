@@ -133,7 +133,22 @@ test("worker death during concurrent pipe writes cannot terminate the connector"
   assert.equal((backend as any).worker, undefined);
 });
 
-const fixtureHtml = `<!doctype html><title>Browser fixture</title><h1>Test page</h1>
+const longParts = ["Alpha 😀 e\u0301".repeat(700), "\n" + "Beta 界 🚀".repeat(700)];
+const fixtureHtml = `<!doctype html><meta charset="utf-8"><title>Browser fixture</title><h1>Test page</h1>
+<section role="region" aria-label="Notebook"><input id="notebook-title" aria-label="Title" value="Original notebook"></section>
+<div id="cards"><article role="group" aria-label="Recording Alpha"><button onclick="renameRecording(this)">Rename</button><button onclick="recordingMenu(this)">Actions</button></article><article role="group" aria-label="Recording Beta"><button onclick="renameRecording(this)">Rename</button><button onclick="recordingMenu(this)">Actions</button></article></div>
+<div id="rename-editor"></div>
+<button onclick="cards.append(cards.firstElementChild)">Reorder cards</button>
+<button onclick="cards.firstElementChild.setAttribute('aria-label','Reassigned recording')">Reuse card</button>
+<button onclick="cards.firstElementChild.replaceWith(cards.firstElementChild.cloneNode(true))">Replace card</button>
+<button onclick="const card=cards.firstElementChild,region=document.createElement('section');region.role='region';region.setAttribute('aria-label','Collection');card.replaceWith(region);region.append(card)">Wrap card</button>
+<input aria-label="Focus trap" onfocus="document.getElementById('notebook-title').focus()">
+<input aria-label="Focus locks field" onfocus="this.readOnly=true">
+<button onclick="openNotes()">Open notes</button><button onclick="notes.replaceChildren(notes.firstElementChild.cloneNode(true))">Replace notes</button><button onclick="checkNotes()">Check notes</button><div id="notes"></div>
+<script>
+function recordingMenu(button){const card=button.closest('article'),menu=document.createElement('div'),rename=document.createElement('button');menu.role='menu';menu.setAttribute('aria-label','Actions '+card.getAttribute('aria-label'));rename.role='menuitem';rename.textContent='Rename';rename.onclick=()=>{renameRecording(rename);menu.remove();};menu.append(rename);card.append(menu);}function renameRecording(button){const card=button.closest('article'),name=card.getAttribute('aria-label');document.getElementById('rename-editor').innerHTML='<div role="dialog" aria-label="Rename '+name+'"><input aria-label="Title"><button>Save recording</button></div>';document.querySelector('[role=dialog] button').onclick=()=>{card.setAttribute('aria-label',document.querySelector('[role=dialog] input').value);document.getElementById('rename-editor').replaceChildren();};}
+function checkNotes(){const e=document.getElementById('notes').firstElementChild;document.getElementById('status').textContent=e.innerText===${JSON.stringify(longParts.join(""))}?'Long text exact':'Notes length '+e.innerText.length;}function openNotes(){const e=document.createElement('div');e.contentEditable='true';e.role='textbox';e.setAttribute('aria-label','Notes');e.oninput=checkNotes;document.getElementById('notes').replaceChildren(e);}
+</script>
 <label>Name <input aria-label="Name" id="name" oninput="document.getElementById('status').textContent='Name entered'"></label>
 <button id="save" onclick="document.getElementById('status').textContent='Saved '+document.getElementById('name').value">Save</button>
 <button id="trusted" onmousedown="document.getElementById('status').textContent='Trusted down '+event.isTrusted" onmousemove="document.getElementById('status').textContent='Trusted hover '+event.isTrusted" oncontextmenu="event.preventDefault();document.getElementById('status').textContent='Trusted context '+event.isTrusted" ondblclick="document.getElementById('status').textContent='Trusted double '+event.isTrusted">Native input test</button>
@@ -214,11 +229,14 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   const newTab = async (url: string) => (await (await fetch(`${cdpUrl}/json/new?${encodeURIComponent(url)}`, { method: "PUT" })).json()) as { id: string };
   const one = await newTab(pageUrl + "/?token=private-token#private-fragment");
   const two = await newTab(pageUrl + "/next");
+  // Hidden media preload is throttled in background tabs. Make the fixture
+  // foreground explicitly; attachment itself must not activate production tabs.
+  assert.equal((await fetch(cdpUrl + "/json/activate/" + one.id)).ok, true);
   const pageIds = async () => ((await (await fetch(cdpUrl + "/json/list")).json()) as { id: string; type: string }[]).filter(row => row.type === "page").map(row => row.id).sort();
   const baseline = await pageIds();
   let attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner");
   let leaseId = attached.leaseId as string;
-  const snapshot = async () => await backend.call("snapshot", { leaseId }, "owner") as any;
+  const snapshot = async () => await backend.call("snapshot", { leaseId, maxNodes: 300 }, "owner") as any;
   const getRef = async (name: string) => {
     const snap = await snapshot();
     const node = snap.nodes.find((node: any) => node.name === name && node.ref);
@@ -347,6 +365,67 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     const stale = await getRef("Save"); await snapshot();
     await assert.rejects(act({ action: "click", elementRef: stale }), errorCode("stale_reference"));
   });
+  await t.test("scoped rename workflow verifies the intended card and preserves the notebook title", async () => {
+    const within = { role: "group", name: "Recording Beta" };
+    const dialog = { role: "dialog", name: "Rename Recording Beta" };
+    const result = await backend.call("workflow", { leaseId, authorized: true, steps: [
+      { action: "click", target: { role: "button", name: "Actions", within }, expected: { type: "element", target: { role: "menuitem", name: "Rename", within: { role: "menu", name: "Actions Recording Beta" } } } },
+      { action: "click", target: { role: "menuitem", name: "Rename", within: { role: "menu", name: "Actions Recording Beta" } }, expected: { type: "element", target: { role: "textbox", name: "Title", within: dialog }, state: "editable" } },
+      { action: "fill", target: { role: "textbox", name: "Title", within: dialog }, value: "Renamed recording", expected: { type: "element", target: { role: "textbox", name: "Title", within: dialog }, value: "Renamed recording", state: "focused" } },
+      { action: "click", target: { role: "button", name: "Save recording", within: dialog }, expected: { type: "element", target: { role: "group", name: "Renamed recording" } } },
+    ] }, "owner");
+    assert.equal(result.verification, "confirmed", JSON.stringify(result));
+    assert.equal(result.completedSteps, 4);
+    assert.equal((await backend.call("wait", { leaseId, condition: { type: "element", target: { role: "textbox", name: "Title", within: { role: "region", name: "Notebook" } }, value: "Original notebook" } }, "owner")).verification, "confirmed");
+    const snap = await snapshot();
+    const scopeRef = snap.nodes.find((node: any) => node.name === "Recording Alpha" && node.role === "group").ref;
+    const scoped = await backend.call("snapshot", { leaseId, scopeRef }, "owner") as any;
+    assert.deepEqual(scoped.nodes.filter((node: any) => node.role === "button").map((node: any) => node.name).sort(), ["Actions", "Rename"]);
+    await assert.rejects(backend.call("snapshot", { leaseId, scopeRef }, "owner"), errorCode("stale_reference"));
+    const duplicate = await backend.call("workflow", { leaseId, authorized: true, steps: [{ action: "click", target: { role: "button", name: "Rename" }, expected: { type: "text", value: "never" } }] }, "owner");
+    assert.equal(duplicate.errorCode, "ambiguous_target");
+    assert.equal(duplicate.stepDispatched, false);
+    assert.match(duplicate.evidence as string, /2 elements/);
+  });
+  await t.test("reordering retains identity while reused containers and replaced nodes fail before dispatch", async () => {
+    let snap = await snapshot();
+    let rename = snap.nodes.find((node: any) => node.name === "Rename" && node.ref).ref;
+    await act({ action: "click", elementRef: snap.nodes.find((node: any) => node.name === "Reorder cards" && node.ref).ref });
+    const opened = await act({ action: "click", elementRef: rename, expected: { type: "element", target: { role: "dialog", name: "Rename Recording Alpha" } } });
+    assert.equal(opened.verification, "confirmed", JSON.stringify(opened));
+    // Reuse a named ancestor without replacing its child button.
+    snap = await snapshot();
+    rename = snap.nodes.find((node: any) => node.name === "Rename" && node.ref).ref;
+    await act({ action: "click", elementRef: snap.nodes.find((node: any) => node.name === "Reuse card" && node.ref).ref });
+    await assert.rejects(act({ action: "click", elementRef: rename }), (error: unknown) => error instanceof BrowserError && error.code === "stale_reference" && !error.dispatched);
+    snap = await snapshot();
+    rename = snap.nodes.find((node: any) => node.name === "Rename" && node.ref).ref;
+    await act({ action: "click", elementRef: snap.nodes.find((node: any) => node.name === "Replace card" && node.ref).ref });
+    await assert.rejects(act({ action: "click", elementRef: rename }), errorCode("stale_reference"));
+    snap = await snapshot();
+    rename = snap.nodes.find((node: any) => node.name === "Rename" && node.ref).ref;
+    await act({ action: "click", elementRef: snap.nodes.find((node: any) => node.name === "Wrap card" && node.ref).ref });
+    await assert.rejects(act({ action: "click", elementRef: rename }), errorCode("stale_reference"));
+  });
+  await t.test("focus changes stop input and explicit multipart entry preserves Unicode and order", async () => {
+    await assert.rejects(act({ action: "typeText", elementRef: await getRef("Focus trap"), value: "Wrong field" }), (error: unknown) => error instanceof BrowserError && error.code === "focus_changed" && !error.dispatched);
+    await assert.rejects(act({ action: "fill", elementRef: await getRef("Focus trap"), value: "Wrong field" }), errorCode("focus_changed"));
+    await assert.rejects(act({ action: "fill", elementRef: await getRef("Focus locks field"), value: "Forbidden" }), (error: unknown) => error instanceof BrowserError && error.code === "invalid_element" && !error.dispatched);
+    assert.equal((await backend.call("wait", { leaseId, condition: { type: "element", target: { role: "textbox", name: "Title", within: { role: "region", name: "Notebook" } }, value: "Original notebook" } }, "owner")).verification, "confirmed", "Rejected focus redirects must preserve the other editor's value");
+    await act({ action: "click", elementRef: await getRef("Open notes"), expected: { type: "element", target: { role: "textbox", name: "Notes" }, state: "editable" } });
+    for (const [index, value] of longParts.entries()) {
+      const result = await act({ action: "typeText", elementRef: await getRef("Notes"), value, expected: index ? { type: "element", target: { role: "textbox", name: "Notes" }, state: "focused" } : { type: "element", target: { role: "textbox", name: "Notes" }, value } });
+      assert.equal(result.verification, "confirmed", `Part ${index}: ${JSON.stringify(result)}`);
+    }
+    assert.equal((await act({ action: "click", elementRef: await getRef("Check notes"), expected: { type: "text", value: "Long text exact" } })).verification, "confirmed");
+    const snap = await snapshot();
+    const notesRef = snap.nodes.find((node: any) => node.name === "Notes" && node.ref).ref;
+    await act({ action: "click", elementRef: snap.nodes.find((node: any) => node.name === "Replace notes" && node.ref).ref });
+    await assert.rejects(act({ action: "typeText", elementRef: notesRef, value: "must not append" }), errorCode("stale_reference"));
+    await assert.rejects(act({ action: "fill", elementRef: await getRef("Name"), value: "x".repeat(12001) }), (error: unknown) => error instanceof BrowserError && /12000/.test(error.message) && !error.dispatched);
+    const unverified = await act({ action: "fill", elementRef: await getRef("Name"), value: "Read back", timeoutMs: 1500, expected: { type: "element", target: { role: "textbox", name: "Name" }, value: "Different" } });
+    assert.equal(unverified.verification, "timed_out"); assert.equal(unverified.completed, true); assert.equal(unverified.mutationMayHaveOccurred, true);
+  });
   await t.test("screenshots are bounded native image payloads", async () => {
     const result = await backend.call("screenshot", { leaseId, width: 640, height: 480 }, "owner");
     assert.ok((result.bytes as number) <= 1048576);
@@ -424,6 +503,10 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
       assert.equal(exposed.find(item => item.name === "browser.hover").annotations.destructiveHint, false);
       assert.equal(exposed.find(item => item.name === "browser.snapshot").annotations.readOnlyHint, true);
       assert.equal(exposed.find(item => item.name === "browser.snapshot").annotations.idempotentHint, false, "A fresh snapshot invalidates prior element refs");
+      assert.equal(exposed.filter(item => item.name.startsWith("browser.")).length, 26, "Reliability changes extend existing tools");
+      assert.equal(exposed.find(item => item.name === "browser.snapshot").inputSchema.properties.scopeRef.type, "string");
+      const workflowSchema = exposed.find(item => item.name === "browser.workflow").inputSchema;
+      assert.deepEqual(workflowSchema.properties.steps.items.anyOf[0].properties.target.properties.within.required, ["role", "name"]);
       const reply = await request("browser.attach", { targetId: one.id, controlMode: "observe" });
       assert.ok(reply.result?.structuredContent?.leaseId, JSON.stringify(reply));
       const httpLease = reply.result.structuredContent.leaseId;

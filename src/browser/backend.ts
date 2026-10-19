@@ -5,6 +5,7 @@ import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ZodIssue } from "zod/v4";
 import { browserInputs, browserOutputs, type BrowserMethod } from "./schemas.js";
 
 const MAX_FRAME = 2 * 1024 * 1024;
@@ -22,9 +23,32 @@ export function endpoint(value: string): string {
   if (url.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(url.hostname) || url.username || url.password || url.search || url.hash || url.pathname !== "/" || !url.port) throw new Error("Browser endpoint must be an HTTP loopback IP with an explicit port and no path or credentials");
   return url.origin;
 }
+export function browserErrorLayer(code: string) {
+  if (["invalid_arguments", "invalid_browser", "invalid_operation", "unsafe_url", "authorization_denied"].includes(code)) return "validation";
+  if (["invalid_lease", "invalid_connection", "lease_conflict", "observe_only", "approval_required", "approval_denied", "approval_timeout"].includes(code)) return "lease";
+  if (["target_missing", "target_not_found", "target_closed", "ambiguous_target", "stale_reference", "document_changed", "invalid_frame", "not_actionable", "element_unavailable", "invalid_element", "invalid_option"].includes(code)) return "target";
+  if (["cdp_error", "focus_changed", "protected_input", "invalid_upload", "upload_denied", "unsupported_chooser", "file_chooser_timeout"].includes(code)) return "input";
+  if (["incomplete_observation", "observation_failed", "invalid_selector", "postcondition_unconfirmed"].includes(code)) return "observation";
+  if (["disabled", "closed", "busy", "restart_limited", "setup_required", "version_mismatch", "worker_unavailable", "cancelled"].includes(code)) return "worker";
+  if (["invalid_protocol", "transport_failure"].includes(code)) return "transport";
+  if (["invalid_response", "too_large", "screenshot_too_large"].includes(code)) return "result";
+  return "browser";
+}
+function argumentError(issues: ZodIssue[]): string {
+  // Paths contain schema fields/array indices. Never expose Zod's message, input,
+  // unrecognized keys or accepted literal values in these diagnostics.
+  const issue = issues.find(item => item.code === "too_big" || item.code === "too_small") ?? issues[0];
+  const path = issue?.path.map(part => typeof part === "number" ? `[${part}]` : String(part)).join(".").replace(/\.\[/g, "[") || "arguments";
+  if (issue?.code === "too_big" || issue?.code === "too_small") {
+    const bound = issue.code === "too_big" ? issue.maximum : issue.minimum;
+    const unit = issue.origin === "string" ? " characters" : issue.origin === "array" ? " items" : "";
+    return `Invalid browser arguments: ${path} ${issue.code === "too_big" ? "maximum" : "minimum"} ${bound}${unit}`;
+  }
+  return `Invalid browser arguments: ${path} ${issue?.code === "unrecognized_keys" ? "contains unsupported fields" : "does not match its schema"}`;
+}
 export class BrowserError extends Error {
   constructor(readonly code: string, message: string, readonly dispatched = false, readonly verification = "rejected") { super(message); }
-  result() { return { error: this.message, errorCode: this.code, verification: this.verification, dispatched: this.dispatched, mutationMayHaveOccurred: this.dispatched }; }
+  result() { return { error: this.message, errorCode: this.code, errorLayer: browserErrorLayer(this.code), verification: this.verification, dispatched: this.dispatched, mutationMayHaveOccurred: this.dispatched }; }
 }
 type Pending = { resolve: (value: Record<string, unknown>) => void; reject: (error: unknown) => void; timer: NodeJS.Timeout; cleanup: () => void; mutation: boolean };
 type Options = { enabled?: boolean; env?: NodeJS.ProcessEnv; idleMs?: number; workerPath?: string; restartBackoffMs?: number; chromeLaunchMode?: "auto" | "direct" | "managed" };
@@ -99,13 +123,22 @@ export class BrowserBackend {
         let reply: { id: string; ok: boolean; result?: Record<string, unknown>; error?: { code: string; message: string; dispatched?: boolean; verification?: string } };
         try {
           reply = JSON.parse(frame.toString("utf8"));
-          if (!reply || typeof reply.id !== "string" || typeof reply.ok !== "boolean" || (reply.ok ? !reply.result || typeof reply.result !== "object" : !reply.error || typeof reply.error.code !== "string" || typeof reply.error.message !== "string")) throw new Error();
-        } catch { this.stop("Invalid browser IPC response"); break; }
+          if (!reply || typeof reply.id !== "string" || typeof reply.ok !== "boolean" || (reply.ok
+            ? !reply.result || typeof reply.result !== "object" || Array.isArray(reply.result)
+            : !reply.error || typeof reply.error.code !== "string" || typeof reply.error.message !== "string"
+              || reply.error.dispatched !== undefined && typeof reply.error.dispatched !== "boolean"
+              || reply.error.verification !== undefined && !["rejected", "failed", "inconclusive", "timed_out"].includes(reply.error.verification))) throw new Error();
+        } catch { this.stop("Invalid browser IPC response; attach and inspect before continuing", "invalid_response"); break; }
         const item = this.pending.get(reply.id);
-        if (!item) { this.stop("Uncorrelated browser IPC response"); break; }
+        if (!item) { this.stop("Uncorrelated browser IPC response; attach and inspect before continuing", "invalid_response"); break; }
         this.pending.delete(reply.id); clearTimeout(item.timer); item.cleanup();
         if (reply.ok) item.resolve(reply.result!);
-        else item.reject(new BrowserError(reply.error!.code, reply.error!.message, reply.error!.dispatched, reply.error!.verification));
+        else {
+          const dispatched = reply.error!.dispatched ?? item.mutation;
+          const verification = reply.error!.dispatched === undefined && item.mutation ? "inconclusive"
+            : reply.error!.verification ?? (dispatched ? "inconclusive" : "rejected");
+          item.reject(new BrowserError(reply.error!.code, reply.error!.message, dispatched, verification));
+        }
       }
       this.resetIdle();
     });
@@ -145,7 +178,7 @@ export class BrowserBackend {
     if (this.closed) throw new BrowserError("closed", "Browser connector is closed");
     if (signal?.aborted) throw new BrowserError("cancelled", "Browser request cancelled");
     const parsed = browserInputs[method].safeParse(input);
-    if (!parsed.success) throw new BrowserError("invalid_arguments", "Invalid browser arguments; consult the tool schema");
+    if (!parsed.success) throw new BrowserError("invalid_arguments", argumentError(parsed.error.issues));
     if (this.consentPending || (method === "connect" && this.pending.size)) throw new BrowserError("busy", "Browser request in progress; wait for the explicit connection result");
     const consent = method === "connect";
     if (consent) this.consentPending = true;
@@ -158,13 +191,22 @@ export class BrowserBackend {
       const params = parsed.data as Record<string, unknown>;
       const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 10000;
       const result = await this.send(method, params, owner, timeoutMs, signal);
-      if (method === "status") return { ...browserOutputs.status.parse({ ...result, enabled: true, worker: "running", lastError: this.lastError ?? result.lastError ?? null }), linuxProcesses: await linuxProcesses() };
+      const mutation = method === "action" || method === "workflow";
+      const resultError = (code: string, message: string) => {
+        if (mutation || code === "invalid_response") this.stop("Browser result rejected; leases invalidated");
+        return new BrowserError(code, message + (mutation ? "; action outcome unverified; attach and inspect before continuing" : ""), mutation, mutation ? "inconclusive" : "failed");
+      };
+      if (method === "status") {
+        const validated = browserOutputs.status.safeParse({ ...result, enabled: true, worker: "running", lastError: result.lastError ?? this.lastError ?? null });
+        if (!validated.success) throw resultError("invalid_response", "Browser status result failed validation");
+        return { ...validated.data, linuxProcesses: await linuxProcesses() };
+      }
       const { image, ...metadata } = result;
-      if (Buffer.byteLength(JSON.stringify(metadata)) > 262144) throw new BrowserError("too_large", "Browser result exceeds 256 KiB; request a smaller observation");
+      if (Buffer.byteLength(JSON.stringify(metadata)) > 262144) throw resultError("too_large", "Browser result exceeds 256 KiB; request a smaller observation");
       const validated = browserOutputs[method].safeParse(metadata);
-      if (!validated.success) { this.stop("Invalid browser result contract"); throw new BrowserError("invalid_response", "Browser result failed validation"); }
+      if (!validated.success) throw resultError("invalid_response", "Browser result failed validation");
       if (method === "screenshot") {
-        if (typeof image !== "string" || image.length > 1400000 || Buffer.from(image, "base64").length !== metadata.bytes) throw new BrowserError("invalid_response", "Invalid browser screenshot");
+        if (typeof image !== "string" || image.length > 1400000 || Buffer.from(image, "base64").length !== metadata.bytes) throw resultError("invalid_response", "Invalid browser screenshot");
         return { ...validated.data, image };
       }
       return validated.data;

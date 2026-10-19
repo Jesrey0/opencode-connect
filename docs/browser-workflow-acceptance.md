@@ -41,8 +41,10 @@ The preceding connector build is `b20513ec328dee51`.
 
 The rollback record is
 `~/.local/state/opencode-connect/browser-workflow-20261019/rollback.json`.
-Source changes have not been committed or published. ChatGPT catalog refresh and
-an actual Gemini Notebook workflow remain separate acceptance surfaces.
+Baseline source is committed as `2f8c4d9`; Git publication remains separate.
+Follow-on source changes and rollout requirements are recorded in
+[native browser reliability acceptance](browser-reliability.md). ChatGPT catalog
+refresh and an actual Gemini Notebook workflow remain separate acceptance surfaces.
 
 ## Limits
 

@@ -117,12 +117,12 @@ Names below are the native MCP names; ChatGPT may project punctuation differentl
 
 | Tool | Arguments / result |
 | --- | --- |
-| `browser.status` | Optional `browser` (`linux` default) and `connectionId`; passive reachability, `connectionState` and worker diagnostics. |
+| `browser.status` | Optional `browser` (`linux` default) and `connectionId`; passive endpoint reachability, attachment socket state, `connectionState` and worker diagnostics. This does not verify the full MCP action path or an earlier action outcome. |
 | `browser.connect` | Explicit `browser:"windows"`, `authorized:true`, optional `timeoutMs` (1000–120000, default 60000); request Chrome consent and return private `connectionId` plus version. |
 | `browser.tabs` | Optional `browser`, `connectionId`, `filter` and `maxTabs` (1–100, default 50); exact target IDs, sanitized URLs/titles, lease flags and honest truncation. Narrow a truncated list with a title/URL filter. |
 | `browser.launch` | Optional `headless` (default false); `reused`, reachability and new process ID when applicable. Linux only. |
 | `browser.attach` | Exact `targetId`, `controlMode:observe|control`, optional `browser` and `connectionId`; opaque `leaseId`, generation and target summary. |
-| `browser.snapshot` | `leaseId`, optional `maxNodes` (1–300, default 100), `frameId`, name/role substring `filter`; compact AX roles, names, states, references, document generation, frame summaries, truncation and observation errors. |
+| `browser.snapshot` | `leaseId`, optional `maxNodes` (1–300, default 100), `frameId`, container `scopeRef`, name/role substring `filter`; compact AX roles, names, states, references, document generation, frame summaries, truncation and observation errors. |
 | `browser.click`, `browser.right_click`, `browser.double_click`, `browser.hover` | `leaseId`, `elementRef`, `authorized:true`; native Chrome mouse input on the observed element. |
 | `browser.drag` | Drag between observed `sourceRef` and `targetRef` using Chrome mouse events. |
 | `browser.key_combo`, `browser.type_text`, `browser.keypress` | Focus observed field and send a bounded shortcut, Unicode text, or single key via Chrome input. |
@@ -140,7 +140,11 @@ Select an exact target from `browser.tabs`, attach, then take a snapshot. Use th
 returned opaque `elementRef` for actions. Each snapshot replaces prior references;
 navigation, frame reload, element removal, worker loss and detach invalidate them.
 References bind to the leased target, frame loader, DOM backend identity and
-document epoch. Rejections require a new observation, never a guessed replacement.
+document epoch, plus the observed role/name and named ancestors. Reordering the
+same DOM nodes preserves identity; repurposing a node or named container rejects
+the old reference. `scopeRef` restricts a snapshot to descendants of a current
+container; that snapshot expires all previous references, including `scopeRef`.
+Rejections require a new observation, never a guessed replacement.
 `frameId` must belong to the selected tab. Same-origin iframes are supported;
 unavailable out-of-process frame trees produce explicit observation errors.
 
@@ -156,6 +160,16 @@ supports Enter, Tab, Escape, Backspace, Delete, arrows, Home, End and Space.
 `fill` and `select` remain programmatic DOM operations that raise input/change
 events, but may not satisfy sites demanding trusted user activation. Fields must
 be visible and enabled; fill rejects read-only and password controls.
+Typing, keyboard actions and filling verify that focus handlers did not replace,
+repurpose or redirect the intended editor before dispatching input.
+
+`fill` replaces an input/textarea value; `type_text` inserts at the current
+selection in an input/textarea or contenteditable. Each accepts at most 12,000
+UTF-16 code units (matching JavaScript string length); oversized arguments report
+the bound without echoing text. Longer input requires explicit ordered
+`type_text` calls. Verify each part, preserve the intended selection, and inspect
+again if the editor is replaced. There is no automatic splitting or replay.
+Rich editors can normalize text or move selection; verification remains required.
 Uploads accept a visible file input or an observed visible button that opens one.
 All files must be explicitly selected absolute regular files under configured
 roots; protected paths and key/certificate files are rejected before clicking.
@@ -179,7 +193,13 @@ an appropriate observable expected condition for consequential operations.
 Expected/wait conditions: `text(value)` for visible main-document text,
 `url(value)` for an exact URL, `elementAppears(selector,frameId?)`,
 `elementDisappears(selector,frameId?)`, `mediaReady(selector,frameId?)`, `readyState(interactive|complete)`, and
-`navigation(fromUrl)`. Navigation uses the main document's loader change or a
+`navigation(fromUrl)`, and `element(target,value?,state?)`. Element conditions
+require one exact role/name match, optionally within one named ancestor in the
+same frame. They can compare an exact field value or contenteditable rendered
+text, or assert enabled, disabled, focused, checked, unchecked, expanded,
+collapsed, selected or editable. Actual field values are not returned. Missing
+targets continue observation; ambiguous targets reject immediately.
+Navigation uses the main document's loader change or a
 changed sanitized URL plus complete readiness. An unrelated iframe reload cannot
 confirm it. Same-URL navigation must be observed from before the change; a standalone
 wait cannot prove a reload that already finished. CSS selectors are used only for
@@ -197,7 +217,7 @@ transport failure and the outer request deadline still invalidate leases.
 ### Bounded workflows
 
 Each step uses `action` (`click`, `fill`, `typeText`, `select`, `keypress`, or
-`upload`), `target:{role,name,frameId?}`, the action's values, a required `expected`
+`upload`), `target:{role,name,frameId?,within?:{role,name}}`, the action's values, a required `expected`
 condition and optional `timeoutMs`. Roles and names match exactly against a fresh
 accessibility observation immediately before that step. Missing elements are
 observed until the step deadline; ambiguous or incomplete observations stop the
@@ -206,10 +226,21 @@ Fresh snapshots rotate prior references, including references held by callers.
 
 The total deadline caps all steps; it does not multiply by the step count.
 Results report `completedSteps` (confirmed postconditions), zero-based `failedStep`
-or null, `errorCode`, verification and whether any mutation may have occurred.
+or null, `errorCode`, `errorLayer`, verification and whether any mutation may have
+occurred. `dispatched` is cumulative across the workflow; `stepDispatched` reports
+input dispatch for the failing step and is false when every step confirmed.
 No action is retried. A failed step can already have changed the page, so reconcile
 its current state before constructing a continuation. This batches known UI
 interactions without an embedded script or another model turn.
+
+Errors distinguish validation, lease, target, input, observation, browser, worker,
+transport and result layers without exposing native exception contents. A lost
+Chrome socket is not reported as a stale element. Invalid or oversized replies
+after an action retain mutation uncertainty, even when completion cannot be
+decoded. An upstream `UNAVAILABLE` may precede the server or follow dispatch;
+endpoint readiness alone cannot establish which occurred. Reconcile before retry.
+See [browser reliability acceptance](browser-reliability.md) for fixtures,
+incident findings, usage examples and rollout requirements.
 
 ### Generated media
 
