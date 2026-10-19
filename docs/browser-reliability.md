@@ -7,12 +7,13 @@ authorization, standalone actions, lease ownership, and independent Chrome
 lifetime remain the execution contract. No scheduling or monitoring was added.
 
 Baseline commit: `2f8c4d9` (browser workflows, chooser uploads and media retrieval).
-The implementation is a source change on top of that baseline.
-Read-only live inspection found connector 0.13.0, immutable build
-`d2f38de5ecdf6ccc`, serving 38 tools, including 26 browser tools. Its workflow
-targets expose only role/name/frameId, and snapshots have no scopeRef. The new
-contract requires a separate connector release/activation and client catalog
-refresh. This report does not claim deployment or NotebookLM validation.
+Reliability implementation: `689732de877e2539474e07df316d167c07d64de2`.
+Connector 0.13.0, immutable build `aead26457addd3be`, was activated on
+October 19, 2026. Live health reports that exact build; the live catalog serves
+38 tools, including 26 browser tools, with ancestor scope, scopeRef and element
+read-back exposed. The previous build `d2f38de5ecdf6ccc` is retained for rollback.
+External MCP client acceptance remains separate from the successful local and
+installed-handler checks below. No NotebookLM validation is claimed.
 
 ## Incident findings
 
@@ -75,6 +76,30 @@ primitive and safety-annotation review follows OpenAI's
 The local fixture is UTF-8 and explicitly foregrounded so Chrome background-media
 preloading does not invalidate unrelated assertions. Attachment itself does not
 activate production tabs. No authenticated NotebookLM content was changed.
+
+## Deployment acceptance
+
+- The immutable installation passes its integration contract check. Its build
+  record identifies the clean implementation commit above.
+- Activation reports build `aead26457addd3be`; service state is active, live health
+  matches, and deployment drift is false. The live HTTP/MCP catalog contains the
+  new scoped-target, scoped-snapshot and element-condition fields.
+- The installed production MCP handler passes an isolated real-Chrome smoke
+  test: four verified menu/dialog/edit/save steps, preserved notebook title,
+  scoped snapshot, ambiguity rejection, focus-redirect rejection, stale identity
+  rejection and an unverified step that stops subsequent actions.
+- The configured native plugin source matches this release's plugin source.
+  Configuration is byte-for-byte unchanged. Native runtime capabilities and
+  read-only Codex quota succeeded after activation. The original persistent
+  Chrome tab remains present; the smoke test uses its own disposable browser.
+- Public ingress responds with the expected unauthenticated 401 challenge.
+  Authenticated external MCP tool calls from this client returned transport or
+  internal errors before and after activation. Their cause is unproven; local
+  catalog and installed-handler success do not establish client acceptance.
+
+The protected rollback/configuration record and acceptance results are under
+`~/.local/state/opencode-connect/browser-reliability-20261019/`. Git publication
+and external client reconnection are not established by this deployment.
 
 ## Operator example
 
