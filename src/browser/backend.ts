@@ -27,7 +27,7 @@ export function browserErrorLayer(code: string) {
   if (["invalid_arguments", "invalid_browser", "invalid_operation", "unsafe_url", "authorization_denied"].includes(code)) return "validation";
   if (["invalid_lease", "invalid_connection", "lease_conflict", "observe_only", "approval_required", "approval_denied", "approval_timeout"].includes(code)) return "lease";
   if (["target_missing", "target_not_found", "target_closed", "ambiguous_target", "stale_reference", "document_changed", "invalid_frame", "not_actionable", "element_unavailable", "invalid_element", "invalid_option"].includes(code)) return "target";
-  if (["cdp_error", "focus_changed", "protected_input", "invalid_upload", "upload_denied", "unsupported_chooser", "file_chooser_timeout"].includes(code)) return "input";
+  if (["unsupported_input", "input_unverifiable", "site_limit", "partial_input", "sequential_limit", "input_budget_exceeded", "cdp_error", "focus_changed", "protected_input", "invalid_upload", "upload_denied", "unsupported_chooser", "file_chooser_timeout"].includes(code)) return "input";
   if (["incomplete_observation", "observation_failed", "invalid_selector", "postcondition_unconfirmed"].includes(code)) return "observation";
   if (["disabled", "closed", "busy", "restart_limited", "setup_required", "version_mismatch", "worker_unavailable", "cancelled"].includes(code)) return "worker";
   if (["invalid_protocol", "transport_failure"].includes(code)) return "transport";

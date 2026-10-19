@@ -23,7 +23,7 @@ installed-handler checks below. No NotebookLM validation is claimed.
 | B: INVALID_ARGUMENT/internal error | The original click failure was not reproduced. MCP SDK validation can reject input or output; broad worker handlers also mislabeled socket loss as stale-reference/closed-target. Injected connection and protocol failures reproduce the classification weakness. | Sanitized error codes identify target, input/CDP, browser, worker, result and other owning layers. Clicking never falls back to keyboard activation. |
 | C: UNAVAILABLE workflow | Exact historical failure was not reproduced; available service journals did not identify its layer. The message is not emitted by browser adapter code. A reachable Chrome endpoint does not prove MCP transport or prior action completion. Successful worker replies followed by malformed/oversized output were confirmed to lose mutation evidence. | Result/IPC failures preserve uncertainty and do not resend. Socket loss clears a dead attachment while endpoint reachability remains a separate fact. Outer workflow cancellation also preserves earlier dispatch evidence. |
 | D: repeated inspection | Global role/name matching could not scope repeated controls. Existing batching was retained. | One four-step workflow resolves a card, opens its editor, fills it and saves it with a postcondition at every step. It verifies the intended card and independently checks the notebook title. |
-| E: oversized fill | The 12,000 limit is intentional. No implicit chunking was added. | Errors include the applicable bound without input values. Explicit ordered type_text parts are verified against a dynamically created contenteditable; replacement rejects the old reference. |
+| E: oversized fill | The reliability release retained the 12,000 limit. The subsequent text-input extension raises it; see browser-capability.md. | Errors include the applicable bound without input values. Explicit ordered type_text parts are verified against a dynamically created contenteditable; replacement rejects the old reference. |
 
 ## Contract changes
 
@@ -143,7 +143,7 @@ card's current reference, call `browser.snapshot` with that `scopeRef`, then use
 the returned child reference in a standalone action with `expected`.
 
 For long text, use explicit ordered `browser.type_text` calls with parts within
-12,000 UTF-16 code units each. Verify the intended field and selection before
+the current catalog limit each. Verify the intended field and selection before
 each part, and the final application content afterward. Do not fill repeatedly:
 fill replaces the entire value. If the editor is replaced, inspect its content
 and selection before continuing; never resend an uncertain part automatically.

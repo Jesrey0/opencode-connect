@@ -422,7 +422,7 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     const notesRef = snap.nodes.find((node: any) => node.name === "Notes" && node.ref).ref;
     await act({ action: "click", elementRef: snap.nodes.find((node: any) => node.name === "Replace notes" && node.ref).ref });
     await assert.rejects(act({ action: "typeText", elementRef: notesRef, value: "must not append" }), errorCode("stale_reference"));
-    await assert.rejects(act({ action: "fill", elementRef: await getRef("Name"), value: "x".repeat(12001) }), (error: unknown) => error instanceof BrowserError && /12000/.test(error.message) && !error.dispatched);
+    await assert.rejects(act({ action: "fill", elementRef: await getRef("Name"), value: "x".repeat(64001) }), (error: unknown) => error instanceof BrowserError && /64000/.test(error.message) && !error.dispatched);
     const unverified = await act({ action: "fill", elementRef: await getRef("Name"), value: "Read back", timeoutMs: 1500, expected: { type: "element", target: { role: "textbox", name: "Name" }, value: "Different" } });
     assert.equal(unverified.verification, "timed_out"); assert.equal(unverified.completed, true); assert.equal(unverified.mutationMayHaveOccurred, true);
   });
@@ -448,7 +448,9 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     const worker = (backend as any).worker; process.kill(worker.pid, "SIGKILL"); await once(worker, "exit"); await sleep(20);
     await assert.rejects(snapshot(), errorCode("invalid_lease"));
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
-    assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "text", value: "Never appears" } }, "owner")).verification, "timed_out");
+    // Allow cold attachment checks after worker replacement to finish before
+    // exercising the condition timeout that deliberately preserves this lease.
+    assert.equal((await backend.call("wait", { leaseId, timeoutMs: 1000, condition: { type: "text", value: "Never appears" } }, "owner")).verification, "timed_out");
     assert.equal((await snapshot()).targetId, one.id);
     await backend.call("detach", { leaseId }, "owner");
     assert.equal((await backend.call("status", {})).reachable, true);

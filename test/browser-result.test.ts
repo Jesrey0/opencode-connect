@@ -99,8 +99,8 @@ test("argument errors identify field bounds without exposing input values", asyn
   const backend = new BrowserBackend({ enabled: true, env: { OPENCODE_CONNECT_BROWSER_PYTHON: "/not-started" } });
   try {
     for (const [method, input, path, bound] of [
-      ["action", { ...inputs.action, action: "fill", value: "private-value".repeat(1100) }, "value", "12000 characters"],
-      ["workflow", { ...inputs.workflow, steps: [{ ...inputs.workflow.steps[0], action: "fill", value: "private-value".repeat(1100) }] }, "steps[0].value", "12000 characters"],
+      ["action", { ...inputs.action, action: "fill", value: "private-value".repeat(5000) }, "value", "64000 characters"],
+      ["workflow", { ...inputs.workflow, steps: [{ ...inputs.workflow.steps[0], action: "fill", value: "private-value".repeat(5000) }] }, "steps[0].value", "64000 characters"],
       ["snapshot", { leaseId: "lease", maxNodes: 301 }, "maxNodes", "300"],
     ] as const) {
       await assert.rejects(backend.call(method, input), (error: unknown) => {

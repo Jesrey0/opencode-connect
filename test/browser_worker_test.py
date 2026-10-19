@@ -44,20 +44,36 @@ class BoundaryTests(unittest.TestCase):
         for condition in [
             {"type": "element", "target": {**target, "within": {"role": "dialog", "name": "x", "within": target}}},
             {"type": "element", "target": target, "state": "guess"},
-            {"type": "element", "target": target, "value": "😀" * 6001},
+            {"type": "element", "target": target, "value": "😀" * 64001},
             {"type": "element", "target": target, "value": "x", "script": "1+1"},
         ]:
             with self.subTest(condition=condition), self.assertRaises(worker.Rejected):
                 worker.validate_condition(condition)
         with self.assertRaises(worker.Rejected) as caught:
-            worker.validate("action", {"leaseId": "lease", "action": "fill", "elementRef": "ref", "authorized": True, "value": "😀" * 6001})
-        self.assertIn("12000", caught.exception.message)
+            worker.validate("action", {"leaseId": "lease", "action": "fill", "elementRef": "ref", "authorized": True, "value": "😀" * 64001})
+        self.assertIn("64000", caught.exception.message)
 
     def test_native_failures_have_sanitized_infrastructure_classification(self):
         for error, code, layer in [(ConnectionError("private-url"), "disconnected", "browser"), (worker.ProtocolException({"code": -32602, "message": "private-value"}), "cdp_error", "input"), (RuntimeError("private-value"), "browser_error", "browser")]:
             actual_code, message, actual_layer = worker.operation_error(error)
             self.assertEqual((actual_code, actual_layer), (code, layer))
             self.assertNotIn("private", message)
+
+    def test_unicode_capacity_and_sequential_preflight_are_independent_of_mcp(self):
+        action = {"leaseId": "lease", "action": "typeText", "elementRef": "ref", "authorized": True, "value": "😀" * 64000}
+        worker.validate("action", action)
+        worker.validate_condition({"type": "element", "target": {"role": "textbox", "name": "Text"}, "value": action["value"]})
+        worker.validate("action", {**action, "inputMode": "sequential", "value": "😀" * 2000, "keyDelayMs": 1000})
+        for fields, code in [
+            ({"inputMode": "sequential", "value": "a" * 2001}, "sequential_limit"),
+            ({"inputMode": "sequential", "value": "a\tb"}, "unsupported_input"),
+            ({"value": "\ud800"}, "unsupported_input"),
+            ({"value": "abc", "keyDelayMs": 0}, "invalid_arguments"),
+            ({"value": "abc", "inputMode": "sequential", "keyDelayMs": True}, "invalid_arguments"),
+        ]:
+            with self.subTest(code=code), self.assertRaises(worker.Rejected) as caught:
+                worker.validate("action", {**action, **fields})
+            self.assertEqual(caught.exception.code, code)
 
     def test_sensitive_url_and_text_values_are_omitted(self):
         self.assertEqual(worker.safe_url("https://user:password@example.test/path?access_token=secret#token"), "https://example.test/path")

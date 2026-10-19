@@ -163,13 +163,53 @@ be visible and enabled; fill rejects read-only and password controls.
 Typing, keyboard actions and filling verify that focus handlers did not replace,
 repurpose or redirect the intended editor before dispatching input.
 
-`fill` replaces an input/textarea value; `type_text` inserts at the current
-selection in an input/textarea or contenteditable. Each accepts at most 12,000
-UTF-16 code units (matching JavaScript string length); oversized arguments report
-the bound without echoing text. Longer input requires explicit ordered
-`type_text` calls. Verify each part, preserve the intended selection, and inspect
-again if the editor is replaced. There is no automatic splitting or replay.
-Rich editors can normalize text or move selection; verification remains required.
+`fill` replaces an input/textarea value using the native value setter and
+input/change events. `type_text` inserts at the current selection in a text
+control or contenteditable. Both accept up to 64,000 Unicode code points, as do
+workflow text steps and exact element-value conditions. Astral characters count
+once. The 2 MiB IPC request cap still applies to an entire workflow; oversized
+requests reject before dispatch. Submitted values are not returned in results.
+
+`type_text.inputMode` defaults to `"fast"` (CDP `Input.insertText`). Large values
+use ordered parts without retries; control progress is checked between parts.
+`inputMode:"sequential"` sends native rawKeyDown, char and keyUp events for each
+Unicode code point, up to 2,000 characters. Chrome preserves cancelled keyboard
+events. Optional `keyDelayMs` is a deterministic 0–1,000 ms delay between
+characters, default 0, accepted only in sequential mode. The total delay must fit
+the request/step deadline (100–30,000 ms, default 10,000), with time for actual
+processing. An admissible delay does not guarantee completion before timeout.
+Identity, editability and focus are checked between keys; focus is never restored
+mid-sequence. There is no key retry, mode fallback, or replay after uncertainty.
+Sequential text supports printable Unicode and LF. LF sends Enter
+and can trigger application keyboard handlers. Tab would navigate focus, so
+sequential tab and other control characters reject before dispatch; use fast
+insertion for literal tabs.
+These events do not model a platform keyboard layout or IME composition.
+
+Both operations respect a native control's `maxlength` (measured by HTML in
+UTF-16 units), including the current selection for insertion. Single-line
+controls reject line breaks. Automatic insertion read-back needs an observable native selection; controls
+such as email/number/date need a same-element expected value to verify insertion.
+Fill retains replacement semantics for these controls. Inserting into a control
+whose existing value exceeds 128,000 UTF-16 units rejects before editing because
+exact automatic read-back is bounded. Unpaired surrogates reject before text dispatch.
+
+Successful text actions include `textVerification:"confirmed"` when exact control
+read-back matches, independently of application `verification`. Contenteditable and controls without an observable selection
+require a same-element `expected:{type:"element",target,value}` to confirm exact
+control value or rendered `innerText`; otherwise `textVerification:"unverified"` states the
+limitation. Workflows aggregate that field across attempted text edits; a
+non-value postcondition cannot prove exact editor content. Rich editors can
+normalize text or move selection; no generic normalization is assumed.
+
+Length/mode violations reject before dispatch. `site_limit` identifies native
+maxlength rejection, `partial_input` identifies mismatched control text after
+input, and `input_budget_exceeded` identifies an impossible delay budget. A
+mutation-time timeout, focus/identity interruption, or failed postcondition keeps
+mutation uncertainty. Inspect current content and selection before continuing;
+never resend an uncertain part. An application's custom limit can appear as
+`partial_input` or a failed expected-value condition rather than `site_limit`.
+
 Uploads accept a visible file input or an observed visible button that opens one.
 All files must be explicitly selected absolute regular files under configured
 roots; protected paths and key/certificate files are rejected before clicking.

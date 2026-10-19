@@ -25,7 +25,12 @@ with contextlib.redirect_stdout(sys.stderr):
     from media import MediaError, inspect_media, download_media
 
 MAX_FRAME = 2 * 1024 * 1024
+# Chrome AX messages can include many layout nodes for a 64k multiline editor.
+# Keep this internal transport separate from the smaller public IPC/result caps.
+MAX_CDP_FRAME = 16 * 1024 * 1024
 MAX_SCREENSHOT = 1024 * 1024
+MAX_TEXT = 64000  # Match Zod/JSON Schema: Unicode code points.
+MAX_SEQUENTIAL = 2000
 METHODS = {
     "hello": set(), "status": {"browser", "connectionId"}, "tabs": {"browser", "connectionId", "filter", "maxTabs"},
     "connect": {"browser", "authorized", "timeoutMs"},
@@ -36,7 +41,7 @@ METHODS = {
     "workflow": {"leaseId", "authorized", "steps", "timeoutMs"},
     "media": {"leaseId", "maxItems"},
     "media_download": {"leaseId", "elementRef", "authorized", "maxBytes", "timeoutMs"},
-    "action": {"leaseId", "action", "authorized", "expected", "timeoutMs", "elementRef", "sourceRef", "targetRef", "value", "key", "modifiers", "url", "files", "deltaX", "deltaY"},
+    "action": {"leaseId", "action", "authorized", "expected", "timeoutMs", "elementRef", "sourceRef", "targetRef", "value", "inputMode", "keyDelayMs", "key", "modifiers", "url", "files", "deltaX", "deltaY"},
 }
 
 
@@ -188,8 +193,8 @@ def validate_condition(condition):
         reject("invalid_arguments", "Unsupported expected condition")
     if kind == "element":
         validate_target(condition.get("target"))
-        if "value" in condition and (not isinstance(condition["value"], str) or len(condition["value"].encode("utf-16-le", "surrogatepass")) // 2 > 12000):
-            reject("invalid_arguments", "Element value limit is 12000 UTF-16 code units")
+        if "value" in condition and (not isinstance(condition["value"], str) or len(condition["value"]) > MAX_TEXT):
+            reject("invalid_arguments", "Element value limit is 64000 Unicode characters")
         if "state" in condition and condition["state"] not in ("enabled", "disabled", "focused", "checked", "unchecked", "expanded", "collapsed", "selected", "editable"):
             reject("invalid_arguments", "Unsupported element state")
         return
@@ -290,7 +295,7 @@ class Adapter:
         conn = BrowserConnection()
         conn.websocket_url = url
         self.conn = conn
-        conn.socket = await NoRedirectConnect(url, open_timeout=timeout, proxy=None, max_size=MAX_FRAME, ping_timeout=20)
+        conn.socket = await NoRedirectConnect(url, open_timeout=timeout, proxy=None, max_size=MAX_CDP_FRAME, ping_timeout=20)
         # Reuse the pinned Nodriver listener/transactions with our bounded,
         # non-redirecting socket. Its normal aopen also reconnects implicitly.
         conn._listener_task = asyncio.create_task(conn._listener())
@@ -420,6 +425,15 @@ class Adapter:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(self.conn.send(cdp.runtime.release_object_group("browser-action")), 1)
 
+    async def ancestry(self, backend):
+        # This native query requires AX enabled. Keep subscriptions scoped to
+        # observation so text edits do not stream unbounded AX update events.
+        await self.conn.send(cdp.accessibility.enable())
+        try:
+            return await self.conn.send(cdp.accessibility.get_ax_node_and_ancestors(backend_node_id=cdp.dom.BackendNodeId(backend)))
+        finally:
+            await self.conn.send(cdp.accessibility.disable())
+
     async def element(self, ref, actionable=True):
         data = self.refs.get(ref)
         if not data:
@@ -432,7 +446,7 @@ class Adapter:
         try:
             obj = await self.conn.send(cdp.dom.resolve_node(backend_node_id=cdp.dom.BackendNodeId(data["backend"]), object_group="browser-action"))
             if "identity" in data:
-                tree = await self.conn.send(cdp.accessibility.get_partial_ax_tree(backend_node_id=cdp.dom.BackendNodeId(data["backend"]), fetch_relatives=True))
+                tree = await self.ancestry(data["backend"])
                 node = next((node for node in tree if node.backend_dom_node_id == data["backend"]), None)
                 by_id = {str(node.node_id): node for node in tree}
                 ancestors = [(int(parent.backend_dom_node_id), ax_identity(parent)) for parent in ax_ancestors(node, by_id) if parent.backend_dom_node_id and parent.name and parent.name.value and parent.role and parent.role.value not in ("RootWebArea", "WebArea")] if node else []
@@ -464,6 +478,51 @@ class Adapter:
         if not await self.function(obj, "function(){return this.isConnected&&this.getRootNode().activeElement===this;}"):
             reject("focus_changed", "Focus moved before input; inspect before editing")
         return obj
+
+    async def text_guard(self, ref):
+        # Do not refocus: a handler moving focus must stop the sequence. Check
+        # the full reference identity between keys, including named ancestors.
+        obj, state = await self.element(ref)
+        if state["readonly"] or not await self.function(obj, "function(){return this.getRootNode().activeElement===this&&(this.isContentEditable||this.tagName==='TEXTAREA'||this.tagName==='INPUT'&&!['file','hidden','submit','button','checkbox','radio','password','image','reset'].includes(this.type));}"):
+            reject("focus_changed", "Editor focus or editability changed; input stopped without replay")
+        return obj
+
+    async def text_plan(self, obj, value, replace):
+        plan = await self.function(obj, """function(value,replace){
+          if(this.isContentEditable) return {control:false};
+          const before=this.value, start=this.selectionStart, end=this.selectionEnd;
+          if(!replace && before.length>128000) return {unverifiable:true};
+          if(!replace && (start===null||end===null)) return {control:false,singleLine:true,limited:this.maxLength>=0&&value.length>this.maxLength};
+          const expected=replace?value:before.slice(0,start)+value+before.slice(end);
+          return {control:true,expected,prefix:replace?'':before.slice(0,start),suffix:replace?'':before.slice(end),limited:this.maxLength>=0&&expected.length>this.maxLength,
+            multiline:this.tagName==='TEXTAREA'};
+        }""", [value, replace])
+        if plan.get("unverifiable"):
+            reject("input_unverifiable", "Existing control exceeds the bounded exact read-back limit; no text dispatched")
+        if plan.get("limited"):
+            reject("site_limit", "Requested text exceeds the control's maxlength; no text dispatched")
+        if (plan.get("singleLine") or plan.get("control") and not plan["multiline"]) and any(c in value for c in "\r\n"):
+            reject("unsupported_input", "Single-line controls cannot preserve line breaks; no text dispatched")
+        return plan
+
+    async def sequential_text(self, args):
+        value, delay = args["value"], args.get("keyDelayMs", 0) / 1000
+        # Split Unicode code points, never UTF-16 surrogate halves. A char
+        # event supplies text; rawKeyDown is separate so focus/identity changes
+        # in keyboard handlers are detected before insertion.
+        for index, char in enumerate(value):
+            if index and delay:
+                await asyncio.sleep(delay)
+            await self.text_guard(args["elementRef"])
+            key = "Enter" if char == "\n" else char
+            vk = 13 if char == "\n" else ord(char.upper()) if char.isascii() and char.isalnum() else 32 if char == " " else 0
+            self.dispatched = True
+            await self.conn.send(cdp.input_.dispatch_key_event("rawKeyDown", key=key, windows_virtual_key_code=vk))
+            await self.text_guard(args["elementRef"])
+            await self.conn.send(cdp.input_.dispatch_key_event("char", key=key, text="\r" if char == "\n" else char, windows_virtual_key_code=vk))
+            await self.text_guard(args["elementRef"])
+            await self.conn.send(cdp.input_.dispatch_key_event("keyUp", key=key, windows_virtual_key_code=vk))
+        return await self.text_guard(args["elementRef"])
 
     async def point(self, ref):
         obj, state = await self.element(ref)
@@ -533,6 +592,27 @@ class Adapter:
                     if isinstance(result,BaseException):
                         raise result
 
+    async def target_tree(self, frame_id, target):
+        # Query native AX by exact role/name instead of transferring every
+        # text/layout node merely to verify a large editor.
+        world = await self.conn.send(cdp.page.create_isolated_world(cdp.page.FrameId(frame_id), world_name="opencode-browser-observe"))
+        doc, error = await self.conn.send(cdp.runtime.evaluate("document", context_id=world, object_group="browser-action", silent=True))
+        if error or not doc.object_id:
+            reject("observation_failed", "Target document unavailable")
+        await self.conn.send(cdp.accessibility.enable())
+        try:
+            tree = await self.conn.send(cdp.accessibility.query_ax_tree(object_id=doc.object_id, accessible_name=target["name"], role=target["role"]))
+            by_id = {}
+            for node in tree:
+                if node.backend_dom_node_id:
+                    parents = await self.conn.send(cdp.accessibility.get_ax_node_and_ancestors(backend_node_id=node.backend_dom_node_id))
+                    by_id.update((str(parent.node_id), parent) for parent in parents)
+            containers = await self.conn.send(cdp.accessibility.query_ax_tree(object_id=doc.object_id, accessible_name=target["within"]["name"], role=target["within"]["role"])) if target.get("within") else []
+            return tree, by_id, containers
+        finally:
+            await self.conn.send(cdp.accessibility.disable())
+            await self.conn.send(cdp.runtime.release_object(doc.object_id))
+
     async def snapshot(self, args, target=None, rotate=True):
         scope = None
         if args.get("scopeRef"):
@@ -562,12 +642,15 @@ class Adapter:
             if selected and selected != frame_id:
                 continue
             try:
-                tree = await self.conn.send(cdp.accessibility.get_full_ax_tree(frame_id=cdp.page.FrameId(frame_id)))
-                by_id = {str(node.node_id): node for node in tree}
+                if target:
+                    tree, by_id, container_tree = await self.target_tree(frame_id, target)
+                else:
+                    tree = await self.conn.send(cdp.accessibility.get_full_ax_tree(frame_id=cdp.page.FrameId(frame_id)))
+                    by_id = {str(node.node_id): node for node in tree}
                 scopes = {scope["backend"]} if scope else set()
                 if target and target.get("within"):
                     within = target["within"]
-                    containers = [node for node in tree if not node.ignored and node.backend_dom_node_id and node.role and node.role.value == within["role"] and node.name and node.name.value == within["name"]]
+                    containers = [node for node in container_tree if not node.ignored and node.backend_dom_node_id and node.role and node.role.value == within["role"] and node.name and node.name.value == within["name"]]
                     scope_count += len(containers)
                     scopes = {int(node.backend_dom_node_id) for node in containers}
                 for node in tree:
@@ -761,11 +844,15 @@ class Adapter:
 
     async def workflow(self, args, owner):
         completed, any_dispatched, url = 0, False, ""
+        text_verification = None
+
+        def text_report():
+            return {"textVerification": text_verification} if text_verification else {}
 
         def report(index, verification, evidence, code, layer):
             step_dispatched = self.dispatched
             self.dispatched = any_dispatched or step_dispatched
-            return {"completedSteps": completed, "failedStep": index, "verification": verification,
+            return {**text_report(), "completedSteps": completed, "failedStep": index, "verification": verification,
                     "dispatched": self.dispatched, "stepDispatched": step_dispatched,
                     "mutationMayHaveOccurred": self.dispatched, "url": url,
                     "evidence": evidence, "errorCode": code, "errorLayer": layer}
@@ -788,7 +875,12 @@ class Adapter:
                             await asyncio.sleep(0.1)
                         layer = "input"
                         action_args = {key: value for key, value in step.items() if key != "target"}
+                        prior_text_verification = text_verification
+                        if step["action"] in ("fill", "typeText"):
+                            text_verification = "unverified"
                         result = await self.action({**action_args, "elementRef": ref, "leaseId": args["leaseId"], "authorized": True})
+                        if "textVerification" in result:
+                            text_verification = "unverified" if "unverified" in (prior_text_verification, result["textVerification"]) else "confirmed"
                         url = result["url"]
                         if result["verification"] != "confirmed":
                             return report(index, result["verification"], result["evidence"], "postcondition_unconfirmed", "observation")
@@ -805,7 +897,10 @@ class Adapter:
                     await self.disconnect()
                     return report(index, "inconclusive" if self.dispatched else "failed", message, code, layer)
             self.dispatched = any_dispatched
-            return {"completedSteps": completed, "failedStep": None, "verification": "confirmed", "dispatched": any_dispatched, "stepDispatched": False, "mutationMayHaveOccurred": any_dispatched, "url": url, "evidence": "All step postconditions confirmed", "errorCode": None, "errorLayer": None}
+            evidence = "All step postconditions confirmed"
+            if text_verification == "unverified":
+                evidence += "; exact text remains unverified for one or more edits: use same-element expected values"
+            return {**text_report(), "completedSteps": completed, "failedStep": None, "verification": "confirmed", "dispatched": any_dispatched, "stepDispatched": False, "mutationMayHaveOccurred": any_dispatched, "url": url, "evidence": evidence, "errorCode": None, "errorLayer": None}
         finally:
             # Outer request timeout/cancellation can escape a later step. Keep
             # dispatch evidence from earlier confirmed steps at the IPC owner.
@@ -813,6 +908,12 @@ class Adapter:
 
     async def action(self, args):
         kind = args["action"]
+        text_verification = None
+        same_text_target = False
+        if kind == "typeText" and args.get("inputMode", "fast") == "sequential":
+            remaining = min(self.deadline - asyncio.get_running_loop().time(), args.get("timeoutMs", 10000) / 1000)
+            if max(0, len(args["value"]) - 1) * args.get("keyDelayMs", 0) / 1000 + 0.2 >= remaining:
+                reject("input_budget_exceeded", "Sequential delays exceed the operation deadline; no text dispatched")
         files = upload_files(args["files"], self.lease["browser"]) if kind == "upload" else None
         navigation_before = None
         if args.get("expected", {}).get("type") == "navigation":
@@ -870,8 +971,22 @@ class Adapter:
                         if state["readonly"] or not (state["tag"] in ("INPUT","TEXTAREA") and state["type"] not in ("file","hidden") or await self.function(obj,"function(){return this.isContentEditable;}")):
                             reject("invalid_element", "Typing requires editable text or contenteditable")
                         obj = await self.focus(args["elementRef"], obj, editable=True)
-                        self.dispatched = True
-                        await self.conn.send(cdp.input_.insert_text(args["value"]))
+                        plan = await self.text_plan(obj, args["value"], False)
+                        if args.get("inputMode", "fast") == "sequential":
+                            obj = await self.sequential_text(args)
+                        else:
+                            # Large insertText calls can monopolize Chrome's
+                            # editing pipeline. Each ordered part is sent once;
+                            # verify control progress before sending the next.
+                            value = args["value"]
+                            size = 8000 if len(value) > 12000 else len(value)
+                            for start in range(0, len(value), size):
+                                obj = await self.text_guard(args["elementRef"])
+                                self.dispatched = True
+                                await self.conn.send(cdp.input_.insert_text(value[start:start + size]))
+                                obj = await self.text_guard(args["elementRef"])
+                                if plan["control"] and not await self.function(obj, "function(expected,prefix,more){return this.value===expected&&(!more||this.selectionStart===prefix.length&&this.selectionEnd===prefix.length);}", [plan["prefix"] + value[:start + size] + plan["suffix"], plan["prefix"] + value[:start + size], start + size < len(value)]):
+                                    reject("partial_input", "Control text differs after an ordered part; input stopped without replay")
                     elif kind == "keyCombo":
                         obj = await self.focus(args["elementRef"], obj)
                         bits={"Alt":1,"Control":2,"Meta":4,"Shift":8}
@@ -883,6 +998,7 @@ class Adapter:
                         await self.conn.send(cdp.input_.dispatch_key_event("keyUp",key=key,code="Key"+key if len(key)==1 else key,modifiers=mask,windows_virtual_key_code=vk))
                     elif kind == "fill":
                         obj = await self.focus(args["elementRef"], obj, editable=True)
+                        plan = await self.text_plan(obj, args["value"], True)
                         self.dispatched = True
                         result = await self.function(obj, "function(value){if(!this.isConnected||this.getRootNode().activeElement!==this||this.readOnly||this.getAttribute('aria-readonly')==='true'||this.matches(':disabled')||this.getAttribute('aria-disabled')==='true')return false;const proto=this.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;Object.getOwnPropertyDescriptor(proto,'value').set.call(this,value);this.dispatchEvent(new Event('input',{bubbles:true}));this.dispatchEvent(new Event('change',{bubbles:true}));return true;}", [args["value"]])
                         if not result:
@@ -899,10 +1015,31 @@ class Adapter:
                         codes = {"Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8, "Delete": 46, "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40, "Home": 36, "End": 35, "Space": 32}
                         await self.conn.send(cdp.input_.dispatch_key_event("keyDown", key=" " if key == "Space" else key, windows_virtual_key_code=codes[key], text="\r" if key == "Enter" else " " if key == "Space" else None))
                         await self.conn.send(cdp.input_.dispatch_key_event("keyUp", key=key, windows_virtual_key_code=codes[key]))
+            if kind in ("fill", "typeText"):
+                obj = await self.text_guard(args["elementRef"])
+                text_verification = "unverified"
+                if plan["control"]:
+                    if not await self.function(obj, "function(expected){return this.value===expected;}", [plan["expected"]]):
+                        reject("partial_input", "Control text differs from the requested edit; input may be partial or transformed; inspect without replay")
+                    text_verification = "confirmed"
+                elif args.get("expected", {}).get("type") == "element" and "value" in args["expected"]:
+                    original = self.refs[args["elementRef"]]
+                    check_ref = await self.resolve_target(args["expected"]["target"])
+                    if check_ref:
+                        check = self.refs.pop(check_ref)
+                        same_text_target = all(original[key] == check[key] for key in ("backend", "frame", "loader", "epoch"))
+            text_result = {"textVerification": text_verification} if text_verification else {}
             if args.get("expected"):
                 result = await self.wait(args["expected"], navigation_before, args.get("timeoutMs", 10000))
-                return {**result, "dispatched": True, "completed": True, "mutationMayHaveOccurred": True}
-            return {"dispatched": True, "completed": True, "verification": "inconclusive", "url": safe_url((await self.current())["url"]), "evidence": "Command completed; application outcome requires an expected condition", "mutationMayHaveOccurred": True}
+                if same_text_target and result["verification"] == "confirmed":
+                    text_result["textVerification"] = "confirmed"
+                if text_result.get("textVerification") == "unverified":
+                    result["evidence"] += "; exact editor text requires a same-element expected value"
+                return {**result, **text_result, "dispatched": True, "completed": True, "mutationMayHaveOccurred": True}
+            evidence = "Command completed; application outcome requires an expected condition"
+            if text_verification:
+                evidence += "; exact control text matched" if text_verification == "confirmed" else "; exact editor text unverified: supply a same-element expected value"
+            return {**text_result, "dispatched": True, "completed": True, "verification": "inconclusive", "url": safe_url((await self.current())["url"]), "evidence": evidence, "mutationMayHaveOccurred": True}
         finally:
             await self.release_objects()
 
@@ -1027,11 +1164,24 @@ def validate(method, args):
         kind = args["action"]
         variants = {"navigate": {"url"}, "click": {"elementRef"}, "rightClick": {"elementRef"}, "doubleClick": {"elementRef"}, "hover": {"elementRef"}, "drag": {"sourceRef", "targetRef"}, "typeText": {"elementRef","value"}, "keyCombo": {"elementRef","key","modifiers"}, "wheel": {"elementRef","deltaX","deltaY"}, "fill": {"elementRef", "value"}, "select": {"elementRef", "value"}, "upload": {"elementRef", "files"}, "keypress": {"elementRef", "key"}, "scroll": {"elementRef", "deltaY"}}
         common = {"leaseId", "action", "authorized", "expected", "timeoutMs"}
-        if args["authorized"] is not True or kind not in variants or set(args) - common - variants[kind] or variants[kind] - set(args):
+        optional = {"inputMode", "keyDelayMs"} if kind == "typeText" else set()
+        if args["authorized"] is not True or kind not in variants or set(args) - common - variants[kind] - optional or variants[kind] - set(args):
             reject("invalid_arguments", "Invalid or unauthorized browser action")
         for field in ("value", "url", "key"):
-            if field in args and (not isinstance(args[field], str) or len(args[field].encode("utf-16-le", "surrogatepass")) // 2 > 12000):
-                reject("invalid_arguments", "Action value limit is 12000 UTF-16 code units")
+            limit = MAX_TEXT if kind in ("fill", "typeText") else 4096 if field == "url" else 1000 if field == "value" else 100
+            if field in args and (not isinstance(args[field], str) or len(args[field]) > limit):
+                reject("invalid_arguments", "Action " + field + " limit is " + str(limit) + " Unicode characters")
+        if kind in ("fill", "typeText") and any(0xD800 <= ord(char) <= 0xDFFF for char in args["value"]):
+            reject("unsupported_input", "Unpaired Unicode surrogates cannot be entered exactly")
+        if kind == "typeText":
+            mode, delay = args.get("inputMode", "fast"), args.get("keyDelayMs", 0)
+            if not args["value"] or mode not in ("fast", "sequential") or type(delay) is not int or not 0 <= delay <= 1000 or mode != "sequential" and "keyDelayMs" in args:
+                reject("invalid_arguments", "Typing requires text and a valid mode; keyDelayMs is sequential-only, from 0 to 1000")
+            if mode == "sequential":
+                if len(args["value"]) > MAX_SEQUENTIAL:
+                    reject("sequential_limit", "Sequential limit is 2000 Unicode characters; use explicit fast input for longer text")
+                if any(ord(char) < 32 and char != "\n" or ord(char) == 127 for char in args["value"]):
+                    reject("unsupported_input", "Sequential text supports printable Unicode and LF; other control characters are unsupported")
         if kind == "upload" and (not isinstance(args["files"], list) or not 1 <= len(args["files"]) <= 10 or any(not isinstance(file, str) or len(file) > 4096 for file in args["files"])):
             reject("invalid_arguments", "Invalid upload files")
         if kind == "keyCombo" and (
