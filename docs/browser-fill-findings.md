@@ -1,5 +1,8 @@
 # Browser fill and lease findings — October 20, 2026
 
+OpenCode Connect 0.14.2 is deployed as `443fd8bc3f2f7345`, from runtime commit
+`a3758e8d773d`. Rollback build: `36f2d1ed78cd7973` (0.14.1).
+
 ## Audio customization limit
 
 NotebookLM's current Audio Overview customization textarea declares
@@ -61,3 +64,30 @@ continues to preserve Chrome and retain an explanatory status diagnostic.
 For long generation, release the attachment after submission, then rediscover,
 attach and inspect during verification. An unavailable lease does not establish
 that generation failed and is not a reason to resubmit generation.
+
+## Acceptance
+
+- Source type checks, build and source/install integration verification passed.
+  The full suite passed 352 connector tests with three explicit opt-in skips,
+  plus 145 native plugin tests.
+- The opt-in permission, transport/error, text and recovery suites passed across
+  component runs. Concurrent broad runs exposed deadline failures under load.
+  A recovery fixture also assumed an identical fragment URL must reload; it now
+  changes a private query value to force a document load with the same redacted
+  URL. The corrected full recovery file passed all 34 cases.
+- The immutable build independently passed 15 real-Chrome text tests and all
+  28 Python boundary/media tests, including queued expiry, dead lease cleanup,
+  owner-only release and Windows approval boundaries.
+- Live service health identifies the exact build with no deployment drift.
+  Authenticated MCP returned readable standard error text containing
+  `invalid_lease`, `errorLayer:"lease"`, `dispatched:false` and mutation state.
+  The journal independently recorded the sanitized diagnostic event.
+- Authenticated native runtime discovery and Codex App Server quota retrieval
+  passed. Browser readiness and a fresh observe/snapshot/detach sequence passed.
+  Native configuration, original page IDs and production Chrome PID 55316 are
+  preserved. No application text or generation was submitted during inspection.
+
+Protected rollback and acceptance records reside under
+`~/.local/state/opencode-connect/browser-recovery-20261020/`.
+Tool schemas are unchanged; no connector catalog refresh is required. Attachment
+handles from before deployment require explicit fresh attachment.
