@@ -21,7 +21,7 @@
           "tool": "host.inspect",
           "arguments": {
             "type": "find",
-            "cwd": "/home/jesrey0/projects/opencode-connect",
+            "cwd": "<LOCAL_REPOSITORY_PATH>",
             "query": "release-cutover",
             "limit": 10
           },
@@ -33,7 +33,7 @@
           "tool": "host.inspect",
           "arguments": {
             "type": "read",
-            "cwd": "/home/jesrey0/projects/opencode-connect",
+            "cwd": "<LOCAL_REPOSITORY_PATH>",
             "path": "docs/release-cutover.md",
             "limit": 9000
           },
