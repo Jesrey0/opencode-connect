@@ -3,7 +3,7 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.12.0** projects native OpenCode HostPlane operations
+OpenCode Connect **0.14.2** projects native OpenCode HostPlane operations
 and the canonical WorkerPlane
 into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**.
 
@@ -208,6 +208,17 @@ Stale/unrelated terminal hints cannot force completion; timeout reconciles canon
 state even when the terminal event was missed. SDK request cancellation or HTTP
 disconnect releases the wait's native read/event observer without interrupting
 the retained worker; use explicit `act interrupt` to stop native execution.
+
+For a quick availability check, use `status` with `detail: "readiness"`.
+It returns connector version/build identity and OpenCode readiness without reading
+worker/session history or Codex RPC. Component summaries cover events and the local
+browser supervisor; they do not probe Chrome, validate a lease, or verify the Codex
+plugin or quota. An unavailable OpenCode returns `ready: false` with connector
+identity and a sanitized issue. Omitted detail or `detail: "recovery"` preserves the
+existing worker/result evidence; `runtime` selects that recovery inventory.
+Use `browser.status` for browser endpoint and attachment diagnosis. See the
+[operator acceptance matrix](docs/operator-acceptance.md) for measurement and
+the remaining ChatGPT workflow checks.
 
 The pinned official MCP SDK per-request HTTP entry serves only `2026-07-28`
 using `server/discover`, per-request `_meta`, and matching standard
@@ -687,6 +698,7 @@ npm ci --include=dev
 npm run test:all
 npm run check:all
 npm run verify:integration
+npm run verify:release
 npm run build
 git diff --check
 ```

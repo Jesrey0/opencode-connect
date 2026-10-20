@@ -31,6 +31,9 @@ runtime inspection.
 1. Confirm the independently reviewed commit and Git diff. Run `npm ci --include=dev`,
    `npm run check:all`, `npm run test:all`, `npm run build`, and
    `npm run verify:integration` in an isolated source copy if a console uses the checkout.
+   `check:all` includes `verify:release`, which rejects package/lock/runtime/README
+   release drift and a stale README native-client pin. This source check does not
+   attest the deployed connector, loaded plugin or ChatGPT tool exposure.
 2. With separate operator authorization, use the newly compiled
    `dist/src/deploy.js prepare --source <source-directory>` to prepare an immutable
    release. Preparation does not activate or reload either runtime.

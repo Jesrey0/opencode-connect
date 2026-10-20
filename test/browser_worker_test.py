@@ -263,7 +263,30 @@ asyncio.run(worker.main())
         self.assertTrue(result["reachable"])
         self.assertFalse(result["attached"])
         self.assertIsNone(adapter.lease)
-        self.assertIn("Attachment connection lost", result["lastError"])
+        self.assertIn("Attachment connection lost", result["currentIssue"])
+        recovered = await adapter.status("linux", {}, "owner")
+        self.assertTrue(recovered["reachable"])
+        self.assertFalse(recovered["attached"])
+        self.assertIsNone(recovered["currentIssue"])
+
+    async def test_status_clears_an_endpoint_fault_without_requiring_attachment(self):
+        class Adapter(worker.Adapter):
+            unavailable = True
+
+            async def discover(self, browser):
+                if self.unavailable:
+                    worker.reject("unreachable", "Chrome debugging endpoint unavailable")
+                return {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/id", "Browser": "Chrome/155.0"}
+        adapter = Adapter()
+        failed = await adapter.status("linux", {}, "owner")
+        self.assertFalse(failed["reachable"])
+        self.assertEqual(failed["connectionState"], "unreachable")
+        self.assertEqual(failed["currentIssue"], "Chrome debugging endpoint unavailable")
+        adapter.unavailable = False
+        recovered = await adapter.status("linux", {}, "owner")
+        self.assertTrue(recovered["reachable"])
+        self.assertFalse(recovered["attached"])
+        self.assertIsNone(recovered["currentIssue"])
 
     async def test_large_tab_lists_truncate_by_bytes_and_can_be_narrowed(self):
         class Adapter(worker.Adapter):

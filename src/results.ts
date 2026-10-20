@@ -32,7 +32,18 @@ export const errorOutputSchema = z.object({
 }).strict();
 
 export const outputSchemas = {
-  status: z.object({ ready: z.literal(true), opencodeRelease: id, serverPid: z.number().int(), workers: z.array(z.object({ sessionId: id, cwd: id, status: session.shape.status, executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "nativeTurnHistory", "historyReplay"]), outcomeEvidence: nativeObject, retry, retryReadError: z.string().nullable(), nextCall }).loose()), pendingActions: z.array(nativeObject), events: nativeObject.optional() }).strict(),
+  status: z.union([
+    z.object({ ready: z.literal(true), opencodeRelease: id, serverPid: z.number().int(), workers: z.array(z.object({ sessionId: id, cwd: id, status: session.shape.status, executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "nativeTurnHistory", "historyReplay"]), outcomeEvidence: nativeObject, retry, retryReadError: z.string().nullable(), nextCall }).loose()), pendingActions: z.array(nativeObject), events: nativeObject.optional() }).strict(),
+    z.object({
+      detail: z.literal("readiness"), ready: z.boolean(),
+      connector: z.object({ version: id, buildId: id, release: z.boolean() }).strict(),
+      components: z.object({
+        opencode: z.object({ ready: z.boolean(), release: id.nullable(), serverPid: z.number().int().nullable(), error: z.string().nullable() }).strict(),
+        events: z.object({ enabled: z.boolean(), storageFailed: z.boolean().nullable() }).strict(),
+        browser: z.object({ scope: z.literal("supervisor"), enabled: z.boolean(), worker: z.enum(["running", "stopped"]), currentIssue: z.string().nullable() }).strict().nullable(),
+      }).strict(),
+    }).strict(),
+  ]),
   hostInspect: z.discriminatedUnion("type", [
     z.object({ type: z.enum(["list", "vcsStatus", "vcsBranch", "commands"]), location, ...pageShape, nextCall, shellListScope: z.string().optional(), search: z.string().nullable().optional() }).strict(),
     z.object({ type: z.literal("read"), location, path: id, size: count, fingerprint: id, nextCall, encoding: z.enum(["utf8", "base64"]).optional(), text: z.string().optional(), data: z.string().optional(), cursorUnit: z.literal("bytes").optional(), offset: count.optional(), nextOffset: count.nullable().optional() }).strict(),

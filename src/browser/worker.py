@@ -328,7 +328,7 @@ class Adapter:
             raise
 
     async def status(self, browser, args, owner):
-        base = {"browser": browser, "attached": False, "version": None, "linuxProcesses": [], "lastError": None}
+        base = {"browser": browser, "attached": False, "version": None, "linuxProcesses": [], "currentIssue": None}
         try:
             url = endpoint(browser)
             if urllib.parse.urlsplit(url).scheme == "ws":
@@ -343,16 +343,16 @@ class Adapter:
                     await asyncio.wait_for(writer.wait_closed(), 1)
                 except (OSError, TimeoutError):
                     reject("unreachable", "Windows Chrome loopback endpoint is unavailable")
-                return {**base, "reachable": True, "connectionState": "approval_required", "lastError": "Explicit browser.connect approval is required before tab discovery"}
+                return {**base, "reachable": True, "connectionState": "approval_required", "currentIssue": "Explicit browser.connect approval is required before tab discovery"}
             info = await self.discover(browser)
             if self.lease and self.lease["browser"] == browser and (self.lease["identity"] != info["webSocketDebuggerUrl"] or not connected(self.conn)):
                 await self.disconnect()
-                base["lastError"] = "Attachment connection lost; attach explicitly. Endpoint readiness does not verify the MCP action path."
+                base["currentIssue"] = "Attachment connection lost; attach explicitly. Endpoint readiness does not verify the MCP action path."
             return {**base, "reachable": True, "attached": bool(self.lease and self.lease["browser"] == browser), "version": info["Browser"], "connectionState": "ready"}
         except Rejected as error:
             if (self.lease and self.lease["browser"] == browser) or (self.approval and self.approval["browser"] == browser):
                 await self.disconnect()
-            return {**base, "reachable": False, "connectionState": "not_configured" if error.code == "not_configured" else "unreachable", "lastError": error.message}
+            return {**base, "reachable": False, "connectionState": "not_configured" if error.code == "not_configured" else "unreachable", "currentIssue": error.message}
 
     async def targets(self, browser, args=None, owner=None):
         if urllib.parse.urlsplit(endpoint(browser)).scheme == "ws":

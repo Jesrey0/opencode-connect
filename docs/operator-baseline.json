@@ -1,0 +1,138 @@
+{
+  "observedDate": "2026-10-20",
+  "scope": "Codex subagent probes and local deterministic MCP benchmark. Full ChatGPT operator acceptance remains unrun.",
+  "connectedReadOnly": {
+    "layer": "Actually callable OpenCode Connect tools in a Codex conversation; existing deployed catalog",
+    "repositoryLocate": {
+      "observedAt": "2026-10-20T08:26:57.836Z",
+      "prompt": "Locate the repository document that owns coordinated connector/plugin rollback and verify its ownership rule.",
+      "toolCalls": 2,
+      "elapsedMs": 9566,
+      "unnecessaryActions": 0,
+      "incompleteVerification": 0,
+      "recoverability": "not exercised",
+      "result": {
+        "path": "docs/release-cutover.md",
+        "fingerprint": "f81acaa24bc72230c59e22398f6b850eac3315c31d22978916711192982d330e",
+        "verified": "Connector rollback swaps current/previous; restoring native plugin path/configuration is separate."
+      },
+      "calls": [
+        {
+          "tool": "host.inspect",
+          "arguments": {
+            "type": "find",
+            "cwd": "/home/jesrey0/projects/opencode-connect",
+            "query": "release-cutover",
+            "limit": 10
+          },
+          "elapsedMs": 4310,
+          "responseCharacters": 318,
+          "isError": false
+        },
+        {
+          "tool": "host.inspect",
+          "arguments": {
+            "type": "read",
+            "cwd": "/home/jesrey0/projects/opencode-connect",
+            "path": "docs/release-cutover.md",
+            "limit": 9000
+          },
+          "elapsedMs": 5162,
+          "responseCharacters": 5632,
+          "isError": false
+        }
+      ]
+    },
+    "legacyStatus": {
+      "observedAt": "2026-10-20T08:31:17.402Z",
+      "tool": "status",
+      "arguments": {},
+      "elapsedMs": 3354,
+      "responseCharacters": 3721,
+      "isError": false,
+      "ready": true,
+      "opencodeRelease": "2.0.24",
+      "workerCount": 4,
+      "limitation": "Current exposed legacy recovery status; new detail field is not exposed or deployed. One observation, not a benchmark."
+    },
+    "limitations": [
+      "Single observations; no percentile or speedup claims.",
+      "Timers cover only the scripted connector probe; source inspection, discovery, script setup and operator reasoning are excluded.",
+      "Response characters are JSON string length of returned connector results, not tokens or wire bytes.",
+      "New readiness selector is absent from the exposed legacy status schema and was not called on the live service."
+    ],
+    "deploymentIdentity": {
+      "connectorBuildId": null,
+      "connectorVersion": null,
+      "measurement": "Not measured by these probes; native OpenCode release comes from returned status only. Source identity does not identify deployment."
+    }
+  },
+  "localFixture": {
+    "observedAt": "2026-10-20T08:31:51.463Z",
+    "layer": "local MCP SDK with in-memory transport and deterministic native fetch fixture",
+    "node": "v24.16.0",
+    "fixture": {
+      "totalSessions": 20,
+      "selectedRecentSessions": 8,
+      "activeSessions": 0,
+      "messagesPerSession": 2,
+      "injectedLatencyMs": 0
+    },
+    "readiness": {
+      "trials": 20,
+      "medianMs": 4.274,
+      "p95Ms": 12.121,
+      "toolCallsPerTrial": 1,
+      "nativeRequestsPerTrial": 1,
+      "connectionReadsPerTrial": 1,
+      "responseBytes": 288,
+      "verifiedTrials": 20
+    },
+    "recovery": {
+      "trials": 20,
+      "medianMs": 18.515,
+      "p95Ms": 32.758,
+      "toolCallsPerTrial": 1,
+      "nativeRequestsPerTrial": 35,
+      "connectionReadsPerTrial": 1,
+      "responseBytes": 5186,
+      "verifiedTrials": 20
+    },
+    "limitations": "Measures fixture processing and serialization, not network/service latency, ChatGPT routing, operator reasoning, browser health, live recovery or end-to-end workflow acceptance.",
+    "sourceIdentity": {
+      "version": "0.14.2",
+      "buildId": "source",
+      "release": false,
+      "gitCommit": "eabd0527766e55a8311f0104f74a8f318f716bdd",
+      "worktree": "modified",
+      "measurement": "Source version and Git HEAD inspected after the recorded run in the same unchanged checkout; this is not a deployed release identity."
+    }
+  },
+  "chatgptWorkflows": [
+    {
+      "task": "repository locate",
+      "status": "INCONCLUSIVE",
+      "reason": "Codex-connected read-only microbaseline only; complete ChatGPT prompt-to-answer run not performed."
+    },
+    {
+      "task": "bounded edit and verify",
+      "status": "INCONCLUSIVE",
+      "reason": "No live mutating workflow run; requires authorized disposable repository."
+    },
+    {
+      "task": "worker recovery",
+      "status": "INCONCLUSIVE",
+      "reason": "No model turn or live worker fault injection run; lifecycle tests are separate evidence."
+    },
+    {
+      "task": "browser form postconditions",
+      "status": "INCONCLUSIVE",
+      "reason": "No live browser form mutation; fixture browser tests are separate evidence."
+    },
+    {
+      "task": "outage versus expired lease",
+      "status": "INCONCLUSIVE",
+      "reason": "No live service outage or lease fault injection; source diagnostics tests are separate evidence."
+    }
+  ]
+}

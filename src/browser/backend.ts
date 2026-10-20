@@ -52,6 +52,7 @@ export class BrowserError extends Error {
 }
 type Pending = { resolve: (value: Record<string, unknown>) => void; reject: (error: unknown) => void; timer: NodeJS.Timeout; cleanup: () => void; mutation: boolean };
 type Options = { enabled?: boolean; env?: NodeJS.ProcessEnv; idleMs?: number; workerPath?: string; restartBackoffMs?: number; chromeLaunchMode?: "auto" | "direct" | "managed" };
+type Incident = { at: string; message: string };
 
 export class BrowserBackend {
   readonly enabled: boolean;
@@ -61,7 +62,9 @@ export class BrowserBackend {
   private pending = new Map<string, Pending>();
   private buffer = Buffer.alloc(0);
   private idle?: NodeJS.Timeout;
-  private lastError: string | null = null;
+  private currentIssue: string | null = null;
+  private lastIncident: Incident | null = null;
+  private browserIssues = new Map<string, string | null>();
   private starts: number[] = [];
   private nextStart = 0;
   private closed = false;
@@ -71,17 +74,20 @@ export class BrowserBackend {
     this.env = options.env ?? process.env;
     this.enabled = options.enabled ?? this.env.OPENCODE_CONNECT_BROWSER === "1";
   }
+  // Local supervisor state only; endpoint and lease readiness require status.
+  snapshot() { return { enabled: this.enabled, worker: this.worker ? "running" : "stopped", currentIssue: this.currentIssue }; }
+  private recordIncident(message: string) { this.lastIncident = { at: new Date().toISOString(), message }; }
   private resetIdle() {
     clearTimeout(this.idle);
     if (this.worker && !this.pending.size) {
       this.idle = setTimeout(() => {
-        this.lastError = "Browser worker released after inactivity; previous attachment handles expired; attach explicitly";
-        this.stop(this.lastError);
+        this.stop("Browser worker released after inactivity; previous attachment handles expired; attach explicitly", "worker_unavailable", null);
       }, this.options.idleMs ?? 300000);
       this.idle.unref();
     }
   }
-  private stop(message: string, code = "worker_unavailable") {
+  private stop(message: string, code = "worker_unavailable", currentIssue: string | null = message) {
+    if (this.worker) { this.currentIssue = currentIssue; this.recordIncident(message); }
     const worker = this.worker; this.worker = undefined;
     clearTimeout(this.idle); this.buffer = Buffer.alloc(0);
     for (const item of this.pending.values()) {
@@ -92,13 +98,19 @@ export class BrowserBackend {
     // Only the owned Python PID. Chrome is never a member of its process lifetime.
     worker?.kill("SIGKILL");
   }
-  close() { this.closed = true; this.stop("Browser connector closed; attach again"); }
+  close() { this.closed = true; this.stop("Browser connector closed; attach again"); this.currentIssue = "Browser connector is closed"; }
   private async start() {
     if (this.closed) throw new BrowserError("closed", "Browser connector is closed");
     if (this.starting) return this.starting;
     if (this.worker) return;
     this.starting = this.spawnWorker();
-    try { await this.starting; } finally { this.starting = undefined; }
+    try { await this.starting; } catch (error) {
+      if (error instanceof BrowserError) {
+        this.currentIssue = error.message;
+        if (error.code !== "restart_limited" && this.lastIncident?.message !== error.message) this.recordIncident(error.message);
+      }
+      throw error;
+    } finally { this.starting = undefined; }
   }
   private async spawnWorker() {
     const now = Date.now(); this.starts = this.starts.filter(time => now - time < 60000);
@@ -111,10 +123,10 @@ export class BrowserBackend {
     this.worker = worker;
     worker.stdin.on("error", () => { if (this.worker === worker) this.stop("Browser IPC write failed; leases invalidated"); });
     worker.stdout.on("error", () => { if (this.worker === worker) this.stop("Browser IPC read failed; leases invalidated"); });
-    worker.on("error", () => { if (this.worker === worker) { this.lastError = "Browser worker could not start"; this.stop(this.lastError); } });
-    worker.on("exit", () => { if (this.worker === worker) { this.lastError = "Browser worker exited; leases invalidated"; this.nextStart = Date.now() + (this.options.restartBackoffMs ?? 1000); this.stop(this.lastError); } });
+    worker.on("error", () => { if (this.worker === worker) this.stop("Browser worker could not start"); });
+    worker.on("exit", () => { if (this.worker === worker) { this.nextStart = Date.now() + (this.options.restartBackoffMs ?? 1000); this.stop("Browser worker exited; leases invalidated"); } });
     // Do not retain raw stderr: CDP diagnostics may contain page content or values.
-    worker.stderr.on("data", () => { this.lastError = "Browser worker diagnostic emitted; details withheld"; });
+    worker.stderr.on("data", () => { if (this.worker === worker) this.recordIncident("Browser worker diagnostic emitted; details withheld"); });
     worker.stdout.on("data", (chunk: Buffer) => {
       if (this.worker !== worker) return;
       this.buffer = Buffer.concat([this.buffer, chunk]);
@@ -148,8 +160,10 @@ export class BrowserBackend {
     try {
       const hello = await this.send("hello", {}, "connector", 10000);
       if (hello.protocol !== 1 || hello.nodriver !== "0.50.6") throw new BrowserError("version_mismatch", "Browser protocol or Nodriver version mismatch; rerun browser setup");
+      this.currentIssue = null;
+      this.browserIssues.clear();
     } catch (error) {
-      this.stop("Browser worker negotiation failed");
+      this.stop(error instanceof BrowserError ? error.message : "Browser worker negotiation failed");
       if (error instanceof BrowserError) throw error;
       throw new BrowserError("worker_unavailable", "Browser worker negotiation failed");
     }
@@ -203,14 +217,19 @@ export class BrowserBackend {
         return new BrowserError(code, message + (mutation ? "; action outcome unverified; attach and inspect before continuing" : ""), mutation, mutation ? "inconclusive" : "failed");
       };
       if (method === "status") {
-        const validated = browserOutputs.status.safeParse({ ...result, enabled: true, worker: "running", lastError: result.lastError ?? this.lastError ?? null });
+        const validated = browserOutputs.status.safeParse({ ...result, enabled: true, worker: "running", lastIncident: this.lastIncident });
         if (!validated.success) throw resultError("invalid_response", "Browser status result failed validation");
-        return { ...validated.data, linuxProcesses: await linuxProcesses() };
+        const { browser, currentIssue } = validated.data;
+        if (currentIssue && this.browserIssues.get(browser) !== currentIssue) this.recordIncident(currentIssue);
+        this.browserIssues.set(browser, currentIssue);
+        return { ...validated.data, lastIncident: this.lastIncident, linuxProcesses: await linuxProcesses() };
       }
       const { image, ...metadata } = result;
       if (Buffer.byteLength(JSON.stringify(metadata)) > 262144) throw resultError("too_large", "Browser result exceeds 256 KiB; request a smaller observation");
       const validated = browserOutputs[method].safeParse(metadata);
       if (!validated.success) throw resultError("invalid_response", "Browser result failed validation");
+      if (method === "connect" || method === "attach") this.browserIssues.delete(String(params.browser));
+      if (method === "detach") this.browserIssues.clear();
       if (method === "screenshot") {
         if (typeof image !== "string" || image.length > 1400000 || Buffer.from(image, "base64").length !== metadata.bytes) throw resultError("invalid_response", "Invalid browser screenshot");
         return { ...validated.data, image };

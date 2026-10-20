@@ -5,6 +5,7 @@ import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
 import { exposedUnion } from "./schema.js";
 import { VERSION } from "./version.js";
+import { loadBuildInfo } from "./buildInfo.js";
 import { safeError, AdmissionError, ConnectorError, SessionDeleteError } from "./bounds.js";
 import { ProtocolErrorCode, ProtocolError } from "@modelcontextprotocol/server";
 import { Events, EVENT_NAME, eventArgumentsSchema } from "./events.js";
@@ -174,11 +175,29 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
 
   registerTool("status", {
     title: "Read OpenCode Connect Status",
-    description: "Recover readiness and active/recent native workers. Execution termination does not prove assistant success; inspect exact result evidence.",
-    inputSchema: z.object({ runtime: runtimeSchema }).strict(),
+    description: "Use detail readiness for connector identity and OpenCode availability without worker history or a browser probe. Omitted detail or recovery includes active/recent native workers, selected by runtime. Readiness does not verify the Codex plugin or browser leases. Execution termination does not prove assistant success; inspect exact result evidence.",
+    inputSchema: z.object({ runtime: runtimeSchema, detail: z.enum(["readiness", "recovery"]).optional().describe("Defaults to recovery; readiness skips worker/session/result reads. Runtime selects recovery inventory only.").meta({ default: "recovery" }) }).strict(),
     outputSchema: outputSchemas.status,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
-  }, async ({ runtime }) => structuredResult({ ...await backend.status(runtime), ...(events ? { events: events.snapshot() } : {}) }));
+  }, async ({ runtime, detail }) => {
+    if (detail !== "readiness") return structuredResult({ ...await backend.status(runtime), ...(events ? { events: events.snapshot() } : {}) });
+    const { version, buildId, release } = await loadBuildInfo();
+    let opencode: { ready: boolean; release: string | null; serverPid: number | null; error: string | null };
+    try {
+      const health = await backend.health();
+      opencode = { ready: true, release: health.opencodeRelease, serverPid: health.serverPid, error: null };
+    } catch (error) {
+      opencode = { ready: false, release: null, serverPid: null, error: safeError(error) };
+    }
+    return { ...structuredResult({
+      detail: "readiness", ready: opencode.ready, connector: { version, buildId, release },
+      components: {
+        opencode,
+        events: events?.readiness() ?? { enabled: false, storageFailed: null },
+        browser: browser ? { scope: "supervisor", ...browser.snapshot() } : null,
+      },
+    }), ...(opencode.ready ? {} : { isError: true }) };
+  });
 
   registerTool("host.inspect", {
     title: "Inspect OpenCode Host",

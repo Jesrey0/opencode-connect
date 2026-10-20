@@ -274,6 +274,7 @@ export class Events {
     eventId: sub.delivery?.id ?? null, attempts: sub.delivery?.attempts ?? 0,
     deliveryState: sub.delivery?.state ?? null,
   })); }
+  readiness() { return { enabled: true, storageFailed: this.storageFailed }; }
   snapshot() {
     const all = this.diagnostics();
     const states: Record<string, number> = {};

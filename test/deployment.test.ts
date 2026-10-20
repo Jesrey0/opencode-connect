@@ -389,11 +389,11 @@ test("prepare reuses an identical build without running npm", async () => {
   try {
     const { buildId } = await hashSourceTree(src);
     await seedBuild(base, buildId);
-    let execCalls = 0;
-    const result = await prepareBuild({ sourceDir: src, baseDir: base, exec: async () => { execCalls += 1; } });
+    const calls: Array<{ cmd: string; args: string[]; cwd: string }> = [];
+    const result = await prepareBuild({ sourceDir: src, baseDir: base, exec: async (cmd, args, cwd) => { calls.push({ cmd, args: [...args], cwd }); } });
     assert.equal(result.buildId, buildId);
     assert.equal(result.reused, true);
-    assert.equal(execCalls, 0);
+    assert.deepEqual(calls, [{ cmd: "node", args: ["scripts/verify-release-version.mjs"], cwd: src }]);
     const record = await loadBuildRecord(result.path);
     assert.equal(record.buildId, buildId);
   } finally {
@@ -422,6 +422,7 @@ test("fresh prepare builds with the locked toolchain before pruning dev dependen
     });
     assert.equal(result.reused, false);
     assert.deepEqual(calls, [
+      { cmd: "node", args: ["scripts/verify-release-version.mjs"] },
       { cmd: "npm", args: ["ci", "--include=dev"] },
       { cmd: "npm", args: ["run", "build"] },
       { cmd: "npm", args: ["prune", "--omit=dev"] },
@@ -432,6 +433,26 @@ test("fresh prepare builds with the locked toolchain before pruning dev dependen
   } finally {
     await Promise.all([rm(src, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]);
   }
+});
+
+test("source release gate failure blocks preparation and reuse without changing a candidate", async () => {
+  const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
+  const base = await tempDir("opencode-deploy-release-gate-");
+  try {
+    const { buildId } = await hashSourceTree(src);
+    for (const existing of [false, true]) {
+      if (existing) await seedBuild(base, buildId);
+      const calls: string[] = [];
+      await assert.rejects(prepareBuild({ sourceDir: src, baseDir: base, exec: async (cmd, args, cwd) => {
+        assert.equal(cwd, src);
+        calls.push(`${cmd} ${args.join(" ")}`);
+        throw new Error("Release version drift");
+      } }), /Release version drift/);
+      assert.deepEqual(calls, ["node scripts/verify-release-version.mjs"]);
+      assert.equal(await readLinkState(deploymentPaths(base).currentLink), null);
+      if (existing) assert.equal((await loadBuildRecord(path.join(base, "builds", buildId))).buildId, buildId);
+    }
+  } finally { await Promise.all([rm(src, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
 });
 
 test("prepare refuses to delete a corrupt build referenced by current", async () => {

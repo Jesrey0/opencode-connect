@@ -49,7 +49,7 @@ accept only `/devtools/browser` paths. Never expose or proxy CDP publicly.
 
 Call `browser.status` first. It reports configured endpoint reachability, worker
 state, version, attachment state, bounded Linux Chrome process IDs/debug-port
-availability, and a recoverable diagnostic. Running Chrome without a debug port is
+availability, `currentIssue`, and a timestamped `lastIncident`. Running Chrome without a debug port is
 visible but cannot be converted into an attachable instance. Pipe-only automation
 instances are not CDP endpoint candidates.
 
@@ -368,8 +368,13 @@ still require their owner's release. Detach authenticates the owner and handle
 without requiring a healthy socket or page. Windows recovery still requires
 explicit Chrome approval when its approved connection has been lost.
 
-Idle release is retained in `browser.status.lastError`, so a reachable Chrome
-endpoint does not conceal the loss of the previous attachment. For long
+`browser.status.currentIssue` describes the selected browser's current probe
+issue. It is null for a healthy endpoint with no selected attachment.
+`lastIncident: { at, message }` retains the latest sanitized connector-wide incident
+with an ISO UTC timestamp, including idle release or worker stderr, after recovery.
+Historical incidents alone do not indicate a current fault. The lightweight
+`status` readiness view describes only the local supervisor and does not probe the
+browser endpoint or lease. For long
 application-side generation, detach after submission and explicitly rediscover,
 reattach and inspect when verifying the result. Lease expiry does not close the
 page or prove generation failed; never submit generation again merely to recover

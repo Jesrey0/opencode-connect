@@ -8,6 +8,8 @@ import { createHttpHandler } from "../src/http.js";
 
 const fixture = `import json,os,sys,time
 lease=None
+status_calls=0
+diagnostic_emitted=False
 for line in sys.stdin:
  request=json.loads(line)
  if request['method']=='hello':
@@ -16,12 +18,20 @@ for line in sys.stdin:
  with open(os.environ['BROWSER_RESULT_TRACE'],'a') as trace:
   trace.write(request['method']+'\\n')
  mode=os.environ['BROWSER_RESULT_MODE']
- if mode in ('idle-expiry','slow-wait'):
+ if mode=='worker-exit' and request['method']=='tabs': sys.exit(1)
+ if mode in ('idle-expiry','slow-wait','status-diagnostics','stderr-diagnostic','worker-exit'):
+  if mode=='stderr-diagnostic' and not diagnostic_emitted:
+   print('private-url private-page-content private-value',file=sys.stderr,flush=True)
+   diagnostic_emitted=True
+   time.sleep(.02)
   if request['method']=='attach':
    lease='lease-'+str(os.getpid())
    result={'leaseId':lease,'browser':'linux','generation':'fixture','controlMode':'control','ownership':'external','target':{'targetId':'fixture','title':'Fixture','url':'https://example.test/','type':'page','leased':True}}
   elif request['method']=='status':
-   result={'browser':'linux','reachable':True,'attached':lease is not None,'version':'Chrome/fixture','connectionState':'ready','linuxProcesses':[],'lastError':None}
+   status_calls+=1
+   result={'browser':'linux','reachable':True,'attached':lease is not None,'version':'Chrome/fixture','connectionState':'ready','linuxProcesses':[],'currentIssue':None}
+   if mode=='status-diagnostics' and (status_calls<=2 or status_calls==4):
+    result.update(reachable=False,connectionState='unreachable',currentIssue='Chrome debugging endpoint unavailable; inspect the selected browser connection')
   elif request['method']=='wait':
    time.sleep(.2)
    result={'verification':'timed_out','url':'https://example.test/','evidence':'Condition not met'}
@@ -51,7 +61,7 @@ async function backendFixture(t: TestContext, mode: string, idleMs?: number) {
   const directory = await mkdtemp(join(tmpdir(), "browser-result-"));
   const workerPath = join(directory, "fixture.py"), trace = join(directory, "requests.txt");
   await writeFile(workerPath, fixture);
-  const backend = new BrowserBackend({ enabled: true, workerPath, idleMs, env: {
+  const backend = new BrowserBackend({ enabled: true, workerPath, idleMs, restartBackoffMs: 0, env: {
     ...process.env, OPENCODE_CONNECT_BROWSER_PYTHON: "/usr/bin/python3",
     BROWSER_RESULT_MODE: mode, BROWSER_RESULT_TRACE: trace,
   } });
@@ -72,7 +82,10 @@ test("overlapping requests reject before dispatch without cancelling a wait or i
   const waiting = backend.call("wait", { leaseId: attached.leaseId, timeoutMs: 1000, condition: { type: "text", value: "pending" } });
   await assert.rejects(backend.call("status", {}), (error: unknown) => error instanceof BrowserError && error.code === "busy" && !error.dispatched);
   assert.equal((await waiting).verification, "timed_out");
-  assert.equal((await backend.call("status", {})).attached, true);
+  const status = await backend.call("status", {});
+  assert.equal(status.attached, true);
+  assert.equal(status.currentIssue, null);
+  assert.equal(status.lastIncident, null);
   assert.deepEqual(await requests(), ["attach", "wait", "status"]);
 });
 
@@ -120,10 +133,69 @@ test("idle expiry reports why the attachment was lost and never revives or repla
   await assert.rejects(backend.call("action", { ...inputs.action, action: "fill", leaseId: attached.leaseId, value: "Do not replay" }), (error: unknown) => error instanceof BrowserError && error.code === "invalid_lease" && !error.dispatched);
   const status = await backend.call("status", {});
   assert.equal(status.reachable, true); assert.equal(status.attached, false);
-  assert.match(String(status.lastError), /inactivity.*expired.*attach explicitly/);
+  assert.equal(status.currentIssue, null);
+  assert.ok(!("lastError" in status));
+  const incident = status.lastIncident as { at: string; message: string };
+  assert.match(incident.message, /inactivity.*expired.*attach explicitly/);
+  assert.equal(new Date(incident.at).toISOString(), incident.at);
+  assert.equal(backend.snapshot().currentIssue, null);
   const fresh = await backend.call("attach", { targetId: "fixture", controlMode: "control" });
   assert.notEqual(fresh.leaseId, attached.leaseId);
-  assert.deepEqual(await requests(), ["attach", "action", "status", "attach"]);
+  const recovered = await backend.call("status", {});
+  assert.equal(recovered.attached, true);
+  assert.equal(recovered.currentIssue, null);
+  assert.deepEqual(recovered.lastIncident, incident);
+  assert.deepEqual(await requests(), ["attach", "action", "status", "attach", "status"]);
+});
+
+test("current endpoint faults clear after readiness recovers while incident time stays stable", async t => {
+  const { backend, requests } = await backendFixture(t, "status-diagnostics");
+  t.mock.timers.enable({ apis: ["Date"], now: Date.UTC(2026, 9, 20) });
+  assert.deepEqual(backend.snapshot(), { enabled: true, worker: "stopped", currentIssue: null });
+  const failed = await backend.call("status", {});
+  assert.equal(failed.reachable, false);
+  assert.equal(failed.connectionState, "unreachable");
+  assert.match(String(failed.currentIssue), /endpoint unavailable/);
+  assert.deepEqual(failed.lastIncident, { at: "2026-10-20T00:00:00.000Z", message: failed.currentIssue });
+  t.mock.timers.tick(1000);
+  assert.deepEqual((await backend.call("status", {})).lastIncident, failed.lastIncident);
+  t.mock.timers.tick(1000);
+  const recovered = await backend.call("status", {});
+  assert.equal(recovered.reachable, true);
+  assert.equal(recovered.attached, false);
+  assert.equal(recovered.currentIssue, null);
+  assert.deepEqual(recovered.lastIncident, failed.lastIncident);
+  assert.deepEqual(backend.snapshot(), { enabled: true, worker: "running", currentIssue: null });
+  t.mock.timers.tick(1000);
+  const recurred = await backend.call("status", {});
+  assert.deepEqual(recurred.lastIncident, { at: "2026-10-20T00:00:03.000Z", message: failed.currentIssue });
+  assert.deepEqual(await requests(), ["status", "status", "status", "status"]);
+});
+
+test("worker failure stays active locally until restart and remains in recovered history", async t => {
+  const { backend, requests } = await backendFixture(t, "worker-exit");
+  await assert.rejects(backend.call("tabs", {}), (error: unknown) => error instanceof BrowserError && error.code === "worker_unavailable");
+  assert.equal(backend.snapshot().worker, "stopped");
+  assert.match(String(backend.snapshot().currentIssue), /worker exited/);
+  const recovered = await backend.call("status", {});
+  assert.equal(recovered.currentIssue, null);
+  assert.equal(recovered.attached, false);
+  assert.match((recovered.lastIncident as { message: string }).message, /worker exited.*leases invalidated/);
+  assert.equal(backend.snapshot().currentIssue, null);
+  assert.deepEqual(await requests(), ["tabs", "status"]);
+  backend.close();
+  assert.deepEqual(backend.snapshot(), { enabled: true, worker: "stopped", currentIssue: "Browser connector is closed" });
+});
+
+test("worker stderr is sanitized incident history rather than an active browser fault", async t => {
+  const { backend } = await backendFixture(t, "stderr-diagnostic");
+  const status = await backend.call("status", {});
+  assert.equal(status.currentIssue, null);
+  assert.equal(status.reachable, true);
+  assert.equal((status.lastIncident as { message: string }).message, "Browser worker diagnostic emitted; details withheld");
+  assert.equal(backend.snapshot().currentIssue, null);
+  assert.doesNotMatch(JSON.stringify(status), /private-/);
+  assert.deepEqual((await backend.call("status", {})).lastIncident, status.lastIncident);
 });
 
 for (const method of ["action", "workflow"] as const) {

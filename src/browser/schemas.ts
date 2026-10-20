@@ -61,7 +61,7 @@ const target = z.object({ targetId: id, title: z.string(), url: z.string(), type
 const verification = z.enum(["confirmed", "failed", "inconclusive", "rejected", "timed_out"]);
 export const browserErrorSchema = z.object({ error: z.string(), errorCode: z.string(), errorLayer: z.string(), verification, dispatched: z.boolean(), mutationMayHaveOccurred: z.boolean() }).strict();
 export const browserOutputs = {
-  status: z.object({ enabled: z.boolean(), worker: z.string(), browser: z.enum(["linux", "windows"]), reachable: z.boolean(), attached: z.boolean(), version: z.string().nullable(), connectionState: z.enum(["not_configured", "unreachable", "approval_required", "connected", "ready"]), linuxProcesses: z.array(z.object({ pid: z.number(), debugging: z.boolean() }).strict()), lastError: z.string().nullable() }).strict(),
+  status: z.object({ enabled: z.boolean(), worker: z.string(), browser: z.enum(["linux", "windows"]), reachable: z.boolean(), attached: z.boolean(), version: z.string().nullable(), connectionState: z.enum(["not_configured", "unreachable", "approval_required", "connected", "ready"]), linuxProcesses: z.array(z.object({ pid: z.number(), debugging: z.boolean() }).strict()), currentIssue: z.string().nullable(), lastIncident: z.object({ at: z.iso.datetime(), message: z.string() }).strict().nullable() }).strict(),
   connect: z.object({ browser: z.literal("windows"), connectionId: id, version: z.string() }).strict(),
   tabs: z.object({ browser: z.enum(["linux", "windows"]), targets: z.array(target), truncated: z.boolean() }).strict(),
   launch: z.object({ browser: z.literal("linux"), reused: z.boolean(), reachable: z.literal(true), pid: z.number().nullable() }).strict(),

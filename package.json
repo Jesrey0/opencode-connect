@@ -7,6 +7,7 @@
   "scripts": {
     "browser:setup": "node scripts/setup-browser.mjs",
     "browser:benchmark": "node --import tsx scripts/benchmark-browser.mjs",
+    "operator:benchmark": "node --import tsx scripts/benchmark-operator.mjs",
     "test:browser": "node --import tsx --test test/browser*.test.ts",
     "prebuild": "node scripts/verify-integration.mjs && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc -p tsconfig.json",
@@ -19,9 +20,10 @@
     "start": "node dist/src/server.js",
     "deploy": "node dist/src/deploy.js",
     "test": "node --import tsx --test test/*.test.ts",
-    "check:all": "npm run check && npm run check --workspace opencode-codex-subagent && node scripts/verify-integration.mjs",
+    "check:all": "npm run verify:release && npm run check && npm run check --workspace opencode-codex-subagent && node scripts/verify-integration.mjs",
     "test:all": "npm test && npm test --workspace opencode-codex-subagent",
-    "verify:integration": "node scripts/verify-integration.mjs"
+    "verify:integration": "node scripts/verify-integration.mjs",
+    "verify:release": "node scripts/verify-release-version.mjs"
   },
   "engines": {
     "node": ">=24"

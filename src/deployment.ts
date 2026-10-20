@@ -314,6 +314,10 @@ export async function prepareBuild(options: {
   try {
   const exec = options.exec ?? defaultExec;
   const { buildId } = await hashSourceTree(sourceDir);
+  // README is a source acceptance artifact, deliberately not a release asset.
+  // Check it before staging or reusing a build; immutable installs use the
+  // separate integration gate without depending on source documentation.
+  await exec("node", ["scripts/verify-release-version.mjs"], sourceDir);
   const target = buildDirFor(paths, buildId);
   try {
     const record = await loadBuildRecord(target);

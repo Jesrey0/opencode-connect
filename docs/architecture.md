@@ -44,6 +44,7 @@ Check with: npm run check:all
 Test with: npm run test:all
 Build the connector with: npm run build
 Verify plugin contract with: npm run verify:integration
+Verify source release identity with: npm run verify:release (also in check:all)
 
 The root npm commands preserve existing connector entrypoints. To run plugin-only tests: npm test --workspace opencode-codex-subagent
 
