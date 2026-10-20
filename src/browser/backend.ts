@@ -74,7 +74,10 @@ export class BrowserBackend {
   private resetIdle() {
     clearTimeout(this.idle);
     if (this.worker && !this.pending.size) {
-      this.idle = setTimeout(() => this.stop("Browser worker idle; attach again"), this.options.idleMs ?? 300000);
+      this.idle = setTimeout(() => {
+        this.lastError = "Browser worker released after inactivity; previous attachment handles expired; attach explicitly";
+        this.stop(this.lastError);
+      }, this.options.idleMs ?? 300000);
       this.idle.unref();
     }
   }

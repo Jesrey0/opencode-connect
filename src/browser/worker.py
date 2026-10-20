@@ -1016,7 +1016,13 @@ class Adapter:
                         await self.conn.send(cdp.input_.dispatch_key_event("keyDown", key=" " if key == "Space" else key, windows_virtual_key_code=codes[key], text="\r" if key == "Enter" else " " if key == "Space" else None))
                         await self.conn.send(cdp.input_.dispatch_key_event("keyUp", key=key, windows_virtual_key_code=codes[key]))
             if kind in ("fill", "typeText"):
-                obj = await self.text_guard(args["elementRef"])
+                # Fill has finished dispatching. A change handler may move
+                # focus or disable the accepted control; read back the same
+                # identity/value without requiring another editable gesture.
+                if kind == "fill":
+                    obj, _ = await self.element(args["elementRef"], actionable=False)
+                else:
+                    obj = await self.text_guard(args["elementRef"])
                 text_verification = "unverified"
                 if plan["control"]:
                     if not await self.function(obj, "function(expected){return this.value===expected;}", [plan["expected"]]):

@@ -53,6 +53,7 @@ test("real Chrome text capacity, keyboard semantics and interrupted mutation", {
         }
       });
       editor.addEventListener('keydown',e=>{if(behavior==='lock'&&e.key==='b')editor.contentEditable='false'});
+      text.addEventListener('change',()=>{if(behavior==='commit-blur')other.focus();if(behavior==='commit-disable')text.disabled=true});
       </script>`);
   });
   host.listen(0, "127.0.0.1"); await once(host, "listening");
@@ -167,6 +168,20 @@ test("real Chrome text capacity, keyboard semantics and interrupted mutation", {
     await assert.rejects(act({ action: "typeText", value: "abc", inputMode: "sequential" }), code("partial_input", true));
     assert.equal(await evaluate("text.value"), "ac");
     assert.deepEqual(await evaluate("events.filter(e=>e.type==='keydown').map(e=>e.key)"), ["a", "b", "c"]);
+  });
+  await t.test("fill can verify an accepted value after a change handler moves focus", async () => {
+    await reset(); await evaluate("behavior='commit-blur'");
+    const result = await act({ action: "fill", value: "Audio focus", expected: { type: "element", target, value: "Audio focus" } });
+    assert.equal(result.textVerification, "confirmed"); assert.equal(result.verification, "confirmed");
+    assert.equal(await evaluate("text.value"), "Audio focus");
+    assert.equal(await evaluate("document.activeElement===other"), true);
+    assert.equal(await evaluate("other.value"), "");
+  });
+  await t.test("fill can verify a control disabled by its commit handler", async () => {
+    await reset(); await evaluate("behavior='commit-disable'");
+    const result = await act({ action: "fill", value: "Saved focus", expected: { type: "element", target, value: "Saved focus", state: "disabled" } });
+    assert.equal(result.textVerification, "confirmed"); assert.equal(result.verification, "confirmed");
+    await evaluate("text.disabled=false");
   });
   await t.test("workflow carries text mode and exact value postcondition", async () => {
     await reset();

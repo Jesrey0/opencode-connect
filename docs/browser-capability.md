@@ -162,6 +162,10 @@ events, but may not satisfy sites demanding trusted user activation. Fields must
 be visible and enabled; fill rejects read-only and password controls.
 Typing, keyboard actions and filling verify that focus handlers did not replace,
 repurpose or redirect the intended editor before dispatching input.
+After fill has dispatched input/change, a site may legitimately move focus or
+disable the accepted control. Exact fill read-back checks the same identity and
+value without requiring continued focus or editability. A requested focus/state
+postcondition is still verified separately.
 
 `fill` replaces an input/textarea value using the native value setter and
 input/change events. `type_text` inserts at the current selection in a text
@@ -349,6 +353,13 @@ can start a worker, but recovery requires explicit attachment and never replays 
 action. Connector SIGTERM/SIGINT reaps Python; pipe EOF closes connections after
 forced connector termination. Chrome identity changes and closed targets reject
 old leases. An old debugging port does not establish browser identity.
+
+Idle release is retained in `browser.status.lastError`, so a reachable Chrome
+endpoint does not conceal the loss of the previous attachment. For long
+application-side generation, detach after submission and explicitly rediscover,
+reattach and inspect when verifying the result. Lease expiry does not close the
+page or prove generation failed; never submit generation again merely to recover
+an attachment.
 
 ## Acceptance and licensing
 

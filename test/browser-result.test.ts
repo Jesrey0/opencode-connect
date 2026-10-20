@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { BrowserBackend, BrowserError } from "../src/browser/backend.js";
 
 const fixture = `import json,os,sys
+lease=None
 for line in sys.stdin:
  request=json.loads(line)
  if request['method']=='hello':
@@ -14,6 +15,19 @@ for line in sys.stdin:
  with open(os.environ['BROWSER_RESULT_TRACE'],'a') as trace:
   trace.write(request['method']+'\\n')
  mode=os.environ['BROWSER_RESULT_MODE']
+ if mode=='idle-expiry':
+  if request['method']=='attach':
+   lease='lease-'+str(os.getpid())
+   result={'leaseId':lease,'browser':'linux','generation':'fixture','controlMode':'control','ownership':'external','target':{'targetId':'fixture','title':'Fixture','url':'https://example.test/','type':'page','leased':True}}
+  elif request['method']=='status':
+   result={'browser':'linux','reachable':True,'attached':lease is not None,'version':'Chrome/fixture','connectionState':'ready','linuxProcesses':[],'lastError':None}
+  elif request['params'].get('leaseId')==lease:
+   result={'dispatched':True,'completed':True,'verification':'inconclusive','url':'https://example.test/','evidence':'Executed once','mutationMayHaveOccurred':True}
+  else:
+   print(json.dumps({'id':request['id'],'ok':False,'error':{'code':'invalid_lease','message':'Attach explicitly','dispatched':False,'verification':'rejected'}}),flush=True)
+   continue
+  print(json.dumps({'id':request['id'],'ok':True,'result':result}),flush=True)
+  continue
  reply={'id':request['id'],'ok':True,'result':{'dispatched':False}}
  if mode=='oversized-result': reply['result']['evidence']='x'*262144
  elif mode=='malformed-frame':
@@ -29,11 +43,11 @@ for line in sys.stdin:
  print(json.dumps(reply),flush=True)
 `;
 
-async function backendFixture(t: TestContext, mode: string) {
+async function backendFixture(t: TestContext, mode: string, idleMs?: number) {
   const directory = await mkdtemp(join(tmpdir(), "browser-result-"));
   const workerPath = join(directory, "fixture.py"), trace = join(directory, "requests.txt");
   await writeFile(workerPath, fixture);
-  const backend = new BrowserBackend({ enabled: true, workerPath, env: {
+  const backend = new BrowserBackend({ enabled: true, workerPath, idleMs, env: {
     ...process.env, OPENCODE_CONNECT_BROWSER_PYTHON: "/usr/bin/python3",
     BROWSER_RESULT_MODE: mode, BROWSER_RESULT_TRACE: trace,
   } });
@@ -47,6 +61,20 @@ const inputs = {
     { action: "click", target: { role: "button", name: "Save" }, expected: { type: "text", value: "Saved" } },
   ] },
 };
+
+test("idle expiry reports why the attachment was lost and never revives or replays it", async t => {
+  const { backend, requests } = await backendFixture(t, "idle-expiry", 60000);
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const attached = await backend.call("attach", { targetId: "fixture", controlMode: "control" });
+  t.mock.timers.tick(60001);
+  await assert.rejects(backend.call("action", { ...inputs.action, action: "fill", leaseId: attached.leaseId, value: "Do not replay" }), (error: unknown) => error instanceof BrowserError && error.code === "invalid_lease" && !error.dispatched);
+  const status = await backend.call("status", {});
+  assert.equal(status.reachable, true); assert.equal(status.attached, false);
+  assert.match(String(status.lastError), /inactivity.*expired.*attach explicitly/);
+  const fresh = await backend.call("attach", { targetId: "fixture", controlMode: "control" });
+  assert.notEqual(fresh.leaseId, attached.leaseId);
+  assert.deepEqual(await requests(), ["attach", "action", "status", "attach"]);
+});
 
 for (const method of ["action", "workflow"] as const) {
   for (const [mode, code] of [
