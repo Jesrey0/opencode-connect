@@ -191,6 +191,9 @@ export class BrowserBackend {
         try { return await this.launchPromise; } finally { this.launchPromise = undefined; }
       }
       await this.start();
+      // The adapter serializes requests. Queuing a short request behind a long
+      // wait would spend its deadline before dispatch and could kill the worker.
+      if (this.pending.size) throw new BrowserError("busy", "Browser request in progress; wait for its result before sending another request");
       const params = parsed.data as Record<string, unknown>;
       const timeoutMs = typeof params.timeoutMs === "number" ? params.timeoutMs : 10000;
       const result = await this.send(method, params, owner, timeoutMs, signal);

@@ -3,12 +3,15 @@ import asyncio
 import importlib.util
 import json
 import os
+import sys
+import time
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock, Mock
 
-spec = importlib.util.spec_from_file_location("browser_worker", Path(__file__).resolve().parents[1] / "src/browser/worker.py")
+root = Path(os.environ["OPENCODE_CONNECT_BROWSER_TEST_BUILD"]) if os.environ.get("OPENCODE_CONNECT_BROWSER_TEST_BUILD") else Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("browser_worker", root / "src/browser/worker.py")
 worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
@@ -86,6 +89,104 @@ class BoundaryTests(unittest.TestCase):
 
 
 class OutputTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dead_lease_tabs_and_explicit_attach_reconcile_without_replaying(self):
+        identity = "ws://127.0.0.1:9222/devtools/browser/id"
+        row = {"id": "selected", "type": "page", "url": "https://example.test/", "title": "Fixture"}
+        class Adapter(worker.Adapter):
+            async def discover(self, browser):
+                return {"webSocketDebuggerUrl": identity, "Browser": "Chrome/155.0"}
+
+            async def open_socket(self, url, timeout):
+                self.conn = Mock()
+                self.conn.attach = AsyncMock()
+                self.conn.send = AsyncMock()
+                self.conn.aclose = AsyncMock()
+                return self.conn
+
+            async def frames(self):
+                return {}
+        lease = {"id": "lease", "owner": "owner", "browser": "linux", "target": "selected", "identity": identity, "mode": "control"}
+        adapter = Adapter()
+        with patch.object(worker, "fetch_json", return_value=[row]), patch.object(worker, "connected", side_effect=lambda conn: conn is not None):
+            for changed in [False, True]:
+                adapter.lease = {**lease, "identity": "old-browser" if changed else identity}
+                adapter.conn = Mock(aclose=AsyncMock()) if changed else None
+                tabs = await adapter.run("tabs", {}, "owner")
+                self.assertFalse(tabs["targets"][0]["leased"])
+                self.assertIsNone(adapter.lease)
+            # Explicit attach must also recover a dead socket without a status call.
+            adapter.lease = lease.copy()
+            attached = await adapter.run("attach", {"targetId": "selected", "controlMode": "control"}, "owner")
+            self.assertTrue(attached["target"]["leased"])
+            self.assertNotEqual(attached["leaseId"], "lease")
+            self.assertFalse(adapter.summary(row, "windows")["leased"])
+            with self.assertRaises(worker.Rejected) as caught:
+                await adapter.run("attach", {"targetId": "selected", "controlMode": "control"}, "other")
+            self.assertEqual(caught.exception.code, "lease_conflict")
+            self.assertEqual(adapter.lease["id"], attached["leaseId"])
+        await adapter.disconnect()
+
+    async def test_detach_authenticates_owner_without_requiring_a_live_page(self):
+        adapter = worker.Adapter()
+        adapter.lease = {"id": "lease", "owner": "owner"}
+        for args, owner in [({"leaseId": "lease"}, "other"), ({"leaseId": "wrong"}, "owner")]:
+            with self.assertRaises(worker.Rejected) as caught:
+                await adapter.run("detach", args, owner)
+            self.assertEqual(caught.exception.code, "invalid_lease")
+            self.assertIsNotNone(adapter.lease)
+        result = await adapter.run("detach", {"leaseId": "lease"}, "owner")
+        self.assertTrue(result["chromePreserved"])
+        self.assertIsNone(adapter.lease)
+
+    async def test_dead_windows_lease_still_requires_new_explicit_approval(self):
+        adapter = worker.Adapter()
+        adapter.lease = {"id": "lease", "browser": "windows"}
+        adapter.approval = {"id": "old-connection"}
+        with patch.object(worker, "endpoint", return_value="ws://127.0.0.1:9223/devtools/browser/id"):
+            with self.assertRaises(worker.Rejected) as caught:
+                await adapter.run("attach", {"browser": "windows", "targetId": "selected", "controlMode": "control", "connectionId": "old-connection"}, "owner")
+        self.assertEqual(caught.exception.code, "approval_required")
+        self.assertIsNone(adapter.lease)
+        self.assertIsNone(adapter.approval)
+
+    async def test_request_expiring_in_worker_queue_preserves_the_active_attachment(self):
+        script = f"""import asyncio,sys
+sys.path.insert(0,{str(Path(worker.__file__).parent)!r})
+import worker
+class Adapter(worker.Adapter):
+    def __init__(self):
+        super().__init__()
+        self.lease={{'id':'active'}}
+    async def run(self,method,args,owner):
+        if method=='wait':
+            await asyncio.sleep(.2)
+            return {{'verification':'timed_out'}}
+        return {{'attached':self.lease is not None}}
+worker.Adapter=Adapter
+print('ready',flush=True)
+asyncio.run(worker.main())
+"""
+        process = await asyncio.create_subprocess_exec(sys.executable, "-B", "-u", "-c", script, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        try:
+            self.assertEqual(await asyncio.wait_for(process.stdout.readline(), 30), b"ready\n")
+            now = time.time() * 1000
+            for request_id, method, params, duration in [
+                ("wait", "wait", {"leaseId": "active", "condition": {"type": "text", "value": "pending"}}, 3000),
+                ("expired", "status", {}, 100),
+                ("check", "status", {}, 3000),
+            ]:
+                process.stdin.write((json.dumps({"version": 1, "id": request_id, "method": method, "params": params, "owner": "owner", "deadline": now + duration}) + "\n").encode())
+            await process.stdin.drain()
+            replies = [json.loads(await asyncio.wait_for(process.stdout.readline(), 5)) for _ in range(3)]
+            self.assertTrue(replies[0]["ok"])
+            self.assertEqual(replies[1]["error"]["code"], "timed_out")
+            self.assertFalse(replies[1]["error"]["dispatched"])
+            self.assertIn("attachment preserved", replies[1]["error"]["message"])
+            self.assertTrue(replies[2]["result"]["attached"])
+        finally:
+            process.stdin.close()
+            await asyncio.wait_for(process.communicate(), 5)
+
     async def test_outer_workflow_deadline_preserves_earlier_dispatch_evidence(self):
         class Adapter(worker.Adapter):
             async def guard(self, args, owner, control=False):

@@ -1,6 +1,6 @@
 {
   "name": "opencode-connect",
-  "version": "0.14.1",
+  "version": "0.14.2",
   "private": true,
   "description": "Native OpenCode HostPlane and canonical WorkerPlane for ChatGPT operators.",
   "type": "module",

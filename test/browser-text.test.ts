@@ -134,7 +134,13 @@ test("real Chrome text capacity, keyboard semantics and interrupted mutation", {
     assert.deepEqual(await evaluate("suggestions"), [...value].map((_, i, chars) => chars.slice(0, i + 1).join("")));
   });
   await t.test("maxlength respects selected replacement and rejects excess without editing", async () => {
-    for (const action of ["fill", "typeText"]) await assert.rejects(act({ action, value: "12345" }, "Limited"), code("site_limit", false));
+    for (const action of ["fill", "typeText"]) {
+      for (const value of ["12345", "😀😀😀"]) await assert.rejects(act({ action, value }, "Limited"), (error: unknown) => {
+        assert.ok(error instanceof BrowserError); assert.equal(error.code, "site_limit"); assert.equal(error.dispatched, false);
+        assert.match(error.message, /maxlength of 4 UTF-16 code units/); return true;
+      });
+      assert.equal(await evaluate("limited.value"), "abcd");
+    }
     await evaluate("limited.focus();limited.setSelectionRange(1,3)");
     assert.equal((await act({ action: "typeText", value: "12" }, "Limited")).textVerification, "confirmed");
     assert.equal(await evaluate("limited.value"), "a12d");

@@ -460,7 +460,9 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     await act({ action: "navigate", url: pageUrl + "/?token=hidden#fragment", expected: { type: "readyState", value: "complete" } });
     const observed = (await snapshot()).url;
     assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "navigation", fromUrl: observed } }, "owner")).verification, "timed_out");
-    assert.equal((await act({ action: "navigate", url: pageUrl + "/?token=hidden#fragment", expected: { type: "navigation", fromUrl: observed } })).verification, "confirmed");
+    // A different query forces a document load while preserving the redacted
+    // URL. Repeating an identical fragment URL can be a same-document no-op.
+    assert.equal((await act({ action: "navigate", url: pageUrl + "/?token=changed#fragment", expected: { type: "navigation", fromUrl: observed } })).verification, "confirmed");
     await backend.call("detach", { leaseId }, "owner");
   });
   await t.test("an unrelated iframe reload cannot confirm main-document navigation", async () => {

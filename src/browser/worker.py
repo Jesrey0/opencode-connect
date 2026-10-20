@@ -359,7 +359,9 @@ class Adapter:
             await self.approved(args or {}, owner, browser)
             targets = await self.conn.send(cdp.target.get_targets(), _attach=True)
             return [{"id": str(row.target_id), "type": row.type_, "title": row.title, "url": row.url} for row in targets if row.type_ == "page"]
-        await self.discover(browser)
+        info = await self.discover(browser)
+        if self.lease and self.lease["browser"] == browser and (self.lease["identity"] != info["webSocketDebuggerUrl"] or not connected(self.conn)):
+            await self.disconnect()
         try:
             rows = await asyncio.to_thread(fetch_json, endpoint(browser) + "/json/list")
             if not isinstance(rows, list):
@@ -368,17 +370,21 @@ class Adapter:
         except Exception:
             reject("unreachable", "Chrome target discovery unavailable")
 
-    def summary(self, row):
-        return {"targetId": row["id"], "title": safe_text(row.get("title")), "url": safe_url(row.get("url", "")), "type": "page", "leased": bool(self.lease and row["id"] == self.lease["target"])}
+    def summary(self, row, browser):
+        return {"targetId": row["id"], "title": safe_text(row.get("title")), "url": safe_url(row.get("url", "")), "type": "page", "leased": bool(self.lease and connected(self.conn) and self.lease["browser"] == browser and row["id"] == self.lease["target"])}
 
     def invalidate(self, *_):
         self.epoch += 1
         self.refs.clear()
 
-    async def guard(self, args, owner, control=False):
+    def owned_lease(self, args, owner):
         lease = self.lease
         if not lease or not same_token(args.get("leaseId"), lease["id"]) or owner != lease["owner"]:
             reject("invalid_lease", "Lease unavailable or owned by another caller; attach explicitly")
+        return lease
+
+    async def guard(self, args, owner, control=False):
+        lease = self.owned_lease(args, owner)
         if control and lease["mode"] != "control":
             reject("observe_only", "Observe lease does not permit browser actions")
         try:
@@ -492,15 +498,15 @@ class Adapter:
           if(this.isContentEditable) return {control:false};
           const before=this.value, start=this.selectionStart, end=this.selectionEnd;
           if(!replace && before.length>128000) return {unverifiable:true};
-          if(!replace && (start===null||end===null)) return {control:false,singleLine:true,limited:this.maxLength>=0&&value.length>this.maxLength};
+          if(!replace && (start===null||end===null)) return {control:false,singleLine:true,maxLength:this.maxLength,limited:this.maxLength>=0&&value.length>this.maxLength};
           const expected=replace?value:before.slice(0,start)+value+before.slice(end);
-          return {control:true,expected,prefix:replace?'':before.slice(0,start),suffix:replace?'':before.slice(end),limited:this.maxLength>=0&&expected.length>this.maxLength,
+          return {control:true,expected,prefix:replace?'':before.slice(0,start),suffix:replace?'':before.slice(end),maxLength:this.maxLength,limited:this.maxLength>=0&&expected.length>this.maxLength,
             multiline:this.tagName==='TEXTAREA'};
         }""", [value, replace])
         if plan.get("unverifiable"):
             reject("input_unverifiable", "Existing control exceeds the bounded exact read-back limit; no text dispatched")
         if plan.get("limited"):
-            reject("site_limit", "Requested text exceeds the control's maxlength; no text dispatched")
+            reject("site_limit", f"Requested text exceeds the control's maxlength of {plan['maxLength']} UTF-16 code units; no text dispatched")
         if (plan.get("singleLine") or plan.get("control") and not plan["multiline"]) and any(c in value for c in "\r\n"):
             reject("unsupported_input", "Single-line controls cannot preserve line breaks; no text dispatched")
         return plan
@@ -1061,7 +1067,7 @@ class Adapter:
             rows = await self.targets(browser, args, owner)
             summaries, budget, matched = [], 0, 0
             for row in rows:
-                item = self.summary(row)
+                item = self.summary(row, browser)
                 if args.get("filter") and args["filter"].casefold() not in (item["title"] + " " + item["url"]).casefold():
                     continue
                 matched += 1
@@ -1072,6 +1078,8 @@ class Adapter:
                 budget += cost
             return {"browser": browser, "targets": summaries, "truncated": matched > len(summaries)}
         if method == "attach":
+            if self.lease and not connected(self.conn):
+                await self.disconnect()
             if self.lease:
                 reject("lease_conflict", "An active lease already owns this adapter; detach it before attaching")
             url = endpoint(browser)
@@ -1096,7 +1104,7 @@ class Adapter:
                 self.conn.add_handler(cdp.dom.DocumentUpdated, self.invalidate)
                 self.conn.add_handler(cdp.page.FrameNavigated, self.invalidate)
                 self.lease = {"id": secrets.token_urlsafe(32), "owner": owner, "browser": browser, "target": args["targetId"], "identity": approval["id"] if approval else info["webSocketDebuggerUrl"], "connection": approval["id"] if approval else None, "mode": args["controlMode"]}
-                return {"leaseId": self.lease["id"], "browser": browser, "generation": self.generation(await self.frames()), "controlMode": args["controlMode"], "target": self.summary(row), "ownership": "external"}
+                return {"leaseId": self.lease["id"], "browser": browser, "generation": self.generation(await self.frames()), "controlMode": args["controlMode"], "target": self.summary(row, browser), "ownership": "external"}
             except Exception:
                 await self.disconnect()
                 raise
@@ -1104,10 +1112,11 @@ class Adapter:
             await self.approved(args, owner, check=False)
             await self.disconnect()
             return {"detached": True, "chromePreserved": True}
-        await self.guard(args, owner, method in ("action", "workflow"))
         if method == "detach":
+            self.owned_lease(args, owner)
             await self.disconnect()
             return {"detached": True, "chromePreserved": True}
+        await self.guard(args, owner, method in ("action", "workflow"))
         if method == "snapshot":
             return await self.snapshot(args)
         if method == "wait":
@@ -1223,7 +1232,7 @@ async def main():
                     reject("invalid_protocol", "Browser deadline required")
                 remaining = min(120 if method == "connect" else 30, deadline / 1000 - time.time())
                 if remaining <= 0:
-                    raise TimeoutError()
+                    reject("timed_out", "Browser request expired before dispatch; attachment preserved")
                 adapter.deadline = asyncio.get_running_loop().time() + remaining - min(0.2, remaining / 5)
                 async with asyncio.timeout(remaining):
                     result = await adapter.run(method, args, request["owner"])

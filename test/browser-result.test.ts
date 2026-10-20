@@ -4,8 +4,9 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserBackend, BrowserError } from "../src/browser/backend.js";
+import { createHttpHandler } from "../src/http.js";
 
-const fixture = `import json,os,sys
+const fixture = `import json,os,sys,time
 lease=None
 for line in sys.stdin:
  request=json.loads(line)
@@ -15,12 +16,15 @@ for line in sys.stdin:
  with open(os.environ['BROWSER_RESULT_TRACE'],'a') as trace:
   trace.write(request['method']+'\\n')
  mode=os.environ['BROWSER_RESULT_MODE']
- if mode=='idle-expiry':
+ if mode in ('idle-expiry','slow-wait'):
   if request['method']=='attach':
    lease='lease-'+str(os.getpid())
    result={'leaseId':lease,'browser':'linux','generation':'fixture','controlMode':'control','ownership':'external','target':{'targetId':'fixture','title':'Fixture','url':'https://example.test/','type':'page','leased':True}}
   elif request['method']=='status':
    result={'browser':'linux','reachable':True,'attached':lease is not None,'version':'Chrome/fixture','connectionState':'ready','linuxProcesses':[],'lastError':None}
+  elif request['method']=='wait':
+   time.sleep(.2)
+   result={'verification':'timed_out','url':'https://example.test/','evidence':'Condition not met'}
   elif request['params'].get('leaseId')==lease:
    result={'dispatched':True,'completed':True,'verification':'inconclusive','url':'https://example.test/','evidence':'Executed once','mutationMayHaveOccurred':True}
   else:
@@ -61,6 +65,52 @@ const inputs = {
     { action: "click", target: { role: "button", name: "Save" }, expected: { type: "text", value: "Saved" } },
   ] },
 };
+
+test("overlapping requests reject before dispatch without cancelling a wait or its lease", async t => {
+  const { backend, requests } = await backendFixture(t, "slow-wait");
+  const attached = await backend.call("attach", { targetId: "fixture", controlMode: "control" });
+  const waiting = backend.call("wait", { leaseId: attached.leaseId, timeoutMs: 1000, condition: { type: "text", value: "pending" } });
+  await assert.rejects(backend.call("status", {}), (error: unknown) => error instanceof BrowserError && error.code === "busy" && !error.dispatched);
+  assert.equal((await waiting).verification, "timed_out");
+  assert.equal((await backend.call("status", {})).attached, true);
+  assert.deepEqual(await requests(), ["attach", "wait", "status"]);
+});
+
+test("MCP tool errors retain native diagnostics in standard text and structured content", async t => {
+  const backend = new BrowserBackend({ enabled: true });
+  const logs: string[] = [];
+  t.mock.method(console, "warn", (line: string) => { logs.push(line); });
+  let failure: Error = new BrowserError("site_limit", "Control maxlength is 5000 UTF-16 code units; no text dispatched");
+  t.mock.method(backend, "call", async () => { throw failure; });
+  const handler = createHttpHandler(undefined, undefined, undefined, backend);
+  t.after(() => handler.close());
+  const request = async (args: unknown) => {
+    const version = "2026-07-28";
+    const response = await handler.fetch(new Request("http://localhost/mcp", { method: "POST", headers: {
+      "content-type": "application/json", accept: "application/json", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "browser.fill",
+    }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "browser.fill", arguments: args, _meta: {
+      "io.modelcontextprotocol/protocolVersion": version, "io.modelcontextprotocol/clientInfo": { name: "browser-error-test", version: "1" }, "io.modelcontextprotocol/clientCapabilities": {},
+    } } }) }));
+    return (await response.json() as any).result;
+  };
+  const args = { leaseId: "private-lease", elementRef: "private-ref", authorized: true, value: "private-prompt" };
+  for (const error of [failure, new BrowserError("invalid_lease", "Attach explicitly"), new BrowserError("partial_input", "Inspect without replay", true, "inconclusive"), new Error("private-exception")]) {
+    failure = error;
+    const result = await request(args);
+    assert.equal(result.isError, true);
+    assert.equal(result.content[0].type, "text");
+    assert.deepEqual(JSON.parse(result.content[0].text), result.structuredContent);
+    if (error instanceof BrowserError) assert.deepEqual(result.structuredContent, error.result());
+    else assert.equal(result.structuredContent.errorCode, "browser_unavailable");
+    assert.doesNotMatch(JSON.stringify(result), /private-/);
+  }
+  const invalid = await request({ ...args, authorized: false });
+  assert.equal(invalid.isError, true);
+  assert.ok(invalid.content[0].text.length > 0, "SDK schema rejection also has standard error text");
+  assert.equal(logs.length, 4);
+  assert.doesNotMatch(logs.join("\n"), /private-|maxlength|Inspect without replay/);
+  assert.deepEqual(JSON.parse(logs[0]), { event: "browser_tool_error", tool: "browser.fill", errorCode: "site_limit", errorLayer: "input", dispatched: false });
+});
 
 test("idle expiry reports why the attachment was lost and never revives or replays it", async t => {
   const { backend, requests } = await backendFixture(t, "idle-expiry", 60000);

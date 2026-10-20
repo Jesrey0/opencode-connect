@@ -68,7 +68,11 @@ export function registerBrowserTools(server: McpServer, backend: BrowserBackend,
         const { image, ...metadata } = result;
         return { structuredContent: metadata, content: typeof image === "string" ? [{ type: "image", mimeType: "image/jpeg", data: image }] : [] };
       } catch (error) {
-        return { structuredContent: error instanceof BrowserError ? error.result() : new BrowserError("browser_unavailable", "Browser capability unavailable; details withheld").result(), content: [], isError: true };
+        const result = error instanceof BrowserError ? error.result() : new BrowserError("browser_unavailable", "Browser capability unavailable; details withheld").result();
+        // Some MCP clients render only standard content for tool errors.
+        // Preserve the same safe diagnostics in both representations.
+        console.warn(JSON.stringify({ event: "browser_tool_error", tool: name, errorCode: /^[a-z_]{1,64}$/.test(result.errorCode) ? result.errorCode : "browser_error", errorLayer: result.errorLayer, dispatched: result.dispatched }));
+        return { structuredContent: result, content: [{ type: "text", text: JSON.stringify(result) }], isError: true };
       }
     }) as never);
   };

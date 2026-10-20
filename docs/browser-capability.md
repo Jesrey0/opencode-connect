@@ -207,7 +207,9 @@ non-value postcondition cannot prove exact editor content. Rich editors can
 normalize text or move selection; no generic normalization is assumed.
 
 Length/mode violations reject before dispatch. `site_limit` identifies native
-maxlength rejection, `partial_input` identifies mismatched control text after
+maxlength rejection and reports the exact bound in UTF-16 code units; the
+connector's 64,000-character ceiling does not override a smaller site limit.
+`partial_input` identifies mismatched control text after
 input, and `input_budget_exceeded` identifies an impossible delay budget. A
 mutation-time timeout, focus/identity interruption, or failed postcondition keeps
 mutation uncertainty. Inspect current content and selection before continuing;
@@ -337,10 +339,17 @@ query values and fragments from observations, masks common token patterns, bound
 names and output, and does not expose cookie, storage, profile or raw CDP APIs.
 Page-visible text and screenshots can still contain sensitive application data;
 redaction is not a general secret detector. No snapshots/screenshots persist by
-default, and raw worker/CDP errors and stderr are withheld.
+default, and raw worker/CDP errors and stderr are withheld. Tool errors include
+the same safe diagnostics in standard MCP text content and structured content.
+The service journal records tool name, error code/layer and dispatch state;
+it omits arguments, error messages and page content.
 
 The lazy Python worker uses versioned, correlated JSON lines over private pipes,
-2 MiB frames, at most 16 pending requests, and per-request deadlines. It closes
+2 MiB frames, at most 16 pending private frames, and per-request deadlines.
+Public requests are admitted one at a time; an overlapping request returns
+`busy` without dispatch or interruption of the active request. A private request
+whose deadline expires while queued rejects without invalidating the attachment.
+The worker closes
 only Nodriver `Connection` sockets; no Nodriver `Browser` owner, destructor or
 process cleanup object is created. Linux Chrome is launched separately with an
 independent process group and ignored stdio. Chrome never belongs to the worker's
@@ -353,6 +362,11 @@ can start a worker, but recovery requires explicit attachment and never replays 
 action. Connector SIGTERM/SIGINT reaps Python; pipe EOF closes connections after
 forced connector termination. Chrome identity changes and closed targets reject
 old leases. An old debugging port does not establish browser identity.
+Tab listings reconcile dead sockets and changed browser identity before reporting
+lease ownership. Explicit attachment can discard a dead lease; healthy leases
+still require their owner's release. Detach authenticates the owner and handle
+without requiring a healthy socket or page. Windows recovery still requires
+explicit Chrome approval when its approved connection has been lost.
 
 Idle release is retained in `browser.status.lastError`, so a reachable Chrome
 endpoint does not conceal the loss of the previous attachment. For long
