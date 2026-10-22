@@ -6,17 +6,17 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { acquireStoreLock } from "../src/storeLock.js";
+import { acquireFileLock } from "../src/fileLock.js";
 import { Events } from "../src/events.js";
 
-const lockModule = new URL("../src/storeLock.ts", import.meta.url).href;
+const lockModule = new URL("../src/fileLock.ts", import.meta.url).href;
 
 test("kernel lock excludes other processes and recovers after SIGKILL without deleting its inode", { timeout: 15_000 }, async () => {
   const root = await mkdtemp(join(tmpdir(), "opencode-lock-crash-"));
   const path = join(root, "store.lock.sqlite");
   const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e",
-    `import { acquireStoreLock } from ${JSON.stringify(lockModule)};
-     acquireStoreLock(${JSON.stringify(path)});
+    `import { acquireFileLock } from ${JSON.stringify(lockModule)};
+     acquireFileLock(${JSON.stringify(path)}, 'test');
      process.stdout.write('ready'); setInterval(() => {}, 1000);`], { stdio: ["ignore", "pipe", "pipe"] });
   const exited = once(child, "exit");
   try {
@@ -25,17 +25,17 @@ test("kernel lock excludes other processes and recovers after SIGKILL without de
       exited.then(() => { throw new Error("lock holder exited before ready"); }),
     ]);
     const inode = (await stat(path)).ino;
-    assert.throws(() => acquireStoreLock(path), /already owned/u);
+    assert.throws(() => acquireFileLock(path, "test"), /already owned/u);
     child.kill("SIGKILL");
     assert.equal((await exited)[1], "SIGKILL");
-    const release = acquireStoreLock(path);
+    const release = acquireFileLock(path, "test");
     try {
       assert.equal((await stat(path)).ino, inode);
-      assert.throws(() => acquireStoreLock(path), /already owned/u);
+      assert.throws(() => acquireFileLock(path, "test"), /already owned/u);
     } finally { release(); }
-    const next = acquireStoreLock(path);
+    const next = acquireFileLock(path, "test");
     release(); // A repeated release must not unlock the new owner's connection.
-    try { assert.throws(() => acquireStoreLock(path), /already owned/u); }
+    try { assert.throws(() => acquireFileLock(path, "test"), /already owned/u); }
     finally { next(); }
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
@@ -82,13 +82,13 @@ test("all startup failures release the lock, including recovery and persist fail
     for (const data of ["not json", JSON.stringify({ subscriptions: null })]) {
       await writeFile(path, data);
       await assert.rejects(Events.open(path));
-      const release = acquireStoreLock(join(root, "store.lock.sqlite"));
+      const release = acquireFileLock(join(root, "store.lock.sqlite"), "test");
       release();
     }
     await rm(path);
     await assert.rejects(Events.open(path, { now: () => { throw new Error("recovery failed"); } }), /recovery failed/u);
     await assert.rejects(Events.open(path, { now: () => { mkdirSync(path); return Date.now(); } }));
-    const release = acquireStoreLock(join(root, "store.lock.sqlite"));
+    const release = acquireFileLock(join(root, "store.lock.sqlite"), "test");
     release();
     await rm(path, { recursive: true });
     const events = await Events.open(path);
@@ -98,6 +98,6 @@ test("all startup failures release the lock, including recovery and persist fail
 
 test("lock I/O errors fail closed rather than being mistaken for stale ownership", async () => {
   const root = await mkdtemp(join(tmpdir(), "opencode-lock-io-"));
-  try { assert.throws(() => acquireStoreLock(root)); }
+  try { assert.throws(() => acquireFileLock(root, "test")); }
   finally { await rm(root, { recursive: true, force: true }); }
 });

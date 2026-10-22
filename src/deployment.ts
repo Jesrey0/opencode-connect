@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { acquireFileLock } from "./fileLock.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -206,41 +207,9 @@ export async function pointLinkAtomically(linkPath: string, targetPath: string):
   }
 }
 
-async function acquireDeploymentLock(paths: DeploymentPaths, action: string): Promise<() => Promise<void>> {
+async function acquireDeploymentLock(paths: DeploymentPaths): Promise<() => void> {
   await fs.mkdir(paths.baseDir, { recursive: true });
-  const lockPath = path.join(paths.baseDir, "deploy.lock");
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      const handle = await fs.open(lockPath, "wx");
-      await handle.writeFile(JSON.stringify({ pid: process.pid, action, createdAt: new Date().toISOString() }) + "\n");
-      return async () => {
-        await handle.close();
-        await fs.rm(lockPath, { force: true });
-      };
-    } catch (error: unknown) {
-      if (!(error && typeof error === "object" && "code" in error && (error as { code: unknown }).code === "EEXIST")) throw error;
-      let stale = false;
-      try {
-        const raw = await fs.readFile(lockPath, "utf8");
-        const pid = Number((JSON.parse(raw) as { pid?: unknown }).pid);
-        if (!Number.isSafeInteger(pid) || pid <= 0) stale = true;
-        else {
-          try { process.kill(pid, 0); }
-          catch (probe: unknown) {
-            stale = !!(probe && typeof probe === "object" && "code" in probe && (probe as { code: unknown }).code === "ESRCH");
-          }
-        }
-      } catch {
-        stale = true;
-      }
-      if (stale && attempt === 0) {
-        await fs.rm(lockPath, { force: true });
-        continue;
-      }
-      throw new Error(`deployment busy: ${lockPath}`);
-    }
-  }
-  throw new Error(`deployment busy: ${lockPath}`);
+  return acquireFileLock(path.join(paths.baseDir, "deploy.lock.sqlite"), "deployment");
 }
 
 export async function loadBuildRecord(buildDir: string): Promise<BuildRecord> {
@@ -310,7 +279,7 @@ export async function prepareBuild(options: {
 }): Promise<PrepareResult> {
   const sourceDir = path.resolve(options.sourceDir);
   const paths = deploymentPaths(options.baseDir ?? resolveBaseDir());
-  const releaseLock = await acquireDeploymentLock(paths, "prepare");
+  const releaseLock = await acquireDeploymentLock(paths);
   try {
   const exec = options.exec ?? defaultExec;
   const { buildId } = await hashSourceTree(sourceDir);
@@ -376,7 +345,7 @@ export async function prepareBuild(options: {
     await fs.rm(stage, { recursive: true, force: true });
   }
   } finally {
-    await releaseLock();
+    releaseLock();
   }
 }
 
@@ -468,7 +437,7 @@ export async function activateBuild(
 ): Promise<ActivateResult> {
   if (!isValidBuildId(buildId)) throw new Error(`invalid buildId: ${buildId}`);
   const paths = deploymentPaths(options.baseDir ?? resolveBaseDir());
-  const releaseLock = await acquireDeploymentLock(paths, "activate");
+  const releaseLock = await acquireDeploymentLock(paths);
   try {
   const systemctl = options.systemctl ?? defaultSystemctl;
   const target = buildDirFor(paths, buildId);
@@ -521,7 +490,7 @@ export async function activateBuild(
     }
   }
   } finally {
-    await releaseLock();
+    releaseLock();
   }
 }
 
@@ -539,7 +508,7 @@ export async function rollbackBuild(options: {
   fetchHealth?: FetchHealthFn;
 } = {}): Promise<RollbackResult> {
   const paths = deploymentPaths(options.baseDir ?? resolveBaseDir());
-  const releaseLock = await acquireDeploymentLock(paths, "rollback");
+  const releaseLock = await acquireDeploymentLock(paths);
   try {
   const systemctl = options.systemctl ?? defaultSystemctl;
   const current = await readLinkState(paths.currentLink);
@@ -584,7 +553,7 @@ export async function rollbackBuild(options: {
   const nextPrevious = await readLinkState(paths.previousLink);
   return { buildId: previous.buildId, path: previous.path, previousBuildId: nextPrevious?.buildId ?? null };
   } finally {
-    await releaseLock();
+    releaseLock();
   }
 }
 

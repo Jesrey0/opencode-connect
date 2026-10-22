@@ -48,7 +48,7 @@ and live observations are separate evidence below.
 | Browser | MCP -> shared `BrowserBackend` -> private Python/Nodriver worker; explicit Linux launch/close and Windows attach | Browser/worker/lease lifetimes are distinct. Direct launch supports standalone source execution; systemd launch preserves Chrome across managed connector restart. Neither is proven obsolete. |
 | Codex | Connector -> native RPC -> plugin `direct.js` -> ACP; read-only App Server readers for quota/history | No CLI model-turn delegation. Connector RPC declaration duplicates a method inventory, but importing the Effect-schema implementation into the Promise client is not a valid substitution. A schema-only shared contract needs separate design. |
 | Quota | `usage.js` accepts native `rateLimitsByLimitId` and `rateLimits` | Comment calls the single bucket backward-compatible; deletion requires evidence from the current installed Codex protocol, not the comment alone. Not yet established obsolete. |
-| Deployment | `deploy.ts` -> prepare/activate/rollback in `deployment.ts`; Events separately uses `storeLock.ts` | PID-file reclamation is a superseded second ownership mechanism. It can unlink a live lock between file creation and metadata write. Reuse kernel locking, remove PID probing/reclamation. |
+| Deployment | `deploy.ts` -> prepare/activate/rollback in `deployment.ts`; Events persistence | Both now use `fileLock.ts`. The audited PID-file mechanism could unlink a live lock between file creation and metadata write; its probing/reclamation path is removed. |
 | Release validation | Hash/copy inventory; prepare verifies integration after prune; activation/rollback only check a short static file list | Verified gap: static plugin list omits `app-server.js` and `outcomes.js`; runnable checks do not rerun integration or rehash installed inputs. Needs deeper release-integrity work. |
 | Documentation/tests | README contains old pin/probe and breaking-change narratives; dated audit docs retain evidence | Update touched contracts to final design. Historical acceptance is not current live acceptance. Do not erase independent evidence or tests merely because they mention rejected legacy input. |
 
@@ -97,3 +97,13 @@ complete. Verified follow-up work is explicitly inventoried above.
 - **PASS:** `node --import tsx --test test/protocol.test.ts test/mcp.test.ts`
   (24 tests), `npm run check`. Existing cancellation, legacy rejection, Host/Origin,
   schema validation and near-1-MiB image checks pass on the updated SDK.
+
+### Exclusive ownership results
+
+- `fileLock.ts` is the sole ownership implementation. Deployment holds
+  `deploy.lock.sqlite`; Events retains `store.lock.sqlite`. No PID probes,
+  stale-lock reclamation, lock-file deletion, old-format readers or aliases.
+- **PASS:** deployment and file-lock tests exercise simultaneous prepare/activate/
+  rollback contenders, failed-build release, cross-process SIGKILL recovery with
+  unchanged inode, corruption fail-closed, and repeated close versus a successor.
+  All service actions in these tests are injected; no deployment occurred.

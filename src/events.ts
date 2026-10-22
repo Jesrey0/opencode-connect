@@ -1,7 +1,7 @@
 import { EventErrorCode } from "./eventsErrors.js";
 import { createHmac, randomBytes, randomUUID, timingSafeEqual, createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { acquireStoreLock } from "./storeLock.js";
+import { acquireFileLock } from "./fileLock.js";
 import { dirname, join } from "node:path";
 import { lookup } from "node:dns/promises";
 import { request as httpsRequest } from "node:https";
@@ -123,7 +123,7 @@ export class Events {
   static async open(path = join(process.env.XDG_STATE_HOME ?? join(process.env.HOME ?? ".", ".local/state"), "opencode-connect/events/store.json"), hooks: EventHooks = {}) {
     await mkdir(dirname(path), { recursive: true, mode: 0o700 });
     const instance = new Events(path, hooks);
-    instance.releaseLock = acquireStoreLock(join(dirname(path), "store.lock.sqlite"));
+    instance.releaseLock = acquireFileLock(join(dirname(path), "store.lock.sqlite"), "Events store");
     try {
       try {
         const raw = await readFile(path, "utf8");

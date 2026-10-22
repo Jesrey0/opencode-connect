@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -475,18 +477,77 @@ test("prepare refuses to delete a corrupt build referenced by current", async ()
   }
 });
 
-test("deployment operations refuse a live deployment lock", async () => {
+test("all deployment mutations contend on one lock and release it after failure", async () => {
   const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
   const base = await tempDir("opencode-deploy-lock-");
+  let entered!: () => void, release!: () => void;
+  const holding = new Promise<void>(resolve => { entered = resolve; });
+  const released = new Promise<void>(resolve => { release = resolve; });
+  const owner = prepareBuild({ sourceDir: src, baseDir: base, exec: async () => { entered(); await released; throw new Error("fixture build failed"); } });
+  const failure = assert.rejects(owner, /fixture build failed/);
   try {
-    await writeFile(path.join(base, "deploy.lock"), JSON.stringify({ pid: process.pid, action: "other" }));
-    await assert.rejects(
-      prepareBuild({ sourceDir: src, baseDir: base, exec: async () => {} }),
-      /deployment busy/,
-    );
+    await holding;
+    const lock = path.join(base, "deploy.lock.sqlite");
+    const inode = (await stat(lock)).ino;
+    const rejectEffects = async () => { assert.fail("contender must not execute tooling or service actions"); };
+    const contenders = [
+      prepareBuild({ sourceDir: src, baseDir: base, exec: rejectEffects }),
+      activateBuild("aaaaaaaaaaaaaaaa", { baseDir: base, systemctl: rejectEffects }),
+      rollbackBuild({ baseDir: base, systemctl: rejectEffects }),
+    ];
+    for (const result of await Promise.allSettled(contenders)) {
+      assert.equal(result.status, "rejected");
+      if (result.status === "rejected") assert.match(result.reason.message, /deployment is already owned/);
+    }
+    assert.equal(await readLinkState(deploymentPaths(base).currentLink), null);
+    release(); await failure;
+    await assert.rejects(prepareBuild({ sourceDir: src, baseDir: base, exec: async () => { throw new Error("successor admitted"); } }), /successor admitted/);
+    assert.equal((await stat(lock)).ino, inode, "normal release never replaces or unlinks the lock");
   } finally {
+    release(); await failure;
     await Promise.all([rm(src, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]);
   }
+});
+
+test("deployment ownership recovers after SIGKILL without stale-lock reclamation", { timeout: 15_000 }, async () => {
+  const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
+  const base = await tempDir("opencode-deploy-crash-");
+  const module = new URL("../src/deployment.ts", import.meta.url).href;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { prepareBuild } from ${JSON.stringify(module)};
+    await prepareBuild({ sourceDir: ${JSON.stringify(src)}, baseDir: ${JSON.stringify(base)},
+      exec: async () => { process.stdout.write('ready'); await new Promise(() => setInterval(() => {}, 1000)); } });
+  `], { stdio: ["ignore", "pipe", "pipe"] });
+  const exited = once(child, "exit");
+  try {
+    await Promise.race([once(child.stdout, "data"), exited.then(() => { throw new Error("deployment holder exited before ready"); })]);
+    const lock = path.join(base, "deploy.lock.sqlite"), inode = (await stat(lock)).ino;
+    await assert.rejects(prepareBuild({ sourceDir: src, baseDir: base, exec: async () => assert.fail("live owner") }), /deployment is already owned/);
+    child.kill("SIGKILL");
+    assert.equal((await exited)[1], "SIGKILL");
+    await assert.rejects(prepareBuild({ sourceDir: src, baseDir: base, exec: async () => { throw new Error("successor admitted"); } }), /successor admitted/);
+    assert.equal((await stat(lock)).ino, inode);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    await exited;
+    await Promise.all([rm(src, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]);
+  }
+});
+
+test("deployment lock corruption fails closed without deleting the lock or changing links", async () => {
+  const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
+  const base = await tempDir("opencode-deploy-lock-corrupt-");
+  const lock = path.join(base, "deploy.lock.sqlite");
+  try {
+    const bytes = "not a SQLite database".repeat(100);
+    await writeFile(lock, bytes);
+    const rejectEffects = async () => { assert.fail("corrupt lock must prevent side effects"); };
+    await assert.rejects(prepareBuild({ sourceDir: src, baseDir: base, exec: rejectEffects }));
+    await assert.rejects(activateBuild("aaaaaaaaaaaaaaaa", { baseDir: base, systemctl: rejectEffects }));
+    await assert.rejects(rollbackBuild({ baseDir: base, systemctl: rejectEffects }));
+    assert.equal(await readFile(lock, "utf8"), bytes);
+    assert.equal(await readLinkState(deploymentPaths(base).currentLink), null);
+  } finally { await Promise.all([rm(src, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
 });
 
 test("status reports links, service state and live/source without throwing", async () => {

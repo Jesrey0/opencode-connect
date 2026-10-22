@@ -28,6 +28,13 @@ runtime inspection.
 
 ## Gate A — source validation and preparation
 
+Prepare, activate and rollback serialize through `<baseDir>/deploy.lock.sqlite`.
+An exclusive SQLite transaction holds ownership until the operation finishes or
+the process exits, including crash recovery. Keep deployment state on a local
+filesystem with SQLite locking; never unlink or replace this file. Lock I/O or
+corruption fails closed. Use one accepted deployment-tool version for all
+concurrent operations; different ownership protocols cannot coordinate.
+
 1. Confirm the independently reviewed commit and Git diff. Run `npm ci --include=dev`,
    `npm run check:all`, `npm run test:all`, `npm run build`, and
    `npm run verify:integration` in an isolated source copy if a console uses the checkout.
