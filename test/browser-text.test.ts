@@ -76,7 +76,7 @@ test("real Chrome text capacity, keyboard semantics and interrupted mutation", {
   await fetch(cdpUrl + "/json/activate/" + page.id);
   socket = new WebSocket(page.webSocketDebuggerUrl); await once(socket, "open");
   let id = 0;
-  const evaluate = async (expression: string): Promise<any> => {
+  const command = async (method: string, params: Record<string, unknown> = {}): Promise<any> => {
     const request = ++id;
     const response = new Promise<any>((resolve, reject) => {
       const handler = (event: MessageEvent) => {
@@ -84,13 +84,14 @@ test("real Chrome text capacity, keyboard semantics and interrupted mutation", {
         if (message.id !== request) return;
         socket!.removeEventListener("message", handler);
         if (message.error || message.result.exceptionDetails) reject(new Error(JSON.stringify(message)));
-        else resolve(message.result.result.value);
+        else resolve(message.result);
       };
       socket!.addEventListener("message", handler);
     });
-    socket!.send(JSON.stringify({ id: request, method: "Runtime.evaluate", params: { expression, returnByValue: true } }));
+    socket!.send(JSON.stringify({ id: request, method, params }));
     return response;
   };
+  const evaluate = async (expression: string): Promise<any> => (await command("Runtime.evaluate", { expression, returnByValue: true })).result.value;
   const { leaseId } = await backend.call("attach", { targetId: page.id, controlMode: "control" }, "text-fixture");
   const ref = async (name = "Text") => {
     const snap = await backend.call("snapshot", { leaseId, maxNodes: 100 }, "text-fixture");
@@ -212,8 +213,24 @@ test("real Chrome text capacity, keyboard semantics and interrupted mutation", {
   });
   await t.test("mutation deadline stops the sequence without replaying a late key", async () => {
     await evaluate("text.setAttribute('aria-label','Text')"); await reset();
-    await evaluate("text.addEventListener('keydown',()=>{const until=performance.now()+1000;while(performance.now()<until){}},{once:true})");
-    await assert.rejects(act({ action: "typeText", value: "abc", inputMode: "sequential", timeoutMs: 400 }), (error: unknown) => error instanceof BrowserError && error.code === "timed_out" && error.dispatched);
+    // Hold the first dispatched key until after the operation expires. A short
+    // wall-clock busy loop can expire during lease/input preflight instead,
+    // never exercising cancellation of an in-flight key at all.
+    await command("Page.enable");
+    await evaluate("text.addEventListener('keydown',()=>alert('Hold first key'),{once:true})");
+    let dialogOpened = false;
+    const onDialog = (event: MessageEvent) => {
+      const message = JSON.parse(String(event.data));
+      if (message.method === "Page.javascriptDialogOpening") dialogOpened = true;
+    };
+    socket!.addEventListener("message", onDialog);
+    try {
+      await assert.rejects(act({ action: "typeText", value: "abc", inputMode: "sequential", timeoutMs: 10000 }), (error: unknown) => error instanceof BrowserError && error.code === "timed_out" && error.dispatched);
+      assert.equal(dialogOpened, true, "The deadline must interrupt the first key handler, not preflight");
+    } finally {
+      socket!.removeEventListener("message", onDialog);
+      if (dialogOpened) await command("Page.handleJavaScriptDialog", { accept: true });
+    }
     assert.equal(await evaluate("text.value"), "");
     assert.deepEqual(await evaluate("events.filter(e=>e.type==='keydown').map(e=>e.key)"), ["a"]);
   });

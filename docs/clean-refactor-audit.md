@@ -181,6 +181,53 @@ complete. Remaining work is bounded below.
 - **Opt-in real-Chrome acceptance FAIL (2026-10-23):** `OPENCODE_CONNECT_BROWSER_TEST=1 npm run test:browser` exited 1: 85/91 passed, 6 failed, none skipped. Failures included scoped rename target lookup, focus/multipart entry, redacted navigation, iframe-navigation check, shared ingress lease verification and the enclosing browser acceptance parent. Some later lease errors cascaded from an earlier active lease, but the first failures are not explained. An isolated copy of the starting-HEAD browser file passed once; that comparison does not prove these failures environmental or establish the new source as live-safe.
 - **Acceptance disposition:** The new fail-closed Windows permission contract has passing unit/integration regressions, but the browser source change is **NOT accepted for production deployment** while real-Chrome E2E remains red. The branch is a source checkpoint, not a completed overhaul. Investigate the first E2E failure and repeat the opt-in gate before release.
 
+### Bounded Chrome debugger checkpoint (2026-10-23, starting `5a94e12`)
+
+- **UNRESOLVED:** The original failure pattern was reproduced without production
+  instrumentation: 85/91 passed. Scoped rename stopped at step 0 with
+  `target_not_found`, `completedSteps:0`, and both dispatch flags false. Notebook
+  value verification and changed-query/redacted navigation timed out; subsequent
+  iframe and ingress attachment checks failed with `lease_conflict`. Intermittent
+  passing runs do not establish a root cause or production acceptance.
+- **Baseline comparison:** An exact source archive of `6e3786b`, using the same
+  installed dependencies, passed the rename/focus/navigation checks but finished
+  33/37: its stale 26-tool assertion saw 27 tools, and handler cleanup left later
+  tests using a closed backend. The current browser file passed 37/37 separately.
+  The reported earlier 37/37 baseline was therefore not reproduced exactly.
+- **Defensible fixture correction:** The text mutation-deadline check used a
+  400 ms request and a one-second busy loop. In two full runs it instead received
+  `input_budget_exceeded` before dispatch, so it never tested an interrupted key.
+  It now holds the first key handler with a fixture-owned JavaScript dialog until
+  the request expires. It requires a dispatched `timed_out` error, independently
+  verifies that the dialog opened, then releases it and retains the original
+  assertions: no inserted text and exactly one keydown (`a`). No retry, relaxed
+  assertion, production budget change, or browser-routing change was added.
+- **Focused PASS:** Clean text file 15/15, including the dialog-gated deadline;
+  clean browser file 37/37. Windows HTTP fail-closed regressions continued passing.
+- **Final clean opt-in FAIL:** After removing all temporary instrumentation,
+  `OPENCODE_CONNECT_BROWSER_TEST=1 npm run test:browser` exited 1: 76/78 passed,
+  2 failed, none skipped. The text parent failed during Chrome launch with
+  `launch_failed` (its 13 subtests were never registered). The passive Windows
+  status test observed an additional `/json/version` request; its fixture had
+  already accumulated many such requests before the measured operations. These
+  observations suggest cross-fixture endpoint interference but do not establish
+  its source or explain the original scoped failure. No assertions were weakened
+  to accommodate either failure, and no more full Chrome loops were attempted.
+- **Required gates PASS:** `npm run check:all && npm run test:all && npm run build
+  && npm run verify:integration` exited 0; core 398/401 passed (3 skipped), plugin
+  145/145 passed, and the 11-method OpenCode 2.0.24 contract verified. Existing
+  dependency deprecation/install-script notices and the native loader's
+  experimental warning remain. Installation reported two moderate vulnerabilities;
+  the separate `npm audit --json` read reported one moderate `ip-address` advisory
+  (`GHSA-rxp7-6hxx-x8q5`). Dependency changes were outside this bounded pass.
+- All temporary production writes, diagnostic worker wrappers, summary files,
+  raw CDP evidence helpers and debugger logs were removed. `src/browser/worker.py`
+  and `test/browser.test.ts` are unchanged from `5a94e12`. Only disposable fixture
+  browsers were controlled; no live Chrome, global configuration, service,
+  deployment, main branch or remote publication was changed. The browser release
+  remains **NOT accepted**; the cohesive checkpoint contains only the proven test
+  improvement and this unresolved acceptance record.
+
 ## Bounded uncompleted follow-ups
 
 - Mutation cancellation/uncertainty and non-atomic host file-write preflight need
