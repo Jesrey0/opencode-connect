@@ -203,15 +203,18 @@ at 5 s. Shell timeout defaults to 120 s and caps at 24 hours.
 
 ## WorkerPlane
 
-`status`, `opencode.start`, `opencode.wait`, `opencode.inspect`, the individually
-named `opencode.*` query tools, and `opencode.act` retain OpenCode's native worker identities.
+`status`, `opencode.start`, `opencode.wait`, `opencode.inspect`, individually
+named `opencode.*` query tools, and individually named `opencode.*` session action
+tools retain OpenCode's native worker identities. Actions include `opencode.steer`,
+`opencode.updateInbox`, `opencode.respondPermission`, `opencode.switchModel`, and
+`opencode.delete`; each action tool has its own selector-free input schema.
 Set `runtime: "codex"` to operate native Codex sessions through the same tools.
 Codex has its own session IDs and a narrower capability contract, described below.
 Events wake bounded waits; persisted session/message state remains authoritative.
 Stale/unrelated terminal hints cannot force completion; timeout reconciles canonical
 state even when the terminal event was missed. SDK request cancellation or HTTP
 disconnect releases the wait's native read/event observer without interrupting
-the retained worker; use explicit `act interrupt` to stop native execution.
+the retained worker; use `opencode.interrupt` to stop native execution.
 
 For a quick availability check, use `status` with `detail: "readiness"`.
 It returns connector version/build identity and OpenCode readiness without reading
@@ -530,7 +533,7 @@ automatic replay. Mutations and persistent observer command reads have no
 automatic continuation. `host.worktreeList` continuation is list-only despite the
 combined tool's conservative lifecycle annotations.
 
-`act switchModel` and `act switchAgent` delegate validation to their native
+`opencode.switchModel` and `opencode.switchAgent` delegate validation to their native
 session endpoints and return persisted session readback. These are separate, **non-atomic**
 operations; switching one must not be treated as switching both. `switchModel`
 accepts an optional native `variant`. Omitting model `variant` delegates
@@ -540,7 +543,7 @@ description, native delivery (`steer`/`queue`), and optional resume, returning t
 real inbox identity; it is not a user prompt and is not passed to `wait` as one.
 
 Delete one exact native session with
-`opencode.act { "action": "delete", "runtime": "opencode"|"codex", "sessionId": "…" }`.
+`opencode.delete { "runtime": "opencode"|"codex", "sessionId": "…" }`.
 **Breaking contract:** delete no longer defaults to OpenCode; explicit runtime is
 required by MCP validation and the facade. Codex inventory `updatedAt` is replaced
 by `updatedAtMs`; there are no compatibility aliases.
@@ -619,7 +622,7 @@ Continue an idle session with `opencode.start runtime: "codex" sessionId task`.
 Continuation inherits cwd and the locally known mode. If selection was lost
 after cache eviction or restart, continuation requires an explicit `mode`;
 native history does not prove the previous selection. Interrupt with
-`opencode.act action: "interrupt"`; this preserves the conversation. Execution
+`opencode.interrupt`; this preserves the conversation. Execution
 capacity remains reserved until the ACP process is reaped. Delete an idle native
 session with `action: "delete"`. The plugin has two execution slots, one bounded
 metadata connection, and a 64-entry expiring supervision cache. Cache eviction
@@ -640,8 +643,8 @@ presets. Native `agent` grants workspace writes with automatic approval review;
 native read-only sandbox, and `agent-full-access` explicitly disables sandbox
 and approval checks. Choose full access only for an authorized need.
 
-Answer pending permissions with `opencode.act action: "respondPermission"`,
-`runtime: "codex"`, the owning `sessionId`, `requestId`, and exact offered
+Answer pending permissions with `opencode.respondPermission`, `runtime: "codex"`,
+the owning `sessionId`, `requestId`, and exact offered
 `optionId`. Native options are not translated to OpenCode decisions. Inspect
 the bounded command or diff first; truncated requests cannot be approved.
 Stale, foreign, and duplicate replies fail. Handle requests within the task

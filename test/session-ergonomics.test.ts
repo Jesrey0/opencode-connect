@@ -52,7 +52,7 @@ test("OpenCode deletion explains removed worktree location without bypassing pen
   const [a, b] = InMemoryTransport.createLinkedPair();
   await server.connect(a); await client.connect(b);
   try {
-    const blocked = await client.callTool({ name: "opencode.act", arguments: { action: "delete", runtime: "opencode", sessionId: "s" } });
+    const blocked = await client.callTool({ name: "opencode.delete", arguments: { runtime: "opencode", sessionId: "s" } });
     assert.equal(blocked.isError, true);
     assert.equal((blocked.structuredContent as Record<string, unknown>).errorCode, "DELETE_LOCATION_UNAVAILABLE");
     assert.equal((blocked.structuredContent as Record<string, unknown>).mutationMayHaveOccurred, false);
@@ -80,9 +80,9 @@ test("MCP rejects missing runtime before backend and emits structured safe appli
   const client = new Client({ name: "delete-safety", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
   try {
-    const invalid = await client.callTool({ name: "opencode.act", arguments: { action: "delete", sessionId: "s" } });
+    const invalid = await client.callTool({ name: "opencode.delete", arguments: { sessionId: "s" } });
     assert.equal(invalid.isError, true); assert.equal(f.requests.length, 0);
-    const blocked = await client.callTool({ name: "opencode.act", arguments: { action: "delete", runtime: "opencode", sessionId: "s" } });
+    const blocked = await client.callTool({ name: "opencode.delete", arguments: { runtime: "opencode", sessionId: "s" } });
     assert.equal(blocked.isError, true);
     const diagnostic = blocked.structuredContent as Record<string, unknown>;
     assert.equal(diagnostic.errorCode, "DELETE_SESSION_ACTIVE");

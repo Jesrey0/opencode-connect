@@ -93,7 +93,7 @@ test("SDK rejects old sessions, versions, missing metadata, header mismatches an
       assert.equal(response.status, 400);
       assert.ok(response.reply.error);
     }
-    const mutation = { name: "opencode.act", arguments: { action: "delete", sessionId: "s" } };
+    const mutation = { name: "opencode.delete", arguments: { sessionId: "s" } };
     for (const [params, headers] of [
       [{ ...mutation, _meta: { ...meta, "io.modelcontextprotocol/protocolVersion": "2025-11-25" } }, {}],
       [mutation, { "mcp-method": "tools/list" }],
@@ -190,12 +190,12 @@ test("tool input complexity is bounded before schema parsing or native access", 
   const http = await httpFixture(native);
   try {
     for (const answer of [
-      { choice: Array(4092).fill("PRIVATE-INPUT") },
+      { choice: Array(4095).fill("PRIVATE-INPUT") },
       Object.fromEntries(Array.from({ length: 4093 }, (_, index) => [`field${index}`, "PRIVATE-INPUT"])),
     ]) {
-      const response = await http.send("tools/call", { name: "opencode.act", arguments: { action: "respondForm", sessionId: "s", formId: "f", answer } });
+      const response = await http.send("tools/call", { name: "opencode.respondForm", arguments: { sessionId: "s", formId: "f", answer } });
       assert.equal(response.reply.result.isError, true);
-      assert.match(response.reply.result.content[0].text, /maximum of 4096 elements/);
+      assert.match(JSON.stringify(response.reply.result), /maximum of 4096 elements/);
       assert.equal(JSON.stringify(response.reply).includes("PRIVATE-INPUT"), false);
     }
     assert.equal(native.requests.length, 0);
@@ -214,7 +214,7 @@ test("HTTP admits bounded form answers at the element limit and above Express's 
   try {
     // Four root keys + one answer key + 4091 array entries = 4096 elements.
     for (const answer of [{ choice: Array(4091).fill("x") }, { text: "x".repeat(128 * 1024) }]) {
-      const response = await http.send("tools/call", { name: "opencode.act", arguments: { action: "respondForm", sessionId: "s", formId: "f", answer } });
+      const response = await http.send("tools/call", { name: "opencode.respondForm", arguments: { sessionId: "s", formId: "f", answer } });
       assert.notEqual(response.reply.result.isError, true, JSON.stringify(response.reply));
       assert.deepEqual(replies.at(-1), { answer });
     }
@@ -341,14 +341,14 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     const listing = await http.send("tools/list");
     assert.equal(listing.status, 200);
     const tools = listing.reply.result.tools as any[];
-    assert.equal(tools.length, 47);
+    assert.equal(tools.length, 65);
     const validators = new AjvJsonSchemaValidator();
     for (const tool of tools) {
       assert.equal(tool.inputSchema.$schema, "https://json-schema.org/draft/2020-12/schema");
       assert.equal(tool.outputSchema.$schema, "https://json-schema.org/draft/2020-12/schema");
       for (const hint of ["readOnlyHint", "destructiveHint", "openWorldHint"]) assert.equal(typeof tool.annotations[hint], "boolean");
     }
-    assert.equal(tools.find((tool) => tool.name === "opencode.act").annotations.openWorldHint, true);
+    assert.equal(tools.find((tool) => tool.name === "opencode.respondPermission").annotations.openWorldHint, true);
     const calls: [string, Record<string, unknown>][] = [
       ["status", {}], ["host.list", { cwd }],
       ["host.terminalScreen", { cwd, sessionId: "s" }],
@@ -363,7 +363,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
       ["opencode.inspect", { sessionId: "s", messageId: "u", detail: "result" }],
       ["opencode.inspect", { sessionId: "s" }],
       ["opencode.session", { sessionId: "s" }],
-      ["opencode.act", { action: "interrupt", sessionId: "s" }],
+      ["opencode.interrupt", { sessionId: "s" }],
     ];
     for (const [name, args] of calls) {
       const response = await http.send("tools/call", { name, arguments: args });

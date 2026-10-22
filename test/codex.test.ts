@@ -129,7 +129,7 @@ test("MCP removes job actions and enforces OpenCode prompt identity requirements
     for (const [name, args] of [
       ["opencode.start", { task: "missing cwd" }],
       ["opencode.wait", { sessionId: "native-thread" }],
-      ["opencode.act", { action: "codexStart", cwd: "/tmp", prompt: "old" }],
+      ["opencode.interrupt", {}],
     ] as const) assert.equal((await client.callTool({ name, arguments: args })).isError, true);
     assert.equal(f.requests.length, before);
   } finally { await client.close(); await server.close(); }
@@ -215,7 +215,7 @@ test("MCP routes exact Codex options and rejects mixing runtime decision formats
     const admitted = await client.callTool({ name: "opencode.start", arguments: { runtime: "codex", cwd: "/tmp", task: "implement", mode: "workspace-write" } });
     assert.notEqual(admitted.isError, true);
     assert.equal((admitted.structuredContent as any).mode, "workspace-write");
-    const accepted = await client.callTool({ name: "opencode.act", arguments: { runtime: "codex", action: "respondPermission", sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
+    const accepted = await client.callTool({ name: "opencode.respondPermission", arguments: { runtime: "codex", sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
     assert.notEqual(accepted.isError, true);
     assert.deepEqual(f.requests.at(-1)?.body, { input: { sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
     const inventory = await client.callTool({ name: "opencode.sessions", arguments: { runtime: "codex" } });
@@ -223,10 +223,10 @@ test("MCP routes exact Codex options and rejects mixing runtime decision formats
     assert.equal("error" in (inventory.structuredContent as any).results[0], false);
     const before = f.requests.length;
     for (const args of [
-      { runtime: "codex", action: "respondPermission", sessionId: "native-thread", requestId: "native-request", decision: "once" },
-      { action: "respondPermission", sessionId: "native-thread", requestId: "native-request", optionId: "native-once" },
-      { runtime: "codex", action: "respondPermission", sessionId: "native-thread", requestId: "native-request", decision: "always", optionId: "native-once" },
-    ]) assert.equal((await client.callTool({ name: "opencode.act", arguments: args })).isError, true);
+      { runtime: "codex", sessionId: "native-thread", requestId: "native-request", decision: "once" },
+      { sessionId: "native-thread", requestId: "native-request", optionId: "native-once" },
+      { runtime: "codex", sessionId: "native-thread", requestId: "native-request", decision: "always", optionId: "native-once" },
+    ]) assert.equal((await client.callTool({ name: "opencode.respondPermission", arguments: args })).isError, true);
     assert.equal((await client.callTool({ name: "opencode.start", arguments: { cwd: "/tmp", task: "native", model: "openai/model", mode: "agent" } })).isError, true);
     assert.equal(f.requests.length, before);
   } finally { await client.close(); await server.close(); }

@@ -110,7 +110,7 @@ export const actSchema = exposedUnion("action", [
     action: z.literal("respondForm"),
     sessionId: z.string().min(1),
     formId: z.string().min(1),
-    answer: z.record(z.string(), formValueSchema),
+    answer: z.record(z.string(), formValueSchema).refine(answer => Object.entries(answer).reduce((count, [, value]) => count + 1 + (Array.isArray(value) ? value.length : 1), 0) <= 4092, { message: "Form answer exceeds the maximum of 4096 elements" }),
   }),
   z.object({ runtime: runtimeSchema, action: z.literal("cancelForm"), sessionId: z.string().min(1), formId: z.string().min(1) }),
   z.object({ runtime: z.enum(["opencode", "codex"]).describe("Required for destructive deletion; no default runtime."), action: z.literal("delete"), sessionId: z.string().min(1) }).strict(),
@@ -137,7 +137,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     // Bounds recursive validation work independently of serialized string size.
     // Full permission/attachment sets and 12-step browser workflows fit this budget.
     maxToolInputElements: 4096,
-     instructions: "Host, command and OpenCode query operations are separately named purpose-specific tools. Preserve native IDs and canonical cwd. Start commands with command.startShell, command.startPty or command.startPersistentPty, then read the saved handle/cursor with command.read. Follow returned nextCall for paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
+      instructions: "Host, command, OpenCode query, and OpenCode session actions are separately named purpose-specific tools. Preserve native IDs and canonical cwd. Start commands with command.startShell, command.startPty or command.startPersistentPty, then read the saved handle/cursor with command.read. Follow returned nextCall for paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
   });
   if (events) {
     const authenticated = async (extra: ServerContext) => {
@@ -397,13 +397,39 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     }, async (input, context) => structuredResult(await backend.query([{ ...input, type } as any], context.mcpReq.signal)));
   }
 
-  registerTool("opencode.act", {
-    title: "Act on OpenCode State",
-    description: "Mutate a native session or admit prompt/inbox/command/skill work. Select the session runtime. Codex supports interrupt, delete and exact-option permission replies; continuation uses start sessionId. Read back configuration. Never automatically retry uncertain mutations.",
-    inputSchema: actSchema,
-    outputSchema: outputSchemas.act,
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
-  }, async (input) => structuredResult(await backend.act(input)));
+  const actTools = [
+    ["opencode.steer", "steer", "Steer an active native session with a prompt and optional attachments. The returned message ID is canonical; never retry uncertain submission.", false, true, true, false],
+    ["opencode.cancelInbox", "cancelInbox", "Cancel one exact pending inbox item in its owning session. Verify the returned pending status; do not retry uncertain cancellation.", false, true, false, false],
+    ["opencode.updateInbox", "updateInbox", "Change delivery for one exact pending inbox item. Reconcile pending state before retrying an uncertain update.", false, false, false, true],
+    ["opencode.compact", "compact", "Admit native session compaction using steer or queue delivery. This is not completion; verify the exact returned inbox message.", false, true, true, false],
+    ["opencode.command", "command", "Admit one catalogued native session command with optional prompt attachments. Upstream supplies no message identity; do not retry uncertain submission.", false, true, true, false],
+    ["opencode.invokeSkill", "invokeSkill", "Invoke one canonical native session skill. Upstream supplies no message identity; do not retry uncertain submission.", false, true, true, false],
+    ["opencode.interrupt", "interrupt", "Interrupt execution in one exact native session. This preserves the conversation; verify native state rather than retrying uncertainty.", false, true, true, false],
+    ["opencode.respondPermission", "respondPermission", "Answer one exact pending permission request. Codex requires an offered optionId; OpenCode requires a decision. Approving may authorize external effects.", false, true, true, false],
+    ["opencode.respondForm", "respondForm", "Submit an answer to one exact native pending form. The answer may authorize follow-on work; do not retry uncertain submission.", false, true, true, false],
+    ["opencode.cancelForm", "cancelForm", "Cancel one exact pending native form; this does not cancel the session worker.", false, true, false, false],
+    ["opencode.delete", "delete", "Delete one exact idle native session. Runtime is mandatory; pending actions, active work, or unverifiable safety state block deletion.", false, true, false, false],
+    ["opencode.revertStage", "revertStage", "Stage a native session revert for one canonical message. Files are not restored until the separate revert commit action.", false, false, false, false],
+    ["opencode.revertClear", "revertClear", "Clear staged native session revert state without restoring files.", false, false, false, true],
+    ["opencode.revertCommit", "revertCommit", "Commit the currently staged native session revert; this changes workspace files and must not be retried when uncertain.", false, true, true, false],
+    ["opencode.switchModel", "switchModel", "Select a canonical model and optional variant for one native session; persisted selection is read back.", false, false, false, true],
+    ["opencode.switchAgent", "switchAgent", "Select one canonical executing agent for a native session; persisted selection is read back. This does not create or edit an agent.", false, false, false, true],
+    ["opencode.setPermissions", "setPermissions", "Replace ordered native session permission rules and verify persisted readback. Rules can broaden agent policy.", false, false, false, true],
+    ["opencode.removeSavedApproval", "removeSavedApproval", "Remove one exact project saved approval with absent-target readback; never retry uncertain removal.", false, true, false, false],
+    ["opencode.synthetic", "synthetic", "Create one native synthetic inbox item, optionally delivering or resuming work. Preserve its returned inbox identity; do not retry uncertain creation.", false, true, true, false],
+  ] as const;
+  for (const [name, action, description, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of actTools) {
+    const variant = variantsOf(actSchema).find((schema) => (schema.shape as any).action.value === action)!;
+    let inputSchema = withoutDiscriminator(variant, "action");
+    if (action === "respondPermission") inputSchema = inputSchema.refine((input: any) => input.runtime === "codex" ? !!input.optionId && input.decision === undefined && input.message === undefined : !!input.decision && input.optionId === undefined, { message: "Codex requires optionId; OpenCode requires decision" }).meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { required: ["optionId"], not: { anyOf: [{ required: ["decision"] }, { required: ["message"] }] } }, else: { required: ["decision"], not: { required: ["optionId"] } } });
+    registerTool(name, {
+      title: `OpenCode ${action}`,
+      description,
+      inputSchema,
+      outputSchema: outputSchemas.act,
+      annotations: { readOnlyHint, destructiveHint, openWorldHint, idempotentHint },
+    }, async (input) => structuredResult(await backend.act({ ...input, action } as any)));
+  }
 
   if (browser) registerBrowserTools(server, browser, events);
   return server;

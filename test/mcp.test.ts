@@ -27,7 +27,8 @@ test("MCP discovery uses host/command groups and canonical worker names without 
     const { tools } = await fixture.client.listTools();
     const focused = ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.read", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"];
     const queries = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["status", "opencode.start", "opencode.wait", "opencode.inspect", ...queries, "opencode.act", "host.write", ...focused].sort());
+    const actions = ["steer", "cancelInbox", "updateInbox", "compact", "command", "invokeSkill", "interrupt", "respondPermission", "respondForm", "cancelForm", "delete", "revertStage", "revertClear", "revertCommit", "switchModel", "switchAgent", "setPermissions", "removeSavedApproval", "synthetic"].map(action => `opencode.${action}`);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ["status", "opencode.start", "opencode.wait", "opencode.inspect", ...queries, ...actions, "host.write", ...focused].sort());
     // OpenAI plugin reference/guidelines reviewed 2026-10-15; see
     // docs/chatgpt-mcp-review.md for sources and behavior justifications.
     for (const [name, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of [
@@ -36,13 +37,16 @@ test("MCP discovery uses host/command groups and canonical worker names without 
       ["command.read", false, true, false, false],
       ...["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList"].map(name => [name, true, false, false, true] as const),
       ...["host.worktreeCreate", "host.worktreeRemove", "command.startShell", "command.startPty", "command.startPersistentPty", "command.remove", "command.input", "command.interrupt", "command.ctrlD"].map(name => [name, false, true, name.startsWith("command."), false] as const),
+      ...["opencode.steer", "opencode.compact", "opencode.command", "opencode.invokeSkill", "opencode.interrupt", "opencode.respondPermission", "opencode.respondForm", "opencode.revertCommit", "opencode.removeSavedApproval", "opencode.synthetic"].map(name => [name, false, true, ["opencode.steer", "opencode.compact", "opencode.command", "opencode.invokeSkill", "opencode.interrupt", "opencode.respondPermission", "opencode.respondForm", "opencode.revertCommit", "opencode.synthetic"].includes(name), false] as const),
+      ...["opencode.updateInbox", "opencode.switchModel", "opencode.switchAgent", "opencode.setPermissions"].map(name => [name, false, false, false, true] as const),
+      ...["opencode.cancelInbox", "opencode.cancelForm", "opencode.delete"].map(name => [name, false, true, false, false] as const),
+      ["opencode.revertStage", false, false, false, false], ["opencode.revertClear", false, false, false, true],
       ["host.worktreeRefresh", false, false, false, true],
       ["command.resize", false, false, false, true],
       ["opencode.start", false, true, true, false],
       ["opencode.wait", true, false, false, true],
       ["opencode.inspect", true, false, false, true],
       ...queries.map(name => [name, true, false, false, true] as const),
-      ["opencode.act", false, true, true, false],
     ] as const) {
       const tool = tools.find((t) => t.name === name)!;
       assert.ok(tool.title?.trim()); assert.ok(tool.description?.trim());
@@ -81,7 +85,56 @@ test("focused host and command tools have unique purpose-specific schemas and tr
     assert.deepEqual([resize.readOnlyHint, resize.destructiveHint, resize.idempotentHint], [false, false, true]);
     const read = tools.find(tool => tool.name === "command.read")!.annotations!;
     assert.deepEqual([read.readOnlyHint, read.destructiveHint], [false, true], "persistent observer may remove an exited handle");
-    for (const name of ["host.inspect", "host.worktree", "command.start", "command.control", "opencode.query"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
+    for (const name of ["host.inspect", "host.worktree", "command.start", "command.control", "opencode.query", "opencode.act"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
+  } finally { await fixture.close(); }
+});
+
+test("session action tools expose selector-free contracts and dispatch each exact native action", async () => {
+  class DispatchBackend extends OpenCodeBackend {
+    readonly calls: Record<string, unknown>[] = [];
+    override async act(input: Parameters<OpenCodeBackend["act"]>[0]): Promise<never> {
+      this.calls.push(input as unknown as Record<string, unknown>);
+      throw new Error("native dispatch reached");
+    }
+  }
+  const native = nativeFixture(() => { throw new Error("dispatch stub prevents native access"); });
+  const backend = new DispatchBackend(native.connect);
+  const fixture = await mcpFixture(native, backend);
+  const actions: [string, string, Record<string, unknown>][] = [
+    ["steer", "steer", { sessionId: "s", instruction: "continue" }],
+    ["cancelInbox", "cancelInbox", { sessionId: "s", inboxId: "i" }],
+    ["updateInbox", "updateInbox", { sessionId: "s", inboxId: "i", delivery: "queue" }],
+    ["compact", "compact", { sessionId: "s" }],
+    ["command", "command", { sessionId: "s", name: "test", text: "" }],
+    ["invokeSkill", "invokeSkill", { sessionId: "s", skillId: "canonical" }],
+    ["interrupt", "interrupt", { sessionId: "s" }],
+    ["respondPermission", "respondPermission", { runtime: "codex", sessionId: "s", requestId: "r", optionId: "exact-option" }],
+    ["respondForm", "respondForm", { sessionId: "s", formId: "f", answer: { ok: true } }],
+    ["cancelForm", "cancelForm", { sessionId: "s", formId: "f" }],
+    ["delete", "delete", { runtime: "opencode", sessionId: "s" }],
+    ["revertStage", "revertStage", { sessionId: "s", messageId: "m" }],
+    ["revertClear", "revertClear", { sessionId: "s" }],
+    ["revertCommit", "revertCommit", { sessionId: "s" }],
+    ["switchModel", "switchModel", { sessionId: "s", model: "openai/model" }],
+    ["switchAgent", "switchAgent", { sessionId: "s", agent: "build" }],
+    ["setPermissions", "setPermissions", { sessionId: "s", permissions: [] }],
+    ["removeSavedApproval", "removeSavedApproval", { sessionId: "s", approvalId: "approval" }],
+    ["synthetic", "synthetic", { sessionId: "s", text: "queued" }],
+  ];
+  try {
+    const { tools } = await fixture.client.listTools();
+    const provider = new AjvJsonSchemaValidator();
+    for (const [toolAction, , args] of actions) {
+      const tool = tools.find(candidate => candidate.name === `opencode.${toolAction}`)!;
+      assert.ok(tool, `opencode.${toolAction} is registered`);
+      assert.equal("action" in tool.inputSchema.properties!, false, `${tool.name} has no action selector`);
+      assert.equal(provider.getValidator(tool.inputSchema as JsonSchemaType)(args).valid, true, `${tool.name} accepts only its action schema`);
+      const result = await fixture.client.callTool({ name: tool.name, arguments: args });
+      assert.equal(result.isError, true, `${tool.name} reached the dispatch stub`);
+      assert.match((result.structuredContent as any).error, /details omitted/);
+    }
+    assert.equal(backend.calls.length, actions.length);
+    for (let index = 0; index < actions.length; index += 1) assert.equal(backend.calls[index].action, actions[index][1]);
   } finally { await fixture.close(); }
 });
 
@@ -221,7 +274,8 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       ["host.worktreeRemove", ["cwd", "directory", "force"]],
       ["command.startShell", ["cwd", "command", "timeoutMs"]],
       ["command.resize", ["kind", "cwd", "id", "rows", "cols"]],
-      ["opencode.act", ["action", "sessionId", "agent", "agents", "permissions"]],
+      ["opencode.switchAgent", ["sessionId", "agent"]],
+      ["opencode.setPermissions", ["sessionId", "permissions"]],
     ] as const) {
       const schema = schemas.get(name)!;
       assert.equal(schema.type, "object");
@@ -245,7 +299,7 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
     assert.equal(contextAgents.items.properties.name.type, "string");
     assert.deepEqual(contextAgents.items.required, ["name"]);
     assert.equal(contextAgents.items.additionalProperties, false);
-    assert.equal((schemas.get("opencode.act")!.properties!.agent as { type: string }).type, "string");
+    assert.equal((schemas.get("opencode.switchAgent")!.properties!.agent as { type: string }).type, "string");
     const validateStart = provider.getValidator(start as JsonSchemaType);
     assert.equal(validateStart({ task: "task", cwd: "/tmp", model: "openai/a", agent: "build", agents: [{ name: "explore" }] }).valid, true);
     assert.equal(validateStart({ task: "task", cwd: "/tmp", model: "openai/a", agent: [{ name: "build" }] }).valid, false);
@@ -268,8 +322,8 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       ["opencode.message", { sessionId: "s", messageId: "m", textLimit: 12000 }, [{ sessionId: "s" }, { sessionId: "s", messageId: "m", textLimit: 12001 }]],
       ["opencode.messages", { sessionId: "s", cursor: "native" }, [{ sessionId: "s", cursor: "native", order: "desc" }, { sessionId: "s", limit: 51 }]],
       ["opencode.agent", { agentId: "build", textLimit: 12000 }, [{ agentId: "build", textLimit: 12001 }]],
-      ["opencode.act", { action: "switchAgent", sessionId: "s", agent: "build" }, [
-        { action: "switchAgent", sessionId: "s", agents: [{ name: "build" }] }, { action: "interrupt", sessionId: "s", text: "x" }, { action: "steer", sessionId: "s", instruction: "x", agent: "build" },
+      ["opencode.switchAgent", { sessionId: "s", agent: "build" }, [
+        { sessionId: "s", agents: [{ name: "build" }] }, { sessionId: "s", text: "x" }, { sessionId: "s", agent: [{ name: "build" }] },
       ]],
     ];
     for (const [name, valid, invalid] of cases) {
@@ -299,7 +353,7 @@ test("discovered output schemas accept existing safe structured errors, includin
     for (const [name, args] of [
        ["host.vcs", { cwd: "/workspace" }],
       ["opencode.start", { cwd: "/workspace", model: "openai/a", task: "test" }],
-      ["opencode.act", { action: "delete", runtime: "opencode", sessionId: "s" }],
+      ["opencode.delete", { runtime: "opencode", sessionId: "s" }],
     ] as const) {
       const response = await fixture.client.callTool({ name, arguments: args });
       assert.equal(response.isError, true);
