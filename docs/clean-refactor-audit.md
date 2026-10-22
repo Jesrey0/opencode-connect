@@ -240,3 +240,43 @@ complete. Remaining work is bounded below.
 - Public ingress OAuth expiry/revocation, General Chat behavior, current Windows
   Chrome consent, installed release activation and native plugin loading remain
   separate operator-owned acceptance. Live services/main were out of scope.
+
+## Superseding combined-refactor acceptance (2026-10-23)
+
+This section supersedes the historical `NOT accepted` browser checkpoint above;
+those earlier failing runs are retained as regression evidence rather than erased.
+
+- **Model-facing MCP tool redesign:** the focused host/command, query, action
+  and worker lifecycle changes were integrated in commits `5122bce`,
+  `d8a511d`, `547cec4` and `70eb335`. The original public multiplexers
+  were deleted; no compatibility aliases or generic executor were registered.
+  Existing current-protocol negotiation/rejection, Codex native API fields,
+  safety checks and internal dispatch remain. The intermediate combined source
+  gate passed 402/405 connector tests (3 skipped), 145/145 Codex plugin tests,
+  compilation and installed native-RPC contract verification.
+- **Dependency advisory:** `8af655c` updates the locked transitive
+  `ip-address` dependency from 10.7.3 to patched 10.7.4 without altering
+  OpenCode 2.0.24. A fresh install, production dependency audit and full
+  required source gates all passed; npm reported zero vulnerabilities.
+- **Browser targeting:** `33faecd` replaces multiple racing native AX
+  queries/ancestor observations with one consistent frame-scoped AX tree per
+  target resolution. This avoids resolving a target and its named enclosing
+  control against different tree generations, without using a fallback path
+  or weakening identity/authorization and dispatch guarantees.
+- **Actual Chrome evidence:** the isolated browser-file E2E passed 37/37 twice,
+  one run with all temporary diagnostic logging removed. A complete
+  instrument-free serial browser suite passed **91/91** (0 skipped/failures)
+  against the same source change in an isolated worktree. Its scoped rename,
+  focus, navigation and lease regression cases all passed.
+- **Browser test isolation:** `test:browser` now runs browser test files with
+  `--test-concurrency=1` so independently launched Chrome fixtures cannot
+  contend during acceptance. All cases run, with no skipped or relaxed
+  assertions. This is unrelated to runtime/browser-worker concurrency.
+- **Boundaries:** Source and test outcomes are not deployment evidence.
+  Production, main, the externally published plugin/tool manifest, ingress
+  OAuth expiry/revocation and live General Chat tool exposure have not been
+  modified or accepted. A deliberate breaking cutover requires an authorized,
+  verified release and client refresh. No compatibility shims are to be added
+  during that cutover. Large-page AX-targeting performance and outstanding
+  host file-write atomicity remain bounded follow-up reviews, not claims of
+  live acceptance.
