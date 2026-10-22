@@ -17,6 +17,62 @@ spec.loader.exec_module(worker)
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_windows_endpoints_require_loopback_browser_websockets_and_linux_keeps_http(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(worker.endpoint("linux"), "http://127.0.0.1:9222")
+            for value in ["ws://127.0.0.1:9223/devtools/browser", "ws://[::1]:9223/devtools/browser/chrome-id"]:
+                os.environ["OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT"] = value
+                self.assertEqual(worker.endpoint("windows"), value)
+            for value in ["http://127.0.0.1:9223", "http://[::1]:9223", "https://127.0.0.1:9223",
+                          "ws://localhost:9223/devtools/browser", "ws://192.0.2.1:9223/devtools/browser",
+                          "ws://127.0.0.1/devtools/browser", "ws://127.0.0.1:9223/devtools/page/page-id",
+                          "ws://u:p@127.0.0.1:9223/devtools/browser", "ws://127.0.0.1:9223/devtools/browser?token=private",
+                          "ws://127.0.0.1:9223/devtools/browser#private"]:
+                os.environ["OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT"] = value
+                with self.subTest(value=value), self.assertRaises(worker.Rejected) as caught:
+                    worker.endpoint("windows")
+                self.assertEqual(caught.exception.code, "invalid_endpoint")
+            for value in ["http://127.0.0.1:9333/", "http://[::1]:9333"]:
+                os.environ["OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT"] = value
+                self.assertEqual(worker.endpoint("linux"), value.rstrip("/"))
+            os.environ["OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT"] = "ws://127.0.0.1:9223/devtools/browser"
+            with self.assertRaises(worker.Rejected):
+                worker.endpoint("linux")
+
+    def test_windows_metadata_is_explicit_bounded_and_never_an_http_fallback(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True):
+            os.environ["OPENCODE_CONNECT_BROWSER_WINDOWS_USER_DATA_DIR"] = directory
+            metadata = Path(directory) / "DevToolsActivePort"
+            with self.assertRaises(worker.Rejected) as caught:
+                worker.endpoint("windows")
+            self.assertEqual(caught.exception.code, "not_configured")
+            metadata.write_text("9223\n/devtools/browser/chrome-id\n")
+            self.assertEqual(worker.endpoint("windows"), "ws://127.0.0.1:9223/devtools/browser/chrome-id")
+            os.environ["OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT"] = "ws://127.0.0.1:9223/devtools/browser"
+            with self.assertRaises(worker.Rejected) as caught:
+                worker.endpoint("windows")
+            self.assertEqual(caught.exception.code, "invalid_endpoint")
+            del os.environ["OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT"]
+            for raw in ["0\n/devtools/browser\n", "65536\n/devtools/browser\n", "not-a-port\n/devtools/browser\n",
+                        "9223\n/devtools/browser\nextra\n", "9223\n/devtools/page/page-id\n", "x" * 4097]:
+                metadata.write_text(raw)
+                with self.subTest(raw=raw[:80]), self.assertRaises(worker.Rejected) as caught:
+                    worker.endpoint("windows")
+                self.assertEqual(caught.exception.code, "invalid_endpoint")
+
+    def test_worker_protocol_requires_connection_handles_only_for_windows(self):
+        for method, fields in [("tabs", {}), ("attach", {"targetId": "selected", "controlMode": "observe"})]:
+            worker.validate(method, fields)
+            worker.validate(method, {**fields, "browser": "windows", "connectionId": "approved"})
+            for selection in [{"browser": "windows"}, {"browser": "linux", "connectionId": "unused"}]:
+                with self.subTest(method=method, selection=selection), self.assertRaises(worker.Rejected) as caught:
+                    worker.validate(method, {**fields, **selection})
+                self.assertEqual(caught.exception.code, "invalid_arguments")
+        worker.validate("status", {"browser": "windows"})
+        worker.validate("status", {"browser": "windows", "connectionId": "approved"})
+        with self.assertRaises(worker.Rejected):
+            worker.validate("status", {"connectionId": "unused"})
+
     def test_upload_preflight_rejects_escapes_missing_files_and_protected_suffixes(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"OPENCODE_CONNECT_BROWSER_UPLOAD_ROOTS": directory}):
             root = Path(directory)
@@ -93,7 +149,7 @@ class OutputTests(unittest.IsolatedAsyncioTestCase):
         identity = "ws://127.0.0.1:9222/devtools/browser/id"
         row = {"id": "selected", "type": "page", "url": "https://example.test/", "title": "Fixture"}
         class Adapter(worker.Adapter):
-            async def discover(self, browser):
+            async def discover_linux(self):
                 return {"webSocketDebuggerUrl": identity, "Browser": "Chrome/155.0"}
 
             async def open_socket(self, url, timeout):
@@ -255,7 +311,7 @@ asyncio.run(worker.main())
 
     async def test_status_does_not_report_a_dead_attachment_as_connected(self):
         class Adapter(worker.Adapter):
-            async def discover(self, browser):
+            async def discover_linux(self):
                 return {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/id", "Browser": "Chrome/155.0"}
         adapter = Adapter()
         adapter.lease = {"browser": "linux", "identity": "ws://127.0.0.1:9222/devtools/browser/id"}
@@ -273,7 +329,7 @@ asyncio.run(worker.main())
         class Adapter(worker.Adapter):
             unavailable = True
 
-            async def discover(self, browser):
+            async def discover_linux(self):
                 if self.unavailable:
                     worker.reject("unreachable", "Chrome debugging endpoint unavailable")
                 return {"webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/id", "Browser": "Chrome/155.0"}

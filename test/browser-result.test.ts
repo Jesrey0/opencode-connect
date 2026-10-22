@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserBackend, BrowserError } from "../src/browser/backend.js";
@@ -151,6 +153,11 @@ test("idle expiry reports why the attachment was lost and never revives or repla
 });
 
 test("a closed on-demand Linux browser is unreachable without a current incident", async t => {
+  // This case requires no debugging processes. Parallel fixtures and unrelated
+  // host browsers must not supply process evidence for this isolated worker.
+  const processes = t.mock.method(fs, "readdir", async () => []);
+  syncBuiltinESMExports();
+  t.after(() => { processes.mock.restore(); syncBuiltinESMExports(); });
   const { backend, requests } = await backendFixture(t, "status-closed");
   const status = await backend.call("status", {});
   assert.equal(status.reachable, false);

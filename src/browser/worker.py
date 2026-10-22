@@ -137,11 +137,12 @@ def endpoint(browser):
         reject("not_configured", "Optional Windows Chrome endpoint is not configured")
     try:
         p = urllib.parse.urlsplit(value)
-        path_ok = p.path in ("", "/") if p.scheme == "http" else browser == "windows" and bool(re.fullmatch(r"/devtools/browser(?:/[A-Za-z0-9-]*)?", p.path))
-        if p.scheme not in ("http", "ws") or p.hostname not in ("127.0.0.1", "::1") or not p.port or p.username or p.password or p.query or p.fragment or not path_ok:
+        scheme = "ws" if browser == "windows" else "http"
+        path_ok = bool(re.fullmatch(r"/devtools/browser(?:/[A-Za-z0-9-]*)?", p.path)) if browser == "windows" else p.path in ("", "/")
+        if p.scheme != scheme or p.hostname not in ("127.0.0.1", "::1") or not p.port or p.username or p.password or p.query or p.fragment or not path_ok:
             raise ValueError()
     except ValueError:
-        reject("invalid_endpoint", "CDP endpoint must be configured loopback HTTP or a Windows browser WebSocket without credentials")
+        reject("invalid_endpoint", "Windows Chrome requires a loopback browser WebSocket without credentials; HTTP discovery is unsupported" if browser == "windows" else "Linux CDP endpoint must be loopback HTTP without path or credentials")
     return value.rstrip("/") if p.scheme == "http" else value
 
 
@@ -257,8 +258,8 @@ class Adapter:
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(conn.aclose(), 2)
 
-    async def discover(self, browser):
-        base = endpoint(browser)
+    async def discover_linux(self):
+        base = endpoint("linux")
         try:
             info = await asyncio.to_thread(fetch_json, base + "/json/version")
             ws = info.get("webSocketDebuggerUrl", "")
@@ -268,9 +269,7 @@ class Adapter:
             return info
         except Rejected:
             raise
-        except urllib.error.HTTPError as error:
-            if browser == "windows" and error.code == 404:
-                reject("unsupported_discovery", "Chrome permission mode omits HTTP discovery; configure its browser WebSocket or user data directory")
+        except urllib.error.HTTPError:
             reject("unreachable", "Chrome HTTP debugging endpoint is unavailable")
         except Exception:
             reject("unreachable", "Chrome debugging endpoint unavailable; inspect the selected browser connection")
@@ -307,8 +306,6 @@ class Adapter:
         if self.lease or self.approval:
             reject("lease_conflict", "Release the active browser lease or connection before connecting")
         url = endpoint(args["browser"])
-        if urllib.parse.urlsplit(url).scheme != "ws":
-            reject("approval_unavailable", "Explicit connect requires a configured Windows permission-mode browser WebSocket")
         try:
             conn = await self.open_socket(url, args.get("timeoutMs", 60000) / 1000)
             version = await conn.send(cdp.browser.get_version(), _attach=True)
@@ -331,7 +328,7 @@ class Adapter:
         base = {"browser": browser, "attached": False, "version": None, "linuxProcesses": [], "currentIssue": None}
         try:
             url = endpoint(browser)
-            if urllib.parse.urlsplit(url).scheme == "ws":
+            if browser == "windows":
                 if self.approval and self.approval["browser"] == browser and (not connected(self.conn) or self.approval["endpoint"] != url):
                     await self.disconnect()
                 if self.approval and owner == self.approval["owner"] and same_token(args.get("connectionId"), self.approval["id"]):
@@ -344,7 +341,7 @@ class Adapter:
                 except (OSError, TimeoutError):
                     reject("unreachable", "Windows Chrome loopback endpoint is unavailable")
                 return {**base, "reachable": True, "connectionState": "approval_required", "currentIssue": "Explicit browser.connect approval is required before tab discovery"}
-            info = await self.discover(browser)
+            info = await self.discover_linux()
             if self.lease and self.lease["browser"] == browser and (self.lease["identity"] != info["webSocketDebuggerUrl"] or not connected(self.conn)):
                 await self.disconnect()
                 base["currentIssue"] = "Attachment connection lost; attach explicitly. Endpoint readiness does not verify the MCP action path."
@@ -355,15 +352,16 @@ class Adapter:
             return {**base, "reachable": False, "connectionState": "not_configured" if error.code == "not_configured" else "unreachable", "currentIssue": error.message}
 
     async def targets(self, browser, args=None, owner=None):
-        if urllib.parse.urlsplit(endpoint(browser)).scheme == "ws":
+        base = endpoint(browser)
+        if browser == "windows":
             await self.approved(args or {}, owner, browser)
             targets = await self.conn.send(cdp.target.get_targets(), _attach=True)
             return [{"id": str(row.target_id), "type": row.type_, "title": row.title, "url": row.url} for row in targets if row.type_ == "page"]
-        info = await self.discover(browser)
+        info = await self.discover_linux()
         if self.lease and self.lease["browser"] == browser and (self.lease["identity"] != info["webSocketDebuggerUrl"] or not connected(self.conn)):
             await self.disconnect()
         try:
-            rows = await asyncio.to_thread(fetch_json, endpoint(browser) + "/json/list")
+            rows = await asyncio.to_thread(fetch_json, base + "/json/list")
             if not isinstance(rows, list):
                 raise ValueError()
             return [row for row in rows if row.get("type") == "page"]
@@ -388,12 +386,10 @@ class Adapter:
         if control and lease["mode"] != "control":
             reject("observe_only", "Observe lease does not permit browser actions")
         try:
-            if self.approval:
-                approval = await self.approved({"connectionId": lease["connection"]}, owner, lease["browser"])
-                if approval["id"] != lease["identity"]:
-                    reject("disconnected", "Browser connection changed; attach again")
+            if lease["browser"] == "windows":
+                await self.approved({"connectionId": lease["identity"]}, owner, lease["browser"])
             else:
-                info = await self.discover(lease["browser"])
+                info = await self.discover_linux()
                 if info["webSocketDebuggerUrl"] != lease["identity"] or not connected(self.conn):
                     reject("disconnected", "Browser identity or connection changed; attach again")
             row = await self.current()
@@ -1082,12 +1078,11 @@ class Adapter:
                 await self.disconnect()
             if self.lease:
                 reject("lease_conflict", "An active lease already owns this adapter; detach it before attaching")
-            url = endpoint(browser)
-            permission = urllib.parse.urlsplit(url).scheme == "ws"
-            if self.approval and not permission:
+            endpoint(browser)
+            if self.approval and browser == "linux":
                 reject("lease_conflict", "Release the approved browser connection before attaching another browser")
-            approval = await self.approved(args, owner, browser) if permission else None
-            info = None if permission else await self.discover(browser)
+            approval = await self.approved(args, owner, browser) if browser == "windows" else None
+            info = await self.discover_linux() if browser == "linux" else None
             rows = await self.targets(browser, args, owner)
             row = next((row for row in rows if row["id"] == args["targetId"]), None)
             if not row:
@@ -1095,7 +1090,7 @@ class Adapter:
             if row.get("url") != "about:blank" and urllib.parse.urlsplit(row.get("url", "")).scheme not in ("http", "https"):
                 reject("unsupported_page", "Attach supports HTTP/HTTPS pages and about:blank")
             try:
-                if not permission:
+                if browser == "linux":
                     await self.open_socket(info["webSocketDebuggerUrl"], 10)
                 self.conn.target = cdp.target.TargetID(args["targetId"])
                 await self.conn.attach(cdp.target.TargetID(args["targetId"]))
@@ -1103,7 +1098,7 @@ class Adapter:
                 await self.conn.send(cdp.dom.enable())
                 self.conn.add_handler(cdp.dom.DocumentUpdated, self.invalidate)
                 self.conn.add_handler(cdp.page.FrameNavigated, self.invalidate)
-                self.lease = {"id": secrets.token_urlsafe(32), "owner": owner, "browser": browser, "target": args["targetId"], "identity": approval["id"] if approval else info["webSocketDebuggerUrl"], "connection": approval["id"] if approval else None, "mode": args["controlMode"]}
+                self.lease = {"id": secrets.token_urlsafe(32), "owner": owner, "browser": browser, "target": args["targetId"], "identity": approval["id"] if approval else info["webSocketDebuggerUrl"], "mode": args["controlMode"]}
                 return {"leaseId": self.lease["id"], "browser": browser, "generation": self.generation(await self.frames()), "controlMode": args["controlMode"], "target": self.summary(row, browser), "ownership": "external"}
             except Exception:
                 await self.disconnect()
@@ -1160,6 +1155,12 @@ def validate(method, args):
         reject("invalid_arguments", "Invalid browser control mode")
     if method == "connect" and (args["browser"] != "windows" or args["authorized"] is not True):
         reject("invalid_arguments", "Windows connection requires explicit task authorization")
+    if method in ("status", "tabs", "attach"):
+        if args.get("browser", "linux") == "windows":
+            if method != "status" and "connectionId" not in args:
+                reject("invalid_arguments", "Windows discovery and attachment require an approved connectionId")
+        elif "connectionId" in args:
+            reject("invalid_arguments", "Connection handles apply only to Windows Chrome")
     if method == "detach" and (("leaseId" in args) == ("connectionId" in args)):
         reject("invalid_arguments", "Detach requires exactly one lease or connection handle")
     if method == "wait":

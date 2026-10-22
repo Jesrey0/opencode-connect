@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { createServer as httpServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { BrowserBackend, BrowserError, browserPython, endpoint, isManagedChromeProcess } from "../src/browser/backend.js";
+import { BrowserBackend, BrowserError, browserPython, linuxEndpoint, isManagedChromeProcess } from "../src/browser/backend.js";
 import { browserInputs } from "../src/browser/schemas.js";
 import { createHttpHandler } from "../src/http.js";
 import { Events } from "../src/events.js";
@@ -37,9 +37,9 @@ test("browser schemas reject ambiguous targets, arbitrary script, unsafe navigat
   assert.equal(browserInputs.media_download.safeParse({ leaseId: "l", elementRef: "e" }).success, false);
 });
 
-test("CDP endpoints require explicit loopback IP, port and no redirects/credentials/path", () => {
-  assert.equal(endpoint("http://127.0.0.1:9222"), "http://127.0.0.1:9222");
-  for (const value of ["http://localhost:9222", "http://192.168.1.1:9222", "https://127.0.0.1:9222", "http://127.0.0.1", "http://u:p@127.0.0.1:9222", "http://127.0.0.1:9222/path", "http://127.0.0.1:9222?token=secret"]) assert.throws(() => endpoint(value));
+test("Linux CDP endpoints require explicit loopback HTTP, port and no credentials/path", () => {
+  assert.equal(linuxEndpoint("http://127.0.0.1:9222"), "http://127.0.0.1:9222");
+  for (const value of ["http://localhost:9222", "http://192.168.1.1:9222", "https://127.0.0.1:9222", "http://127.0.0.1", "http://u:p@127.0.0.1:9222", "http://127.0.0.1:9222/path", "http://127.0.0.1:9222?token=secret"]) assert.throws(() => linuxEndpoint(value));
 });
 
 test("browser is disabled by default and invalid actions never start a worker", async () => {
@@ -589,7 +589,8 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
       assert.equal(exposed.find(item => item.name === "browser.hover").annotations.destructiveHint, false);
       assert.equal(exposed.find(item => item.name === "browser.snapshot").annotations.readOnlyHint, true);
       assert.equal(exposed.find(item => item.name === "browser.snapshot").annotations.idempotentHint, false, "A fresh snapshot invalidates prior element refs");
-      assert.equal(exposed.filter(item => item.name.startsWith("browser.")).length, 26, "Reliability changes extend existing tools");
+      assert.equal(exposed.find(item => item.name === "browser.close").annotations.destructiveHint, true);
+      assert.equal(exposed.filter(item => item.name.startsWith("browser.")).length, 27, "Browser catalog includes managed Linux close and distinct named actions");
       assert.equal(exposed.find(item => item.name === "browser.snapshot").inputSchema.properties.scopeRef.type, "string");
       const workflowSchema = exposed.find(item => item.name === "browser.workflow").inputSchema;
       assert.deepEqual(workflowSchema.properties.steps.items.anyOf[0].properties.target.properties.within.required, ["role", "name"]);
@@ -617,9 +618,12 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
       const clicked = await request("browser.click", { leaseId: controlId, authorized: true, elementRef: buttonRef, expected: { type: "text", value: "Saved" } });
       assert.equal(clicked.result.structuredContent.verification, "confirmed", JSON.stringify(clicked));
       await request("browser.detach", { leaseId: controlId });
-    } finally { await handler.close(); await events.close(); }
+    } finally {
+      await handler.close(); await events.close();
+      // Handler shutdown closes its backend even if a preceding assertion fails.
+      backend = new BrowserBackend({ enabled: true, env, chromeLaunchMode: "direct" });
+    }
     assert.equal((await fetch(cdpUrl + "/json/version")).ok, true);
-    backend = new BrowserBackend({ enabled: true, env, chromeLaunchMode: "direct" });
   });
   await t.test("connector child normal and forced termination never closes Chrome", async () => {
     const script = `import {BrowserBackend} from ${JSON.stringify(join(root, "src/browser/backend.ts"))};const b=new BrowserBackend({enabled:true});await b.call('attach',{targetId:${JSON.stringify(one.id)},controlMode:'observe'});console.log('attached');process.stdin.resume();process.stdin.on('end',()=>{b.close();process.exit(0)});`;

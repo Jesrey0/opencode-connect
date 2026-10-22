@@ -10,7 +10,11 @@ into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**.
 This adapter exposes OpenCode-backed HostPlane and WorkerPlane operations and an
 optional [native Chrome capability](docs/browser-capability.md) powered by Nodriver.
 Linux Chrome in WSL2 is the default, with explicit launch/reuse and optional
-Windows Chrome attachment through a configured loopback debugging endpoint.
+Windows Chrome attachment through an explicitly configured user data directory's
+`DevToolsActivePort` or loopback browser WebSocket. Windows requires explicit
+`browser.connect` authorization and Chrome's permission handshake before tab
+discovery or attachment; Windows HTTP endpoints reject before discovery, with no
+HTTP fallback. Linux retains HTTP discovery and ownership-verified launch/close.
 Custom host applications are CLI-first and keep their code, process lifecycle,
 and optional future MCP endpoints outside this connector. The standalone
 `windows-print-bridge` project is not part of the OpenCode MCP catalog.

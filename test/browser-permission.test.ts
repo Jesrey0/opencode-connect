@@ -4,6 +4,7 @@ import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
+import * as z from "zod/v4";
 import { BrowserBackend, BrowserError, browserPython } from "../src/browser/backend.js";
 import { browserInputs } from "../src/browser/schemas.js";
 
@@ -23,7 +24,6 @@ consent = asyncio.Event()
 consent.set()
 mode = "allow"
 next_socket = 0
-server_port = 0
 redirect_url = None
 
 def target(target_id):
@@ -33,12 +33,10 @@ def target(target_id):
 async def upgrade(connection, request):
     if request.headers.get("Upgrade", "").lower() != "websocket":
         state["http"].append(request.path)
-        if mode == "legacy" and request.path == "/json/version":
-            return connection.respond(HTTPStatus.OK, json.dumps({"Browser": "Chrome/155.0.8059.82",
-                "webSocketDebuggerUrl": "ws://127.0.0.1:" + str(server_port) + PATH}))
-        if mode == "legacy" and request.path == "/json/list":
-            return connection.respond(HTTPStatus.OK, json.dumps([
-                {"id": target_id, **target(target_id)} for target_id in ("page-a", "page-b")]))
+        if redirect_url is not None:
+            response = connection.respond(HTTPStatus.TEMPORARY_REDIRECT, "")
+            response.headers["Location"] = redirect_url
+            return response
         return connection.respond(HTTPStatus.NOT_FOUND, "")
     state["attempts"] += 1
     state["paths"].append(request.path)
@@ -107,7 +105,7 @@ async def websocket(ws):
         state["closed"] += 1
 
 async def main():
-    global mode, PATH, server_port, redirect_url
+    global mode, PATH, redirect_url
     reader = asyncio.StreamReader()
     transport, _ = await asyncio.get_running_loop().connect_read_pipe(
         lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer)
@@ -203,7 +201,7 @@ async function startFixture(python: string, directory: string): Promise<Fixture>
   };
 }
 
-async function setup(t: TestContext, discovery: "file" | "websocket" | "http" = "file") {
+async function setup(t: TestContext, configuration: "file" | "websocket" | "http" = "file") {
   const python = await browserPython();
   try { await access(python); } catch { t.skip("Run npm run browser:setup to install the pinned browser dependencies"); return; }
   const directory = await mkdtemp(join(tmpdir(), "browser-permission-"));
@@ -218,8 +216,8 @@ async function setup(t: TestContext, discovery: "file" | "websocket" | "http" = 
   const env: NodeJS.ProcessEnv = { ...process.env, OPENCODE_CONNECT_BROWSER_PYTHON: python };
   delete env.OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT;
   delete env.OPENCODE_CONNECT_BROWSER_WINDOWS_USER_DATA_DIR;
-  if (discovery === "file") env.OPENCODE_CONNECT_BROWSER_WINDOWS_USER_DATA_DIR = userDataDir;
-  else env.OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT = discovery === "http"
+  if (configuration === "file") env.OPENCODE_CONNECT_BROWSER_WINDOWS_USER_DATA_DIR = userDataDir;
+  else env.OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT = configuration === "http"
     ? `http://127.0.0.1:${fixture.port}` : `ws://127.0.0.1:${fixture.port}${fixture.path}`;
   backend = new BrowserBackend({ enabled: true, env });
   // Consent tests measure the browser approval gate, independently of lazy
@@ -239,6 +237,21 @@ test("approval connection schemas require authorization and bound the human cons
   assert.equal(browserInputs.connect.safeParse({ browser: "windows", authorized: true, timeoutMs: 120000 }).success, true);
   for (const input of [{}, { leaseId: "lease", connectionId: "connection" }]) assert.equal(browserInputs.detach.safeParse(input).success, false);
   assert.equal(browserInputs.detach.safeParse({ connectionId: "connection" }).success, true);
+  for (const [schema, fields] of [[browserInputs.tabs, {}], [browserInputs.attach, { targetId: "page-a", controlMode: "observe" }]] as const) {
+    assert.equal(schema.safeParse(fields).success, true, "Linux remains the default without a connection handle");
+    assert.equal(schema.safeParse({ ...fields, browser: "windows" }).success, false, "Windows requires an approved connection handle");
+    assert.equal(schema.safeParse({ ...fields, browser: "windows", connectionId: "connection" }).success, true);
+    assert.equal(schema.safeParse({ ...fields, browser: "linux", connectionId: "connection" }).success, false);
+    const published = z.toJSONSchema(schema, { io: "input" });
+    assert.ok(published.properties?.connectionId, "The connection field remains visible to MCP clients");
+    const windows = published.oneOf?.find(variant => {
+      const selection = variant.properties?.browser;
+      return typeof selection === "object" && selection.const === "windows";
+    });
+    assert.ok(windows?.required?.includes("connectionId"), "Published Windows constraints require the approved handle");
+  }
+  assert.equal(browserInputs.status.safeParse({ browser: "windows" }).success, true);
+  assert.equal(browserInputs.status.safeParse({ connectionId: "unused" }).success, false);
 });
 
 test("WS-only Chrome status is passive and discovery requires an approved connection", { timeout: 15000 }, async t => {
@@ -249,7 +262,8 @@ test("WS-only Chrome status is passive and discovery requires an approved connec
   const status = await backend.call("status", { browser: "windows" }, "operator");
   assert.equal(status.reachable, true);
   assert.equal(status.connectionState, "approval_required");
-  await assert.rejects(backend.call("tabs", { browser: "windows" }, "operator"), rejected);
+  await assert.rejects(backend.call("tabs", { browser: "windows", connectionId: "not-approved" }, "operator"), errorCode("approval_required"));
+  await assert.rejects(backend.call("attach", { browser: "windows", connectionId: "not-approved", targetId: "page-a", controlMode: "observe" }, "operator"), errorCode("approval_required"));
   const passive = await fixture.command("stats");
   assert.equal(passive.attempts, 0);
   assert.deepEqual(passive.http, before.http, "Passive status/tabs must not use HTTP discovery on an approval endpoint");
@@ -282,6 +296,7 @@ test("approved discovery and tab attachment use one socket and enforce owner, to
     await assert.rejects(backend.call("attach", { browser: "windows", connectionId: token, targetId: "page-a", controlMode: "observe" }, owner), rejected);
     await assert.rejects(backend.call("detach", { connectionId: token }, owner), rejected);
   }
+  await assert.rejects(backend.call("attach", { targetId: "page-a", controlMode: "observe" }, "operator"), errorCode("lease_conflict"));
   const attached = await backend.call("attach", { browser: "windows", connectionId, targetId: "page-a", controlMode: "observe" }, "operator");
   assert.equal((attached.target as any).targetId, "page-a");
   assert.equal((await backend.call("snapshot", { leaseId: attached.leaseId }, "operator")).targetId, "page-a");
@@ -300,21 +315,34 @@ test("approved discovery and tab attachment use one socket and enforce owner, to
   assert.equal((await fixture.command("stats")).attempts, 1, "Detach/status must not reopen an approval connection");
 });
 
-test("legacy Windows HTTP discovery still permits exact-target attachment without an approval token", { timeout: 15000 }, async t => {
+test("Windows HTTP configuration fails closed before discovery, redirects or consent", { timeout: 15000 }, async t => {
   const context = await setup(t, "http"); if (!context) return;
-  const { backend, fixture } = context;
-  await fixture.command("mode", { value: "legacy" });
-  assert.equal((await backend.call("status", { browser: "windows" }, "operator")).connectionState, "ready");
-  const tabs = await backend.call("tabs", { browser: "windows" }, "operator");
-  assert.deepEqual((tabs.targets as any[]).map(row => row.targetId), ["page-a", "page-b"]);
-  const attached = await backend.call("attach", { browser: "windows", targetId: "page-b", controlMode: "observe" }, "operator");
-  assert.equal((attached.target as any).targetId, "page-b");
-  assert.equal((await backend.call("snapshot", { leaseId: attached.leaseId }, "operator")).targetId, "page-b");
-  await backend.call("detach", { leaseId: attached.leaseId }, "operator");
+  const { backend, fixture, connect, directory } = context;
+  const redirectedDirectory = join(directory, "redirected");
+  await mkdir(redirectedDirectory);
+  const redirected = await startFixture(await browserPython(), redirectedDirectory);
+  t.after(() => redirected.close());
+  for (const mode of ["allow", "deny", "delay"]) {
+    await fixture.command("mode", { value: mode });
+    await fixture.command("redirect", { value: mode === "allow" ? null : `http://127.0.0.1:${redirected.port}/json/version` });
+    const status = await backend.call("status", { browser: "windows" }, "operator");
+    assert.deepEqual((await fixture.command("stats")).http, [], "Invalid Windows HTTP configuration must reject before the first discovery request");
+    assert.equal(status.reachable, false);
+    assert.equal(status.attached, false);
+    assert.equal(status.connectionState, "unreachable");
+    assert.match(String(status.currentIssue), /Windows.*WebSocket/);
+    await assert.rejects(connect(), errorCode("invalid_endpoint"));
+    await assert.rejects(backend.call("tabs", { browser: "windows", connectionId: "not-approved" }, "operator"), errorCode("invalid_endpoint"));
+    await assert.rejects(backend.call("attach", { browser: "windows", connectionId: "not-approved", targetId: "page-a", controlMode: "observe" }, "operator"), errorCode("invalid_endpoint"));
+  }
   const stats = await fixture.command("stats");
-  assert.ok(stats.http.includes("/json/version") && stats.http.includes("/json/list"));
-  assert.equal(stats.accepted, 1);
-  assert.ok(!stats.messages.some(message => message.method === "Browser.close"));
+  assert.deepEqual(stats.http, [], "Invalid Windows HTTP configuration must reject before the first discovery request");
+  assert.equal(stats.attempts, 0, "Invalid configuration must not request Chrome consent");
+  assert.equal(stats.accepted, 0);
+  assert.deepEqual(stats.messages, []);
+  const destination = await redirected.command("stats");
+  assert.deepEqual(destination.http, []);
+  assert.equal(destination.attempts, 0);
 });
 
 test("a connection can be detached before page selection without terminating Chrome", { timeout: 15000 }, async t => {
@@ -337,6 +365,7 @@ test("denied consent returns a controlled rejection without discovery or implici
   const denied = await fixture.command("stats");
   assert.equal(denied.attempts, 1);
   assert.equal(denied.accepted, 0);
+  assert.deepEqual(denied.http, [], "Denied consent must not fall back to HTTP discovery");
   assert.deepEqual(denied.messages, []);
   assert.equal((await backend.call("status", { browser: "windows" }, "operator")).connectionState, "approval_required");
   assert.equal((await fixture.command("stats")).attempts, 1);
@@ -352,7 +381,7 @@ test("pending human approval blocks competing operations and can outlive a ten-s
   // becomes a normal assertion failure instead of an unhandled rejection.
   const outcome = waiting.then(value => ({ value }), error => ({ error }));
   await eventually(async () => (await fixture.command("stats")).attempts === 1, "Connection never reached the approval gate");
-  await assert.rejects(backend.call("tabs", { browser: "windows" }, "other-caller"), errorCode("busy"));
+  await assert.rejects(backend.call("tabs", { browser: "windows", connectionId: "not-approved" }, "other-caller"), errorCode("busy"));
   await assert.rejects(backend.call("status", { browser: "windows" }, "operator"), errorCode("busy"));
   await pause(10500);
   assert.equal(settled, false, "A ten-second library/default deadline prematurely ended human approval");
@@ -370,9 +399,10 @@ test("approval deadline expiry does not reconnect or continue discovery after la
   await assert.rejects(connect(1000), (error: unknown) => error instanceof BrowserError && !error.dispatched && error.verification === "timed_out");
   await fixture.command("allow");
   await backend.call("status", { browser: "windows" }, "operator");
-  await assert.rejects(backend.call("tabs", { browser: "windows" }, "operator"), rejected);
+  await assert.rejects(backend.call("tabs", { browser: "windows", connectionId: "not-approved" }, "operator"), errorCode("approval_required"));
   const stats = await fixture.command("stats");
   assert.equal(stats.attempts, 1);
+  assert.deepEqual(stats.http, [], "Expired consent must not fall back to HTTP discovery");
   assert.deepEqual(stats.messages, []);
 });
 
@@ -421,19 +451,21 @@ test("DevToolsActivePort port changes require a newly approved connection", { ti
 });
 
 test("browser WebSockets reject redirects before contacting another endpoint", { timeout: 30000 }, async t => {
-  for (const discovery of ["file", "http"] as const) await t.test(discovery === "file" ? "approval" : "legacy HTTP", async child => {
-    const context = await setup(child, discovery); if (!context) return;
-    const { backend, fixture, connect, directory } = context;
+  for (const configuration of ["file", "websocket"] as const) await t.test(configuration, async child => {
+    const context = await setup(child, configuration); if (!context) return;
+    const { fixture, connect, directory } = context;
     const redirectedDirectory = join(directory, "redirected");
     await mkdir(redirectedDirectory);
     const redirected = await startFixture(await browserPython(), redirectedDirectory);
     child.after(() => redirected.close());
-    if (discovery === "http") await fixture.command("mode", { value: "legacy" });
     await fixture.command("redirect", { value: `ws://127.0.0.1:${redirected.port}${redirected.path}` });
-    const opening = discovery === "file" ? connect() : backend.call("attach", { browser: "windows", targetId: "page-a", controlMode: "observe" }, "operator");
-    await assert.rejects(opening, (error: unknown) => error instanceof BrowserError && !error.dispatched);
-    assert.equal((await fixture.command("stats")).attempts, 1);
-    assert.equal((await redirected.command("stats")).attempts, 0, "A validated loopback URI must not authorize a redirected CDP destination");
+    await assert.rejects(connect(), (error: unknown) => error instanceof BrowserError && !error.dispatched);
+    const source = await fixture.command("stats");
+    assert.equal(source.attempts, 1);
+    assert.deepEqual(source.http, [], "A rejected WebSocket must not fall back to HTTP discovery");
+    const destination = await redirected.command("stats");
+    assert.equal(destination.attempts, 0, "A validated loopback URI must not authorize a redirected CDP destination");
+    assert.deepEqual(destination.http, []);
   });
 });
 

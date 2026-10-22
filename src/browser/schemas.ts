@@ -4,8 +4,10 @@ import { exposedUnion } from "../schema.js";
 const id = z.string().min(1).max(256);
 const lease = { leaseId: id };
 const timeout = { timeoutMs: z.number().int().min(100).max(30000).optional() };
-const browser = { browser: z.enum(["linux", "windows"]).default("linux") };
-const connection = { connectionId: id.optional() };
+const linux = { browser: z.literal("linux").default("linux") };
+const windows = { browser: z.literal("windows"), connectionId: id.describe("Private caller-bound handle returned by explicit browser.connect approval. Never reconnects implicitly.") };
+const tabFilter = { filter: z.string().max(200).optional(), maxTabs: z.number().int().min(1).max(100).default(50) };
+const attachment = { targetId: id, controlMode: z.enum(["observe", "control"]) };
 const namedTarget = { role: z.string().min(1).max(100), name: z.string().min(1).max(200) };
 export const browserTarget = z.object({ ...namedTarget, frameId: id.optional(), within: z.object(namedTarget).strict().optional().describe("Require one exact named ancestor in the same frame; ambiguous containers are rejected.") }).strict();
 export const conditionSchema = exposedUnion("type", [
@@ -43,11 +45,11 @@ export const browserActionInputs = Object.fromEntries(actionSchema.options.map(v
 const workflowSteps = actionSchema.options.filter(variant => ["click", "fill", "typeText", "select", "keypress", "upload"].includes(variant.shape.action.value)).map(variant =>
   (variant as z.ZodObject).omit({ leaseId: true, authorized: true, elementRef: true }).extend({ target: browserTarget, expected: conditionSchema }).strict());
 export const browserInputs = {
-  status: z.object({ ...browser, ...connection }).strict(),
+  status: exposedUnion("browser", [z.object(linux), z.object({ ...windows, connectionId: windows.connectionId.optional() })]),
   connect: z.object({ browser: z.literal("windows"), authorized: z.literal(true), timeoutMs: z.number().int().min(1000).max(120000).default(60000) }).strict(),
-  tabs: z.object({ ...browser, ...connection, filter: z.string().max(200).optional(), maxTabs: z.number().int().min(1).max(100).default(50) }).strict(),
+  tabs: exposedUnion("browser", [z.object({ ...linux, ...tabFilter }), z.object({ ...windows, ...tabFilter })]),
   launch: z.object({ headless: z.boolean().default(false) }).strict(),
-  attach: z.object({ ...browser, ...connection, targetId: id, controlMode: z.enum(["observe", "control"]) }).strict(),
+  attach: exposedUnion("browser", [z.object({ ...linux, ...attachment }), z.object({ ...windows, ...attachment })]),
   snapshot: z.object({ ...lease, maxNodes: z.number().int().min(1).max(300).default(100), frameId: id.optional(), scopeRef: id.optional().describe("Observe descendants of this current container reference. This snapshot rotates all prior references, including scopeRef."), filter: z.string().max(200).optional() }).strict(),
   action: actionSchema,
   workflow: z.object({ ...lease, authorized: action.authorized, ...timeout, steps: z.array(z.union(workflowSteps)).min(1).max(12) }).strict(),

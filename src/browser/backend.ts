@@ -19,7 +19,7 @@ export async function browserPython(env: NodeJS.ProcessEnv = process.env) {
   const key = createHash("sha256").update(lock).digest("hex").slice(0, 16);
   return join(env.XDG_DATA_HOME ?? join(homedir(), ".local/share"), "opencode-connect/browser", key, "bin/python");
 }
-export function endpoint(value: string): string {
+export function linuxEndpoint(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(url.hostname) || url.username || url.password || url.search || url.hash || url.pathname !== "/" || !url.port) throw new Error("Browser endpoint must be an HTTP loopback IP with an explicit port and no path or credentials");
   return url.origin;
@@ -28,7 +28,7 @@ const exec = promisify(execFile);
 const CHROME_UNIT = "opencode-connect-chrome.service";
 
 export async function browserEndpointReachable(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
-  const url = endpoint(env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
+  const url = linuxEndpoint(env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
   if (new URL(url).hostname !== "127.0.0.1") return false;
   try {
     const response = await fetch(`${url}/json/version`, { signal: AbortSignal.timeout(1000), redirect: "error" });
@@ -306,7 +306,7 @@ export class BrowserBackend {
       if (this.closed || signal?.aborted) throw new BrowserError("cancelled", "Linux Chrome shutdown cancelled before dispatch");
     };
     check();
-    const url = endpoint(this.env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
+    const url = linuxEndpoint(this.env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
     if (new URL(url).hostname !== "127.0.0.1") throw new BrowserError("close_unavailable", "Managed Chrome requires an IPv4 loopback endpoint");
     const profile = join(this.env.XDG_DATA_HOME ?? join(homedir(), ".local/share"), "opencode-connect/chrome-linux");
     const port = new URL(url).port;
@@ -353,7 +353,7 @@ export class BrowserBackend {
     const check = () => {
       if (this.closed || signal?.aborted) throw new BrowserError("cancelled", "Chrome launch cancelled; any already launched Chrome is preserved");
     };
-    const url = endpoint(this.env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
+    const url = linuxEndpoint(this.env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
     const reachable = () => browserEndpointReachable(this.env);
     const existing = await reachable(); check();
     if (existing) return { browser: "linux", reused: true, reachable: true, pid: null };

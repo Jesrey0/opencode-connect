@@ -1,5 +1,10 @@
 # Everyday Windows Chrome compatibility
 
+This is the historical 2026-10-18 investigation and release acceptance record.
+The current [browser contract](browser-capability.md) supports Windows only via
+explicit permission-mode WebSocket connection; Windows HTTP discovery and
+attachment have since been removed. No new live acceptance is claimed here.
+
 OpenCode Connect 0.12.0 supports Chrome's permission-based WebSocket connection to
 the principal's existing Windows browser. Linux remains the default. Windows uses
 native mirrored-network loopback from WSL; no Windows helper, port proxy, extra
@@ -25,7 +30,7 @@ not revive a connection. Loss or replacement of the socket or discovery metadata
 invalidates leases and references. Recovery requires a fresh explicit connection,
 new tab selection and a new snapshot. Uncertain mutations are never replayed.
 Detach, cancellation and worker/connector cleanup close transport resources while
-preserving Chrome and its profile. Legacy HTTP discovery remains supported.
+preserving Chrome and its profile.
 
 ## Verified environment
 
@@ -54,9 +59,13 @@ copied, and no networking configuration changed.
 Automated permission-mode fixtures use the pinned Nodriver dependency and a local
 WebSocket server that returns HTTP 404 for discovery. Cases distinguish passive
 status from consent, enforce owner/token and lease identity, verify socket reuse,
-preserve legacy HTTP behavior, exercise approval denial and delays longer than
-ten seconds, bound consent deadlines and competing operations, invalidate closed
+exercise approval denial and delays longer than ten seconds, bound consent
+deadlines and competing operations, invalidate closed
 sockets and changed metadata, and verify cleanup sends no browser-close command.
+The original fixtures also preserved Windows HTTP attachment without approval;
+that route and those fixtures have been deleted. Current regressions instead
+require HTTP configuration to reject before discovery, redirects or consent, and
+require an approved handle for Windows discovery and attachment.
 
 ## Release verification
 

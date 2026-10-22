@@ -32,7 +32,7 @@ Native Codex plugin configuration does not change for browser activation.
 | --- | --- |
 | `OPENCODE_CONNECT_BROWSER` | Disabled; `1` exposes browser tools. |
 | `OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT` | `http://127.0.0.1:9222`; configured Linux CDP endpoint. |
-| `OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT` | Unset; optional loopback HTTP CDP endpoint or permission-mode browser WebSocket. |
+| `OPENCODE_CONNECT_BROWSER_WINDOWS_ENDPOINT` | Unset; optional exact loopback permission-mode browser WebSocket (`ws://`), never an HTTP endpoint. |
 | `OPENCODE_CONNECT_BROWSER_WINDOWS_USER_DATA_DIR` | Unset; absolute mounted Windows Chrome user data directory. Reads only its bounded `DevToolsActivePort` metadata to discover the current loopback WebSocket; configure this or the Windows endpoint, not both. |
 | `OPENCODE_CONNECT_BROWSER_CHROME` | Auto-detect Linux Chrome/Chromium executable; optional absolute executable path. |
 | `OPENCODE_CONNECT_BROWSER_PYTHON` | Managed environment; optional preinstalled Python with the exact Nodriver version. |
@@ -41,9 +41,13 @@ Native Codex plugin configuration does not change for browser activation.
 | `XDG_DATA_HOME` | `~/.local/share`; managed environment and dedicated Chrome profile parent. |
 
 Debug endpoints require an explicit loopback IP and port without credentials,
-query or fragment. HTTP discovery accepts no path and rejects redirects or a
-WebSocket outside the configured host/port. Windows permission-mode WebSockets
-accept only `/devtools/browser` paths. Never expose or proxy CDP publicly.
+query or fragment. Linux HTTP discovery accepts no path and rejects redirects or
+a WebSocket outside the configured host/port. Windows accepts only `ws://`
+browser endpoints with `/devtools/browser` paths (optionally followed by a browser
+ID), either configured directly or read from `DevToolsActivePort`. A configured
+Windows HTTP endpoint fails closed before any discovery request or consent
+handshake. Neither HTTP nor WebSocket redirects are followed; no Windows HTTP
+fallback exists. Never expose or proxy CDP publicly.
 
 ## Linux and optional Windows Chrome
 
@@ -99,9 +103,9 @@ Detach with `leaseId` after selecting a page, or `connectionId` before selection
 Both close only the transport and release control. Socket loss, metadata changes,
 worker expiry or connector restart invalidate capabilities and require a new
 explicit connect; an endpoint URL cannot revive an old lease. Legacy Windows HTTP
-CDP remains supported. See [Windows compatibility evidence](windows-browser-investigation.md).
-
-
+CDP discovery and attachment are not supported. See the historical
+[Windows permission-mode acceptance evidence](windows-browser-investigation.md);
+source tests do not establish current live-browser acceptance.
 
 ### Linux Chrome process ownership
 
@@ -122,12 +126,12 @@ Names below are the native MCP names; ChatGPT may project punctuation differentl
 
 | Tool | Arguments / result |
 | --- | --- |
-| `browser.status` | Optional `browser` (`linux` default) and `connectionId`; passive endpoint reachability, attachment socket state, `connectionState` and worker diagnostics. This does not verify the full MCP action path or an earlier action outcome. |
+| `browser.status` | Optional `browser` (`linux` default); Windows optionally accepts its approved `connectionId`. Reports passive endpoint reachability, attachment socket state, `connectionState` and worker diagnostics. This does not verify the full MCP action path or an earlier action outcome. |
 | `browser.connect` | Explicit `browser:"windows"`, `authorized:true`, optional `timeoutMs` (1000–120000, default 60000); request Chrome consent and return private `connectionId` plus version. |
-| `browser.tabs` | Optional `browser`, `connectionId`, `filter` and `maxTabs` (1–100, default 50); exact target IDs, sanitized URLs/titles, lease flags and honest truncation. Narrow a truncated list with a title/URL filter. |
+| `browser.tabs` | Optional `browser`, `filter` and `maxTabs` (1–100, default 50); Windows requires its approved `connectionId`, Linux uses no connection handle. Returns exact target IDs, sanitized URLs/titles, lease flags and honest truncation. Narrow a truncated list with a title/URL filter. |
 | `browser.launch` | Optional `headless` (default false); `reused`, reachability and new process ID when applicable. Linux only. |
 | `browser.close` | No arguments; explicitly stop only verified connector-managed Linux Chrome. Reports `alreadyClosed` and `reachable:false`; refuses unrelated instances. |
-| `browser.attach` | Exact `targetId`, `controlMode:observe|control`, optional `browser` and `connectionId`; opaque `leaseId`, generation and target summary. |
+| `browser.attach` | Exact `targetId`, `controlMode:observe|control`, optional `browser`; Windows requires its approved `connectionId`, Linux uses no connection handle. Returns opaque `leaseId`, generation and target summary. |
 | `browser.snapshot` | `leaseId`, optional `maxNodes` (1–300, default 100), `frameId`, container `scopeRef`, name/role substring `filter`; compact AX roles, names, states, references, document generation, frame summaries, truncation and observation errors. |
 | `browser.click`, `browser.right_click`, `browser.double_click`, `browser.hover` | `leaseId`, `elementRef`, `authorized:true`; native Chrome mouse input on the observed element. |
 | `browser.drag` | Drag between observed `sourceRef` and `targetRef` using Chrome mouse events. |
@@ -154,8 +158,9 @@ Rejections require a new observation, never a guessed replacement.
 `frameId` must belong to the selected tab. Same-origin iframes are supported;
 unavailable out-of-process frame trees produce explicit observation errors.
 
-Model-visible tools use distinct, explicitly described operations. The legacy
-action union remains an **internal** backend contract, not a generic MCP executor.
+Model-visible tools use distinct, explicitly described operations. The action
+union is the **internal** backend contract, not a generic MCP executor or a
+compatibility route.
 
 Native input support: `click`, `right_click`, `double_click`, `hover` and
 `drag` use Chrome's CDP mouse events instead of JavaScript `element.click()`.
