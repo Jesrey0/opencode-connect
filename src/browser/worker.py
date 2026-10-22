@@ -595,25 +595,17 @@ class Adapter:
                         raise result
 
     async def target_tree(self, frame_id, target):
-        # Query native AX by exact role/name instead of transferring every
-        # text/layout node merely to verify a large editor.
-        world = await self.conn.send(cdp.page.create_isolated_world(cdp.page.FrameId(frame_id), world_name="opencode-browser-observe"))
-        doc, error = await self.conn.send(cdp.runtime.evaluate("document", context_id=world, object_group="browser-action", silent=True))
-        if error or not doc.object_id:
-            reject("observation_failed", "Target document unavailable")
-        await self.conn.send(cdp.accessibility.enable())
-        try:
-            tree = await self.conn.send(cdp.accessibility.query_ax_tree(object_id=doc.object_id, accessible_name=target["name"], role=target["role"]))
-            by_id = {}
-            for node in tree:
-                if node.backend_dom_node_id:
-                    parents = await self.conn.send(cdp.accessibility.get_ax_node_and_ancestors(backend_node_id=node.backend_dom_node_id))
-                    by_id.update((str(parent.node_id), parent) for parent in parents)
-            containers = await self.conn.send(cdp.accessibility.query_ax_tree(object_id=doc.object_id, accessible_name=target["within"]["name"], role=target["within"]["role"])) if target.get("within") else []
-            return tree, by_id, containers
-        finally:
-            await self.conn.send(cdp.accessibility.disable())
-            await self.conn.send(cdp.runtime.release_object(doc.object_id))
+        # Resolve the target and its named ancestor from one coherent AX tree.
+        # Querying each separately can observe different trees during page churn.
+        nodes = await self.conn.send(cdp.accessibility.get_full_ax_tree(frame_id=cdp.page.FrameId(frame_id)))
+        by_id = {str(node.node_id): node for node in nodes}
+        def named(node, item):
+            return (node.role and node.role.value == item["role"]
+                    and node.name and node.name.value == item["name"])
+        matches = [node for node in nodes if named(node, target)]
+        within = target.get("within")
+        containers = [node for node in nodes if named(node, within)] if within else []
+        return matches, by_id, containers
 
     async def snapshot(self, args, target=None, rotate=True):
         scope = None
