@@ -133,9 +133,9 @@ function inspection(value: Record<string, any>, input: CodexInspectInput) {
   const result = { ...paged, outcome: session.outcome, outcomeBasis: session.outcomeBasis, messageId: null, assistantMessageId: value.assistantMessageId === null ? null : id(value.assistantMessageId), correlationSupported: false as const, terminal: session.executionKnown && session.status !== "inProgress", finish: typeof value.stopReason === "string" ? value.stopReason.slice(0, 64) : null, completedAtMs: typeof value.completedAtMs === "number" ? value.completedAtMs : null, error: value.error ? { type: errorType(value.error) ?? "unavailable", messageOmitted: true } : null, outputTruncated: value.outputTruncated === true, textNextCall: pageNextCall("opencode.inspect", { runtime: "codex", sessionId: input.sessionId, detail: "result", ...(input.textLimit ? { textLimit: input.textLimit } : {}) }, paged) };
   return { session, result, pendingActions: pending(value.pendingActions, session.sessionId) };
 }
-export async function codexInspect(client: OpenCodeClient, input: CodexInspectInput) {
+export async function codexInspect(client: OpenCodeClient, input: CodexInspectInput, signal?: AbortSignal) {
   if (input.messageId || input.selectionCursor || input.candidateAssistantMessageId || input.selectionFingerprint) throw new ConnectorError("Codex exact-prompt result selection is unsupported; query native messages by ID instead");
-  return inspection(await call(client, "inspect", { sessionId: input.sessionId }), input);
+  return inspection(await call(client, "inspect", { sessionId: input.sessionId }, signal), input);
 }
 export async function codexWait(client: OpenCodeClient, sessionId: string, messageId?: string, signal?: AbortSignal, waitMs = 40_000) {
   if (messageId) throw new ConnectorError("Codex wait observes the current session turn; exact-prompt waiting is unsupported");
@@ -205,11 +205,11 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
        };
     }), cursor: { next: value.nextCursor === null ? null : id(value.nextCursor) } };
   }
-  if (input.type === "runtime") return { runtime: "codex", capabilities: capabilities((await call(client, "status", {})).capabilities) };
-  if (input.type === "session") return (await codexInspect(client, { sessionId: id(input.sessionId) })).session;
+  if (input.type === "runtime") return { runtime: "codex", capabilities: capabilities((await call(client, "status", {}, signal)).capabilities) };
+  if (input.type === "session") return (await codexInspect(client, { sessionId: id(input.sessionId) }, signal)).session;
   if (input.type === "permissions") {
     if (input.section !== "pending") throw new ConnectorError("Codex exposes native pending requests, not OpenCode permission rules");
-    const sessionId = id(input.sessionId), value = await call(client, "permissions", { sessionId });
+    const sessionId = id(input.sessionId), value = await call(client, "permissions", { sessionId }, signal);
     if (id(value.sessionId) !== sessionId) throw new ConnectorError("Codex answered for a different native session");
     const requests = pending(value.pendingActions, sessionId);
     return { sessionId, runtime: "codex", ...page(requests, input) };

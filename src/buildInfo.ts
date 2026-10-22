@@ -1,9 +1,34 @@
-import { readFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { lstat, readFile } from "node:fs/promises";
+import { findPackageJSON } from "node:module";
+import { basename, dirname, resolve } from "node:path";
+import * as z from "zod/v4";
 import { VERSION } from "./version.js";
 
 export const SOURCE_BUILD_ID = "source";
+const BUILD_ID_RE = /^[0-9a-f]{16}$/;
+const nullableString = z.string().min(1).nullable();
+const checksum = z.string().regex(/^[0-9a-f]{64}$/);
+const buildRecordSchema = z.object({
+  buildId: z.string().regex(BUILD_ID_RE), version: z.string().min(1),
+  commit: nullableString, commitShort: nullableString, branch: nullableString,
+  dirty: z.boolean().nullable(), builtAt: z.iso.datetime(), nodeVersion: z.string().min(1),
+  integrity: z.object({ sourceHash: checksum, runtimeHash: checksum }).strict(),
+}).strict();
+export type BuildRecord = z.infer<typeof buildRecordSchema>;
+
+export function isValidBuildId(value: string): boolean { return BUILD_ID_RE.test(value); }
+
+// Deployment and runtime identity use exactly the same complete release record.
+export async function loadBuildRecord(root: string): Promise<BuildRecord> {
+  if (!(await lstat(resolve(root, "build.json"))).isFile()) throw new Error(`invalid build.json in ${root}: expected a regular file`);
+  const raw = await readFile(resolve(root, "build.json"), "utf8");
+  let record: BuildRecord;
+  try { record = buildRecordSchema.parse(JSON.parse(raw)); }
+  catch { throw new Error(`invalid build.json in ${root}`); }
+  if (basename(resolve(root)) !== record.buildId) throw new Error(`build.json mismatch in ${root}`);
+  if (!record.integrity.sourceHash.startsWith(record.buildId)) throw new Error(`build.json source identity mismatch in ${root}`);
+  return record;
+}
 
 export type BuildInfo = {
   buildId: string;
@@ -15,26 +40,6 @@ export type BuildInfo = {
   dirty: boolean | null;
   builtAt: string | null;
 };
-
-function asString(value: unknown): string | null {
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function normalizeRelease(parsed: Record<string, unknown>): BuildInfo | null {
-  const buildId = asString(parsed.buildId);
-  if (!buildId || !/^[0-9a-f]{16}$/.test(buildId)) return null;
-  const version = asString(parsed.version) ?? VERSION;
-  return {
-    buildId,
-    version,
-    release: true,
-    commit: asString(parsed.commit),
-    commitShort: asString(parsed.commitShort),
-    branch: asString(parsed.branch),
-    dirty: typeof parsed.dirty === "boolean" ? parsed.dirty : null,
-    builtAt: asString(parsed.builtAt),
-  };
-}
 
 export function sourceBuildInfo(): BuildInfo {
   return {
@@ -49,30 +54,18 @@ export function sourceBuildInfo(): BuildInfo {
   };
 }
 
-async function tryRead(root: string): Promise<BuildInfo | null> {
+// Identity belongs to the loaded package, never the caller's working directory.
+// Built checkouts can also run in source mode. An immutable build directory may
+// never downgrade to source identity when its record is missing or malformed.
+export async function loadBuildInfo(root = dirname(findPackageJSON(import.meta.url)!)): Promise<BuildInfo> {
+  let record: BuildRecord;
   try {
-    const raw = await readFile(resolve(root, "build.json"), "utf8");
-    const parsed = JSON.parse(raw) as Record<string, unknown>;
-    return normalizeRelease(parsed);
-  } catch {
-    return null;
+    record = await loadBuildRecord(root);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT" && !isValidBuildId(basename(resolve(root)))) return sourceBuildInfo();
+    throw error;
   }
-}
-
-// A prepared release carries build.json at its root and runs with that root as
-// cwd (WorkingDirectory=current). A source checkout has no build.json, so it
-// reports the explicit non-release identity instead of pretending to deploy.
-export async function loadBuildInfo(cwd = process.cwd()): Promise<BuildInfo> {
-  const fromCwd = await tryRead(cwd);
-  if (fromCwd) return fromCwd;
-  try {
-    const moduleRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
-    if (moduleRoot !== cwd) {
-      const fromModule = await tryRead(moduleRoot);
-      if (fromModule) return fromModule;
-    }
-  } catch {
-    // fall through to source identity
-  }
-  return sourceBuildInfo();
+  if (record.version !== VERSION) throw new Error("build.json version does not match the loaded connector");
+  const { nodeVersion, integrity, ...info } = record;
+  return { ...info, release: true };
 }

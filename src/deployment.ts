@@ -1,30 +1,22 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { isDeepStrictEqual, promisify } from "node:util";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { acquireFileLock } from "./fileLock.js";
+import { isValidBuildId, loadBuildRecord, type BuildRecord } from "./buildInfo.js";
 
 const execFileAsync = promisify(execFile);
 
 export const SERVICE_NAME = "opencode-connect.service";
-export const BUILD_ID_RE = /^[0-9a-f]{16}$/;
 const FIXED_SOURCE_FILES = ["package.json", "package-lock.json", "tsconfig.json"];
 const CODEX_PLUGIN_DIR = path.join("packages", "codex-plugin");
-const CODEX_PLUGIN_FILES = ["package.json", "src/index.js", "src/codex.js", "src/direct.js", "src/usage.js", "src/stdio.js"];
 
-async function assertWorkspacePlugin(sourceDir: string): Promise<void> {
+async function assertWorkspaceDeclared(sourceDir: string): Promise<void> {
   const manifest = JSON.parse(await fs.readFile(path.join(sourceDir, "package.json"), "utf8"));
   if (!Array.isArray(manifest.workspaces) || !manifest.workspaces.includes("packages/codex-plugin")) {
     throw new Error("incomplete Codex workspace: root manifest must declare packages/codex-plugin");
-  }
-  for (const name of CODEX_PLUGIN_FILES) {
-    try {
-      if (!(await fs.lstat(path.join(sourceDir, CODEX_PLUGIN_DIR, name))).isFile()) throw new Error();
-    } catch {
-      throw new Error(`incomplete Codex workspace: missing ${CODEX_PLUGIN_DIR}/${name}`);
-    }
   }
 }
 
@@ -36,17 +28,6 @@ export type SourceMeta = {
   dirty: boolean | null;
 };
 
-export type BuildRecord = {
-  buildId: string;
-  version: string;
-  commit: string | null;
-  commitShort: string | null;
-  branch: string | null;
-  dirty: boolean | null;
-  builtAt: string;
-  nodeVersion: string;
-};
-
 export type LinkState = { buildId: string; path: string } | null;
 
 export type DeploymentPaths = {
@@ -55,10 +36,6 @@ export type DeploymentPaths = {
   currentLink: string;
   previousLink: string;
 };
-
-export function isValidBuildId(value: string): boolean {
-  return BUILD_ID_RE.test(value);
-}
 
 export function resolveBaseDir(env: NodeJS.ProcessEnv = process.env, home = os.homedir()): string {
   const override = env.OPENCODE_CONNECT_LIB_DIR?.trim();
@@ -128,7 +105,7 @@ export async function getSourceMeta(sourceDir: string): Promise<SourceMeta> {
 }
 
 async function collectSourceFiles(sourceDir: string): Promise<string[]> {
-  await assertWorkspacePlugin(sourceDir);
+  await assertWorkspaceDeclared(sourceDir);
   const found: string[] = [];
   for (const name of FIXED_SOURCE_FILES) {
     const stat = await fs.lstat(path.join(sourceDir, name));
@@ -141,7 +118,9 @@ async function collectSourceFiles(sourceDir: string): Promise<string[]> {
   for (const dir of [path.join(sourceDir, "packages"), codexPlugin]) {
     if (!(await fs.lstat(dir)).isDirectory()) throw new Error(`release source must be a regular directory: ${path.relative(sourceDir, dir)}`);
   }
-  found.push(path.join(CODEX_PLUGIN_DIR, "package.json"));
+  const pluginManifest = path.join(CODEX_PLUGIN_DIR, "package.json");
+  if (!(await fs.lstat(path.join(sourceDir, pluginManifest))).isFile()) throw new Error(`release source must be a regular file: ${pluginManifest}`);
+  found.push(pluginManifest);
   const stack: string[] = [
     path.join(sourceDir, "src"),
     path.join(sourceDir, "scripts"),
@@ -162,7 +141,7 @@ async function collectSourceFiles(sourceDir: string): Promise<string[]> {
   return [...new Set(found)].sort();
 }
 
-export async function hashSourceTree(sourceDir: string): Promise<{ buildId: string; files: string[] }> {
+export async function hashSourceTree(sourceDir: string): Promise<{ buildId: string; sourceHash: string; files: string[] }> {
   const files = await collectSourceFiles(sourceDir);
   const overall = createHash("sha256");
   overall.update(`count:${files.length}\n`);
@@ -171,7 +150,36 @@ export async function hashSourceTree(sourceDir: string): Promise<{ buildId: stri
     const fileHash = createHash("sha256").update(data).digest("hex");
     overall.update(`${rel}\0${fileHash}\n`);
   }
-  return { buildId: overall.digest("hex").slice(0, 16), files };
+  const sourceHash = overall.digest("hex");
+  return { buildId: sourceHash.slice(0, 16), sourceHash, files };
+}
+
+// Seal generated output and the pruned installation as well as source inputs.
+// npm workspace/.bin links are permitted only within this release; their targets
+// are hashed as links, and their actual files are covered by the source/runtime
+// inventories. No external state can silently participate in an immutable build.
+async function hashRuntimeTree(root: string): Promise<string> {
+  const hash = createHash("sha256");
+  const canonicalRoot = await fs.realpath(root);
+  async function visit(relative: string): Promise<void> {
+    const full = path.join(root, relative);
+    const stat = await fs.lstat(full);
+    if (stat.isSymbolicLink()) {
+      const target = await fs.realpath(full);
+      if (!target.startsWith(canonicalRoot + path.sep)) throw new Error(`external release runtime link: ${relative}`);
+      hash.update(`link:${relative}\0${await fs.readlink(full)}\n`);
+    } else if (stat.isDirectory()) {
+      hash.update(`dir:${relative}\n`);
+      for (const entry of (await fs.readdir(full)).sort()) await visit(path.join(relative, entry));
+    } else if (stat.isFile()) {
+      hash.update(`file:${relative}\0${stat.mode & 0o111}\0${createHash("sha256").update(await fs.readFile(full)).digest("hex")}\n`);
+    } else throw new Error(`invalid release runtime file: ${relative}`);
+  }
+  for (const relative of ["dist", "node_modules"]) {
+    if (!(await fs.lstat(path.join(root, relative))).isDirectory()) throw new Error(`release runtime must be a regular directory: ${relative}`);
+    await visit(relative);
+  }
+  return hash.digest("hex");
 }
 
 export async function readSourceVersion(sourceDir: string): Promise<string> {
@@ -212,39 +220,33 @@ async function acquireDeploymentLock(paths: DeploymentPaths): Promise<() => void
   return acquireFileLock(path.join(paths.baseDir, "deploy.lock.sqlite"), "deployment");
 }
 
-export async function loadBuildRecord(buildDir: string): Promise<BuildRecord> {
-  const raw = await fs.readFile(path.join(buildDir, "build.json"), "utf8");
-  let parsed: Partial<BuildRecord>;
-  try {
-    parsed = JSON.parse(raw) as Partial<BuildRecord>;
-  } catch {
-    throw new Error(`invalid build.json in ${buildDir}`);
+async function verifyInstalledBuild(buildDir: string, record: BuildRecord, exec: ExecFn): Promise<void> {
+  if ((await hashSourceTree(buildDir)).sourceHash !== record.integrity.sourceHash) throw new Error(`source integrity mismatch in build ${record.buildId}`);
+  if (await readSourceVersion(buildDir) !== record.version) throw new Error(`build.json version mismatch in build ${record.buildId}`);
+  if (!(await fs.lstat(path.join(buildDir, "dist/src/server.js"))).isFile()) throw new Error("missing regular dist/src/server.js");
+  if (await hashRuntimeTree(buildDir) !== record.integrity.runtimeHash) throw new Error(`runtime integrity mismatch in build ${record.buildId}`);
+  // Run only after checksums pass. These imports never start the connector,
+  // plugin setup, native service or a model turn. Verify the compiled identity
+  // against the staged manifest, not the deployment tool's own VERSION.
+  await exec("node", ["scripts/verify-integration.mjs"], buildDir);
+  await exec("node", ["--input-type=module", "-e", `
+    import { loadBuildInfo } from './dist/src/buildInfo.js';
+    const info = await loadBuildInfo();
+    if (!info.release || info.buildId !== ${JSON.stringify(record.buildId)} || info.version !== ${JSON.stringify(record.version)})
+      throw new Error('compiled release identity mismatch');
+  `], buildDir);
+  // Validators must not have changed the candidate they just checked.
+  if ((await hashSourceTree(buildDir)).sourceHash !== record.integrity.sourceHash || await hashRuntimeTree(buildDir) !== record.integrity.runtimeHash) {
+    throw new Error(`release integrity changed during verification in build ${record.buildId}`);
   }
-  if (!parsed || typeof parsed.buildId !== "string" || !isValidBuildId(parsed.buildId)) {
-    throw new Error(`invalid build.json in ${buildDir}`);
-  }
-  if (path.basename(path.resolve(buildDir)) !== parsed.buildId) throw new Error(`build.json mismatch in ${buildDir}`);
-  if (typeof parsed.version !== "string" || typeof parsed.builtAt !== "string") {
-    throw new Error(`incomplete build.json in ${buildDir}`);
-  }
-  return parsed as BuildRecord;
+  if (!isDeepStrictEqual(await loadBuildRecord(buildDir), record)) throw new Error(`build.json changed during verification in build ${record.buildId}`);
 }
 
-async function assertRunnableBuild(buildDir: string, buildId: string): Promise<void> {
-  await loadBuildRecord(buildDir);
-  await assertWorkspacePlugin(buildDir);
-  try {
-    const stat = await fs.stat(path.join(buildDir, "dist", "src", "server.js"));
-    if (!stat.isFile()) throw new Error();
-  } catch {
-    throw new Error(`build ${buildId} is incomplete: missing dist/src/server.js`);
-  }
-  try {
-    const stat = await fs.stat(path.join(buildDir, "node_modules"));
-    if (!stat.isDirectory()) throw new Error();
-  } catch {
-    throw new Error(`build ${buildId} is incomplete: missing node_modules`);
-  }
+async function assertRunnableBuild(buildDir: string, exec: ExecFn): Promise<BuildRecord> {
+  if (!(await fs.lstat(buildDir)).isDirectory()) throw new Error(`release must be a regular directory: ${buildDir}`);
+  const record = await loadBuildRecord(buildDir);
+  await verifyInstalledBuild(buildDir, record, exec);
+  return record;
 }
 
 export async function copySourceTree(sourceDir: string, stageDir: string): Promise<void> {
@@ -282,43 +284,34 @@ export async function prepareBuild(options: {
   const releaseLock = await acquireDeploymentLock(paths);
   try {
   const exec = options.exec ?? defaultExec;
-  const { buildId } = await hashSourceTree(sourceDir);
+  const { buildId, sourceHash } = await hashSourceTree(sourceDir);
   // README is a source acceptance artifact, deliberately not a release asset.
   // Check it before staging or reusing a build; immutable installs use the
   // separate integration gate without depending on source documentation.
   await exec("node", ["scripts/verify-release-version.mjs"], sourceDir);
   const target = buildDirFor(paths, buildId);
-  try {
-    const record = await loadBuildRecord(target);
-    await assertRunnableBuild(target, buildId);
-    return { buildId, path: target, reused: true, record };
-  } catch (error: unknown) {
-    if (error && typeof error === "object" && "code" in error && (error as { code: unknown }).code === "ENOENT") {
-      // fall through to fresh build
-    } else if (error instanceof Error && /incomplete|invalid|mismatch/.test(error.message)) {
-      const [current, previous] = await Promise.all([
-        readLinkState(paths.currentLink),
-        readLinkState(paths.previousLink),
-      ]);
-      const protectedBy = [
-        current?.path === target ? "current" : null,
-        previous?.path === target ? "previous" : null,
-      ].filter(Boolean);
-      if (protectedBy.length > 0) {
-        throw new Error(`refusing to replace corrupt build ${buildId}: referenced by ${protectedBy.join(" and ")}`);
-      }
-      await fs.rm(target, { recursive: true, force: true });
-    } else {
-      throw error;
+  const exists = await fs.lstat(target).then(() => true, (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return false;
+    throw error;
+  });
+  if (exists) {
+    // Immutable candidates are never repaired/deleted implicitly, even when
+    // unreferenced. A missing record is corruption, not a fresh-build signal.
+    try {
+      const record = await assertRunnableBuild(target, exec);
+      if (record.integrity.sourceHash !== sourceHash) throw new Error("source integrity mismatch with requested snapshot");
+      return { buildId, path: target, reused: true, record };
+    } catch (error) {
+      throw new Error(`refusing to reuse corrupt build ${buildId}`, { cause: error });
     }
   }
   const meta = await getSourceMeta(sourceDir);
-  const stage = path.join(paths.buildsDir, `.stage-${buildId}-${process.pid}`);
-  await fs.rm(stage, { recursive: true, force: true });
+  await fs.mkdir(paths.buildsDir, { recursive: true });
+  const stagingRoot = await fs.mkdtemp(path.join(paths.buildsDir, `.stage-${buildId}-`));
+  const stage = path.join(stagingRoot, buildId);
   try {
-    await fs.mkdir(paths.buildsDir, { recursive: true });
     await copySourceTree(sourceDir, stage);
-    if ((await hashSourceTree(stage)).buildId !== buildId) throw new Error("source changed during staging; retry from a stable source snapshot");
+    if ((await hashSourceTree(stage)).sourceHash !== sourceHash) throw new Error("source changed during staging; retry from a stable source snapshot");
     const version = await readSourceVersion(stage);
     // Build in the isolated release tree with the full locked toolchain, then
     // prune development-only dependencies so the installed release remains
@@ -326,8 +319,7 @@ export async function prepareBuild(options: {
     await exec("npm", ["ci", "--include=dev"], stage);
     await exec("npm", ["run", "build"], stage);
     await exec("npm", ["prune", "--omit=dev"], stage);
-    await exec("node", ["scripts/verify-integration.mjs"], stage);
-    if ((await hashSourceTree(stage)).buildId !== buildId) throw new Error("release inputs changed during build; refusing mismatched build identity");
+    if ((await hashSourceTree(stage)).sourceHash !== sourceHash) throw new Error("release inputs changed during build; refusing mismatched build identity");
     const record: BuildRecord = {
       buildId,
       version,
@@ -337,12 +329,16 @@ export async function prepareBuild(options: {
       dirty: meta.dirty,
       builtAt: new Date().toISOString(),
       nodeVersion: process.version,
+      integrity: { sourceHash, runtimeHash: await hashRuntimeTree(stage) },
     };
+    // The stage has the final leaf name so compiled package-relative identity
+    // is checked before publication as well as before any later activation.
     await fs.writeFile(path.join(stage, "build.json"), `${JSON.stringify(record, null, 2)}\n`);
+    await verifyInstalledBuild(stage, record, exec);
     await fs.rename(stage, target);
     return { buildId, path: target, reused: false, record };
   } finally {
-    await fs.rm(stage, { recursive: true, force: true });
+    await fs.rm(stagingRoot, { recursive: true, force: true });
   }
   } finally {
     releaseLock();
@@ -433,6 +429,7 @@ export async function activateBuild(
     timeoutMs?: number;
     systemctl?: SystemctlFn;
     fetchHealth?: FetchHealthFn;
+    exec?: ExecFn;
   } = {},
 ): Promise<ActivateResult> {
   if (!isValidBuildId(buildId)) throw new Error(`invalid buildId: ${buildId}`);
@@ -440,8 +437,9 @@ export async function activateBuild(
   const releaseLock = await acquireDeploymentLock(paths);
   try {
   const systemctl = options.systemctl ?? defaultSystemctl;
+  const exec = options.exec ?? defaultExec;
   const target = buildDirFor(paths, buildId);
-  await assertRunnableBuild(target, buildId);
+  await assertRunnableBuild(target, exec);
   const oldCurrent = await readLinkState(paths.currentLink);
   if (oldCurrent && oldCurrent.path === target) {
     await systemctl("restart");
@@ -450,6 +448,7 @@ export async function activateBuild(
     return { buildId, path: target, previousBuildId: prev?.buildId ?? null };
   }
   const oldPrevious = await readLinkState(paths.previousLink);
+  if (oldCurrent) await assertRunnableBuild(oldCurrent.path, exec);
   let wasActive = true;
   try {
     wasActive = (await systemctl("is-active")).trim() === "active";
@@ -468,6 +467,7 @@ export async function activateBuild(
       throw new ActivationFailedError(`${activationError} (no previous target to restore)`, "not-needed");
     }
     try {
+      await assertRunnableBuild(oldCurrent.path, exec);
       await pointLinkAtomically(paths.currentLink, oldCurrent.path);
       if (oldPrevious) await pointLinkAtomically(paths.previousLink, oldPrevious.path);
       else await fs.rm(paths.previousLink, { force: true });
@@ -506,16 +506,18 @@ export async function rollbackBuild(options: {
   timeoutMs?: number;
   systemctl?: SystemctlFn;
   fetchHealth?: FetchHealthFn;
+  exec?: ExecFn;
 } = {}): Promise<RollbackResult> {
   const paths = deploymentPaths(options.baseDir ?? resolveBaseDir());
   const releaseLock = await acquireDeploymentLock(paths);
   try {
   const systemctl = options.systemctl ?? defaultSystemctl;
+  const exec = options.exec ?? defaultExec;
   const current = await readLinkState(paths.currentLink);
   const previous = await readLinkState(paths.previousLink);
   if (!previous) throw new Error("no previous build to roll back to");
   if (!isValidBuildId(previous.buildId)) throw new Error(`previous target is not a build: ${previous.path}`);
-  await assertRunnableBuild(previous.path, previous.buildId);
+  await assertRunnableBuild(previous.path, exec);
   // Swap so rollback stays reversible: previous becomes current, old current
   // becomes the new previous.
   await pointLinkAtomically(paths.currentLink, previous.path);
@@ -532,6 +534,7 @@ export async function rollbackBuild(options: {
   } catch (error) {
     const rollbackError = error instanceof Error ? error.message : String(error);
     try {
+      if (current) await assertRunnableBuild(current.path, exec);
       if (current) await pointLinkAtomically(paths.currentLink, current.path);
       else await fs.rm(paths.currentLink, { force: true });
       await pointLinkAtomically(paths.previousLink, previous.path);
@@ -573,6 +576,7 @@ export async function deploymentStatus(options: {
   url?: string;
   systemctl?: SystemctlFn;
   fetchHealth?: FetchHealthFn;
+  exec?: ExecFn;
 } = {}): Promise<DeploymentStatus> {
   const baseDir = path.resolve(options.baseDir ?? resolveBaseDir());
   const paths = deploymentPaths(baseDir);
@@ -610,7 +614,7 @@ export async function deploymentStatus(options: {
     let runnable = false;
     if (valid) {
       try {
-        await assertRunnableBuild(link.path, link.buildId);
+        await assertRunnableBuild(link.path, options.exec ?? defaultExec);
         runnable = true;
       } catch {
         runnable = false;

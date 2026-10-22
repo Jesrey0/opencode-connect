@@ -491,14 +491,9 @@ does not clear retry state. Wait continues through backoff until native executio
 ends, input is required, or its bounded timeout expires. Step failures and retry
 events alone never authorize terminal notifications.
 
-In pinned OpenCode 2.0.22, the [native retry runner](https://github.com/anomalyco/opencode/blob/v2.0.22/packages/core/src/session/runner/retry.ts)
-publishes durable `session.retry.scheduled` events, and the [message projector](https://github.com/anomalyco/opencode/blob/v2.0.22/packages/core/src/session/message-updater.ts)
-sets `assistant.retry`, clearing it on the next step start, step failure, or
-execution termination. The [service active-session endpoint](https://github.com/anomalyco/opencode/blob/v2.0.22/packages/server/src/handlers/session.ts)
-only returns `type: running`; the client's legacy `session.status` retry union is
-not a recoverable service status snapshot. These projections therefore read
-canonical message metadata, without caching event hints or interpreting private
-provider payloads. Current retry recovery reads at most 20 recent messages and
+Retry projections read canonical assistant message metadata, without caching
+event hints or interpreting private provider payloads. Current retry recovery
+reads at most 20 recent messages and
 stops at the newest assistant or user/idle boundary. `retry: null` means no retry
 was observed in that bounded view, not that the provider cannot retry. A failed
 extra status read preserves inventory and exposes sanitized `retryReadError`;
@@ -836,7 +831,8 @@ Build identity is the 16-hex SHA-256 over `package.json`,
 `scripts/`, and the Codex workspace manifest, directory entry and `src/`.
 Hashing and staging use the same inventory. A dirty tree is
 allowed; commit/branch/dirty metadata is observability-only in `build.json`.
-Identical content reuses the existing build directory and never rebuilds.
+Identical content reuses an existing build only after full integrity and installed
+contract verification; corrupt candidates are never implicitly deleted or repaired.
 
 ```bash
 npm run build
@@ -848,8 +844,15 @@ npm run deploy -- rollback                 # switch to previous, restart, verify
 
 `prepare` copies runtime sources into a staging directory, installs the full
 locked toolchain, compiles there, prunes development-only dependencies, writes
-`build.json`, and renames into place. It never uses the checkout
-`node_modules`/`dist`.
+`build.json`, verifies the pruned integration contract and compiled runtime identity,
+and renames into place. It never uses the checkout `node_modules`/`dist`.
+The strict record seals the full source hash plus `dist` and the pruned
+`node_modules` tree (including executable bits and internal link targets).
+Reuse, activation, rollback and runnable-status checks rehash these inventories and
+rerun installed integration/identity checks before accepting a build. External
+runtime links and symlinked source inputs are rejected. These checks detect
+corruption; they are not a signature or protection from a storage owner rewriting
+both artifacts and their checksums. Releases must remain immutable after validation.
 `activate` preserves the old `current` target in `previous`, restarts only
 `opencode-connect.service` (`systemctl --user`), and polls `/health` until the
 exact `buildId` matches. On verification failure it restores the old target
@@ -857,14 +860,19 @@ and unit state when possible and reports rollback failure separately.
 `rollback` swaps `current`/`previous` so a second rollback restores.
 These operations manage the connector only. They do not migrate global OpenCode
 plugin configuration or verify/reload the loaded Codex plugin. Record and restore
-the matching plugin configuration separately; older rollback targets may contain
-no workspace plugin. See [architecture](docs/architecture.md) for coordinated
+the matching plugin configuration separately. Unsealed historical records and
+connector-only builds are not supported rollback candidates; independently prepare
+and accept a complete rollback pair before cutover. There is no old-record reader
+or automatic conversion. See [architecture](docs/architecture.md) for coordinated
 acceptance and immutable plugin-path guidance. A matching `/health` build ID is
 not proof of Codex RPC/quota readiness.
 
 `/health` reports `{ version, buildId, build }` alongside `upstream`.
 Deployed releases report their content hash; source runs (`npm run dev`,
 checkout `dist`) report the explicit non-release identity `buildId: "source"`.
+Identity is resolved from the loaded package, never from process cwd. Invalid
+release metadata, a missing record in a build-ID directory, or compiled version
+drift fails closed instead of silently reporting source mode.
 
 The unit template at `deploy/systemd/opencode-connect.service` points at
 `~/.local/lib/opencode-connect/current` for both working directory and

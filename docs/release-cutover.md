@@ -17,10 +17,21 @@ runtime inspection.
   not a separate MCP server. Its stable package name remains `opencode-codex-subagent`.
 - Installed releases live under `~/.local/lib/opencode-connect/builds/<buildId>/`.
   Release identity covers connector/plugin source, manifests, and build scripts.
+- `build.json` must have the complete current record, including full source and
+  installed runtime checksums. Reuse, activation, rollback and runnable status
+  rehash source, `dist` and pruned `node_modules`, rerun the installed integration
+  verifier and check compiled package-relative identity. Missing or tampered files
+  fail before service/link changes. Corrupt existing candidates are preserved,
+  never automatically rebuilt. Keep release storage immutable; checksums are not
+  signatures or protection against an owner replacing artifacts and the record.
 - Supported source and runnable release trees must declare and contain the complete
   plugin workspace. Connector-only releases are not accepted by this source's
   deployment implementation. Validate the recorded rollback release itself rather
   than assuming an older accepted build remains suitable.
+- Unsealed historical build records are unsupported, with no conversion or
+  compatibility reader. Before cutover, independently prepare and accept a sealed
+  rollback pair. Activation also validates the old current target for recovery;
+  automatic recovery never restarts an invalid candidate.
 - Configure the immutable `<builds>/<buildId>/packages/codex-plugin/src` directory,
   never a moving `current` path. The pinned OpenCode 2.0.24 loader resolves a local
   directory's `server` or `index`, not package `main`/`exports`. New releases omit

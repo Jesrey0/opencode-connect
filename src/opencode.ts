@@ -377,7 +377,8 @@ export class OpenCodeBackend {
       try {
         const result = query.runtime === "codex"
           ? await codexQuery(client, query, signal)
-          : await resolveNativeQuery(client, query);
+          : await resolveNativeQuery(client, query, signal);
+        signal?.throwIfAborted();
         results.push({ index, type: query.type, result });
       } catch (error) {
         signal?.throwIfAborted();

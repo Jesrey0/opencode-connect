@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { promisify } from "node:util";
 import { once } from "node:events";
 import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import * as os from "node:os";
@@ -14,8 +15,6 @@ import {
   getSourceMeta,
   hashSourceTree,
   healthUrl,
-  isValidBuildId,
-  loadBuildRecord,
   parseHealthPayload,
   pointLinkAtomically,
   prepareBuild,
@@ -23,8 +22,9 @@ import {
   resolveBaseDir,
   rollbackBuild,
   waitForBuild,
+  type ExecFn,
 } from "../src/deployment.js";
-import { loadBuildInfo, sourceBuildInfo } from "../src/buildInfo.js";
+import { isValidBuildId, loadBuildRecord } from "../src/buildInfo.js";
 
 async function tempDir(prefix: string): Promise<string> {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -47,26 +47,39 @@ function fakeSource(tree: Record<string, string>): Promise<string> {
 
 const workspaceFiles: Record<string, string> = {
   "package.json": JSON.stringify({ name: "x", version: "0.10.0", workspaces: ["packages/codex-plugin"] }),
-  "scripts/verify-integration.mjs": "// fixture verifier\n",
+  "scripts/verify-release-version.mjs": "// fixture source gate\n",
+  "scripts/verify-integration.mjs": 'await import("../packages/codex-plugin/src/index.js");\n',
   "packages/codex-plugin/package.json": JSON.stringify({ name: "opencode-codex-subagent", version: "0.3.1" }),
-  ...Object.fromEntries(["index", "codex", "direct", "permissions", "usage", "stdio"].map(name => [`packages/codex-plugin/src/${name}.js`, "export {};\n"])),
+  ...Object.fromEntries(["codex", "direct", "permissions", "usage", "stdio", "app-server", "outcomes"].map(name => [`packages/codex-plugin/src/${name}.js`, "export {};\n"])),
+  "packages/codex-plugin/src/index.js": 'import "./app-server.js"; import "./outcomes.js";\n',
 };
 
-async function seedBuild(baseDir: string, buildId: string): Promise<string> {
-  const paths = deploymentPaths(baseDir);
-  const dir = buildDirFor(paths, buildId);
-  await mkdir(path.join(dir, "dist", "src"), { recursive: true });
-  await mkdir(path.join(dir, "node_modules"), { recursive: true });
-  for (const [rel, content] of Object.entries(workspaceFiles)) {
-    await mkdir(path.dirname(path.join(dir, rel)), { recursive: true });
-    await writeFile(path.join(dir, rel), content);
+const fixtureExec: ExecFn = async (cmd, args, cwd) => {
+  if (cmd === "node") {
+    await promisify(execFile)(process.execPath, args, { cwd });
+  } else if (args[0] === "ci") {
+    await mkdir(path.join(cwd, "node_modules/fixture"), { recursive: true });
+    await writeFile(path.join(cwd, "node_modules/fixture/index.js"), "export {};\n");
+    await symlink("../packages/codex-plugin", path.join(cwd, "node_modules/opencode-codex-subagent"));
+  } else if (args[0] === "run") {
+    await mkdir(path.join(cwd, "dist/src"), { recursive: true });
+    await writeFile(path.join(cwd, "dist/src/server.js"), "built\n");
+    const { version } = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
+    await writeFile(path.join(cwd, "dist/src/buildInfo.js"), `
+      import { readFile } from 'node:fs/promises';
+      export async function loadBuildInfo() {
+        const record = JSON.parse(await readFile(new URL('../../build.json', import.meta.url), 'utf8'));
+        if (record.version !== ${JSON.stringify(version)}) throw new Error('compiled version mismatch');
+        return { ...record, release: true };
+      }
+    `);
   }
-  await writeFile(path.join(dir, "dist", "src", "server.js"), "seed");
-  await writeFile(path.join(dir, "build.json"), JSON.stringify({
-    buildId, version: "0.5.0", commit: null, commitShort: null, branch: null,
-    dirty: null, builtAt: new Date().toISOString(), nodeVersion: process.version,
-  }));
-  return dir;
+};
+
+async function seedBuild(baseDir: string, label: string, sourceDir?: string) {
+  const source = sourceDir ?? await fakeSource({ "src/identity.ts": label });
+  try { return await prepareBuild({ sourceDir: source, baseDir, exec: fixtureExec }); }
+  finally { if (!sourceDir) await rm(source, { recursive: true, force: true }); }
 }
 
 test("build ids are 16-hex and validated", () => {
@@ -170,10 +183,10 @@ test("declared workspace packages cannot be silently omitted or partially staged
   const destination = await tempDir("opencode-deploy-missing-plugin-");
   try {
     await rm(path.join(source, "packages/codex-plugin"), { recursive: true });
-    await assert.rejects(copySourceTree(source, destination), /incomplete Codex workspace.*package.json/);
+    await assert.rejects(copySourceTree(source, destination), /ENOENT/);
     await mkdir(path.join(source, "packages/codex-plugin"), { recursive: true });
     await writeFile(path.join(source, "packages/codex-plugin/package.json"), "{}");
-    await assert.rejects(hashSourceTree(source), /incomplete Codex workspace.*index.js/);
+    await assert.rejects(hashSourceTree(source), /ENOENT/);
   } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(destination, { recursive: true, force: true })]); }
 });
 
@@ -185,11 +198,11 @@ test("connector-only sources and builds fail the mandatory workspace invariant b
     await assert.rejects(hashSourceTree(source), /root manifest must declare packages\/codex-plugin/);
     await assert.rejects(copySourceTree(source, path.join(base, "copy")), /root manifest must declare/);
     await assert.rejects(prepareBuild({ sourceDir: source, baseDir: base, exec: async () => { assert.fail("tooling must not run"); } }), /root manifest must declare/);
-    const build = await seedBuild(base, "aaaaaaaaaaaaaaaa");
-    await writeFile(path.join(build, "package.json"), "{}");
+    const build = await seedBuild(base, "a");
+    await writeFile(path.join(build.path, "package.json"), "{}");
     const systemctl = async () => { assert.fail("service must not be touched"); return ""; };
-    await assert.rejects(activateBuild("aaaaaaaaaaaaaaaa", { baseDir: base, systemctl }), /root manifest must declare/);
-    await pointLinkAtomically(deploymentPaths(base).previousLink, build);
+    await assert.rejects(activateBuild(build.buildId, { baseDir: base, systemctl }), /root manifest must declare/);
+    await pointLinkAtomically(deploymentPaths(base).previousLink, build.path);
     await assert.rejects(rollbackBuild({ baseDir: base, systemctl }), /root manifest must declare/);
     assert.equal(await readLinkState(deploymentPaths(base).currentLink), null);
   } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
@@ -198,11 +211,91 @@ test("connector-only sources and builds fail the mandatory workspace invariant b
 test("workspace build validation rejects missing plugin code before any service action", async () => {
   const base = await tempDir("opencode-deploy-incomplete-plugin-");
   try {
-    const build = await seedBuild(base, "aaaaaaaaaaaaaaaa");
-    await writeFile(path.join(build, "package.json"), JSON.stringify({ workspaces: ["packages/codex-plugin"] }));
-    await rm(path.join(build, "packages/codex-plugin/src/usage.js"));
-    await assert.rejects(activateBuild("aaaaaaaaaaaaaaaa", { baseDir: base, systemctl: async () => { assert.fail("service must not be touched"); } }), /incomplete Codex workspace/);
+    const build = await seedBuild(base, "a");
+    await rm(path.join(build.path, "packages/codex-plugin/src/usage.js"));
+    await assert.rejects(activateBuild(build.buildId, { baseDir: base, systemctl: async () => { assert.fail("service must not be touched"); } }), /source integrity mismatch/);
   } finally { await rm(base, { recursive: true, force: true }); }
+});
+
+for (const name of ["app-server", "outcomes"]) {
+  test(`prepare rejects an omitted ${name}.js through the installed import graph, not a static plugin list`, async () => {
+    const source = await fakeSource({ "src/a.ts": "export const a = 1;" });
+    const base = await tempDir("opencode-deploy-omitted-");
+    try {
+      await rm(path.join(source, `packages/codex-plugin/src/${name}.js`));
+      const { buildId } = await hashSourceTree(source);
+      await assert.rejects(prepareBuild({ sourceDir: source, baseDir: base, exec: fixtureExec }), /ERR_MODULE_NOT_FOUND/);
+      await assert.rejects(stat(buildDirFor(deploymentPaths(base), buildId)), { code: "ENOENT" });
+      assert.equal(await readLinkState(deploymentPaths(base).currentLink), null);
+    } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
+  });
+}
+
+const corruptions: Record<string, (root: string) => Promise<void>> = {
+  "missing app-server.js": root => rm(path.join(root, "packages/codex-plugin/src/app-server.js")),
+  "missing outcomes.js": root => rm(path.join(root, "packages/codex-plugin/src/outcomes.js")),
+  "missing plugin manifest": root => rm(path.join(root, "packages/codex-plugin/package.json")),
+  "missing server output": root => rm(path.join(root, "dist/src/server.js")),
+  "missing compiled identity": root => rm(path.join(root, "dist/src/buildInfo.js")),
+  "missing dependency": root => rm(path.join(root, "node_modules/fixture/index.js")),
+  "tampered source": root => writeFile(path.join(root, "src/a.ts"), "tampered"),
+  "tampered compiled output": root => writeFile(path.join(root, "dist/src/server.js"), "tampered"),
+  "tampered dependency": root => writeFile(path.join(root, "node_modules/fixture/index.js"), "tampered"),
+  "malformed build record": root => writeFile(path.join(root, "build.json"), "null"),
+  "missing build record": root => rm(path.join(root, "build.json")),
+  "incomplete build record": async root => {
+    const record = JSON.parse(await readFile(path.join(root, "build.json"), "utf8"));
+    delete record.integrity;
+    await writeFile(path.join(root, "build.json"), JSON.stringify(record));
+  },
+  "mismatched record identity": async root => {
+    const record = JSON.parse(await readFile(path.join(root, "build.json"), "utf8"));
+    await writeFile(path.join(root, "build.json"), JSON.stringify({ ...record, buildId: "aaaaaaaaaaaaaaaa" }));
+  },
+  "mismatched record version": async root => {
+    const record = JSON.parse(await readFile(path.join(root, "build.json"), "utf8"));
+    await writeFile(path.join(root, "build.json"), JSON.stringify({ ...record, version: "0.0.0" }));
+  },
+  "external runtime link": async root => {
+    await rm(path.join(root, "node_modules/opencode-codex-subagent"));
+    await symlink(process.cwd(), path.join(root, "node_modules/opencode-codex-subagent"));
+  },
+};
+
+for (const [name, corrupt] of Object.entries(corruptions)) {
+  test(`reuse, activation and rollback reject ${name} without service or link mutation`, async () => {
+    const source = await fakeSource({ "src/a.ts": "export const a = 1;" });
+    const base = await tempDir("opencode-deploy-integrity-");
+    try {
+      const build = await seedBuild(base, "unused", source);
+      const paths = deploymentPaths(base);
+      await pointLinkAtomically(paths.previousLink, build.path);
+      await corrupt(build.path);
+      const before = await readLinkState(paths.previousLink);
+      let serviceCalls = 0;
+      const systemctl = async () => { serviceCalls++; assert.fail("invalid release must not reach service actions"); return ""; };
+      await assert.rejects(prepareBuild({ sourceDir: source, baseDir: base, exec: fixtureExec }), /refusing to reuse corrupt build/);
+      await assert.rejects(activateBuild(build.buildId, { baseDir: base, systemctl }));
+      await assert.rejects(rollbackBuild({ baseDir: base, systemctl }));
+      assert.equal(serviceCalls, 0);
+      assert.equal(await readLinkState(paths.currentLink), null);
+      assert.deepEqual(await readLinkState(paths.previousLink), before);
+      assert.equal((await stat(build.path)).isDirectory(), true, "corrupt immutable candidates are preserved");
+    } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
+  });
+}
+
+test("prepare rejects a sealed build whose compiled runtime reports a different identity", async () => {
+  const source = await fakeSource({ "src/a.ts": "export const a = 1;" });
+  const base = await tempDir("opencode-deploy-runtime-identity-");
+  try {
+    const { buildId } = await hashSourceTree(source);
+    await assert.rejects(prepareBuild({ sourceDir: source, baseDir: base, exec: async (cmd, args, cwd) => {
+      await fixtureExec(cmd, args, cwd);
+      if (args[0] === "run") await writeFile(path.join(cwd, "dist/src/buildInfo.js"), `export async function loadBuildInfo() { return { release: true, buildId: ${JSON.stringify(buildId)}, version: '0.0.0' }; }`);
+    } }), /compiled release identity mismatch/);
+    await assert.rejects(stat(buildDirFor(deploymentPaths(base), buildId)), { code: "ENOENT" });
+  } finally { await Promise.all([rm(source, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
 });
 
 test("build tooling cannot mutate source inputs under an unchanged release identity", async () => {
@@ -281,20 +374,20 @@ test("activate switches current, preserves previous, restarts once and verifies"
   const base = await tempDir("opencode-deploy-activate-");
   try {
     const paths = deploymentPaths(base);
-    const oldDir = await seedBuild(base, "1111111111111111");
-    const newDir = await seedBuild(base, "2222222222222222");
-    await pointLinkAtomically(paths.currentLink, oldDir);
+    const old = await seedBuild(base, "old");
+    const next = await seedBuild(base, "next");
+    await pointLinkAtomically(paths.currentLink, old.path);
     const calls: string[] = [];
-    const live = { buildId: "2222222222222222" };
-    await activateBuild("2222222222222222", {
+    const live = { buildId: next.buildId };
+    await activateBuild(next.buildId, {
       baseDir: base,
       systemctl: async (action) => { calls.push(action); return action === "is-active" ? "active" : ""; },
       fetchHealth: async () => ({ ok: true, buildId: live.buildId, version: "0.5.0" }),
       timeoutMs: 100,
     });
     assert.deepEqual(calls, ["is-active", "restart"]);
-    assert.deepEqual(await readLinkState(paths.currentLink), { buildId: "2222222222222222", path: newDir });
-    assert.deepEqual(await readLinkState(paths.previousLink), { buildId: "1111111111111111", path: oldDir });
+    assert.deepEqual(await readLinkState(paths.currentLink), { buildId: next.buildId, path: next.path });
+    assert.deepEqual(await readLinkState(paths.previousLink), { buildId: old.buildId, path: old.path });
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -304,56 +397,54 @@ test("activate failure restores old target and reports rollback ok", async () =>
   const base = await tempDir("opencode-deploy-actfail-");
   try {
     const paths = deploymentPaths(base);
-    const oldDir = await seedBuild(base, "1111111111111111");
-    await seedBuild(base, "2222222222222222");
-    await pointLinkAtomically(paths.currentLink, oldDir);
+    const old = await seedBuild(base, "old");
+    const next = await seedBuild(base, "next");
+    await pointLinkAtomically(paths.currentLink, old.path);
     const restarts: string[] = [];
     // Live keeps reporting the old build, so new-build verification fails, then
     // old-build verification after restore succeeds.
     await assert.rejects(
-      activateBuild("2222222222222222", {
+      activateBuild(next.buildId, {
         baseDir: base,
         systemctl: async (action) => { if (action === "restart") restarts.push(action); return action === "is-active" ? "active" : ""; },
-        fetchHealth: async () => ({ ok: true, buildId: "1111111111111111", version: "0.5.0" }),
+        fetchHealth: async () => ({ ok: true, buildId: old.buildId, version: "0.10.0" }),
         timeoutMs: 50,
       }),
-      /rolled back to 1111111111111111/,
+      new RegExp(`rolled back to ${old.buildId}`),
     );
-    assert.deepEqual(await readLinkState(paths.currentLink), { buildId: "1111111111111111", path: oldDir });
+    assert.deepEqual(await readLinkState(paths.currentLink), { buildId: old.buildId, path: old.path });
     assert.equal(restarts.length, 2);
   } finally {
     await rm(base, { recursive: true, force: true });
   }
 });
 
-test("rollback to the deployed workspace layout stays reversible even with its extra root entry", async () => {
+test("rollback between integrity-verified workspace releases stays reversible", async () => {
   const base = await tempDir("opencode-deploy-rollback-");
   try {
     const paths = deploymentPaths(base);
-    const cur = await seedBuild(base, "2222222222222222");
-    const previousBuildId = "6ab67427dc237b56";
-    const prev = await seedBuild(base, previousBuildId);
-    // 0ac3e16's workspace layout contains this extra file; runnable validation
-    // requires the canonical src entry, not absence of other files in old builds.
-    await writeFile(path.join(prev, "packages/codex-plugin/index.js"), 'export { default } from "./src/index.js"\n');
-    await pointLinkAtomically(paths.currentLink, cur);
-    await pointLinkAtomically(paths.previousLink, prev);
+    const cur = await seedBuild(base, "current");
+    const prev = await seedBuild(base, "previous");
+    await pointLinkAtomically(paths.currentLink, cur.path);
+    await pointLinkAtomically(paths.previousLink, prev.path);
     const first = await rollbackBuild({
       baseDir: base,
       systemctl: async () => "",
-      fetchHealth: async () => ({ ok: true, buildId: previousBuildId }),
+      fetchHealth: async () => ({ ok: true, buildId: prev.buildId }),
       timeoutMs: 100,
     });
-    assert.equal(first.buildId, previousBuildId);
-    assert.equal(first.previousBuildId, "2222222222222222");
+    assert.equal(first.buildId, prev.buildId);
+    assert.equal(first.previousBuildId, cur.buildId);
     const second = await rollbackBuild({
       baseDir: base,
       systemctl: async () => "",
-      fetchHealth: async () => ({ ok: true, buildId: "2222222222222222" }),
+      fetchHealth: async () => ({ ok: true, buildId: cur.buildId }),
       timeoutMs: 100,
     });
-    assert.equal(second.buildId, "2222222222222222");
-    await assert.rejects(rollbackBuild({ baseDir: await tempDir("opencode-deploy-empty-"), systemctl: async () => "" }), /no previous/);
+    assert.equal(second.buildId, cur.buildId);
+    const empty = await tempDir("opencode-deploy-empty-");
+    try { await assert.rejects(rollbackBuild({ baseDir: empty, systemctl: async () => "" }), /no previous/); }
+    finally { await rm(empty, { recursive: true, force: true }); }
   } finally {
     await rm(base, { recursive: true, force: true });
   }
@@ -363,39 +454,44 @@ test("rollback verification failure restores the original current and previous l
   const base = await tempDir("opencode-deploy-rollback-fail-");
   try {
     const paths = deploymentPaths(base);
-    const cur = await seedBuild(base, "2222222222222222");
-    const prev = await seedBuild(base, "1111111111111111");
-    await pointLinkAtomically(paths.currentLink, cur);
-    await pointLinkAtomically(paths.previousLink, prev);
+    const cur = await seedBuild(base, "current");
+    const prev = await seedBuild(base, "previous");
+    await pointLinkAtomically(paths.currentLink, cur.path);
+    await pointLinkAtomically(paths.previousLink, prev.path);
     let restarts = 0;
     await assert.rejects(
       rollbackBuild({
         baseDir: base,
         systemctl: async () => { restarts += 1; return ""; },
-        fetchHealth: async () => ({ ok: true, buildId: "2222222222222222", version: "0.5.0" }),
+        fetchHealth: async () => ({ ok: true, buildId: cur.buildId, version: "0.10.0" }),
         timeoutMs: 20,
       }),
-      /rollback failed: .*restored 2222222222222222/,
+      new RegExp(`rollback failed: .*restored ${cur.buildId}`),
     );
     assert.equal(restarts, 2);
-    assert.deepEqual(await readLinkState(paths.currentLink), { buildId: "2222222222222222", path: cur });
-    assert.deepEqual(await readLinkState(paths.previousLink), { buildId: "1111111111111111", path: prev });
+    assert.deepEqual(await readLinkState(paths.currentLink), { buildId: cur.buildId, path: cur.path });
+    assert.deepEqual(await readLinkState(paths.previousLink), { buildId: prev.buildId, path: prev.path });
   } finally {
     await rm(base, { recursive: true, force: true });
   }
 });
 
-test("prepare reuses an identical build without running npm", async () => {
+test("prepare reuses an identical build only after installed integration and compiled identity verification", async () => {
   const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
   const base = await tempDir("opencode-deploy-prepare-");
   try {
     const { buildId } = await hashSourceTree(src);
-    await seedBuild(base, buildId);
+    await seedBuild(base, "unused", src);
     const calls: Array<{ cmd: string; args: string[]; cwd: string }> = [];
-    const result = await prepareBuild({ sourceDir: src, baseDir: base, exec: async (cmd, args, cwd) => { calls.push({ cmd, args: [...args], cwd }); } });
+    const result = await prepareBuild({ sourceDir: src, baseDir: base, exec: async (cmd, args, cwd) => { calls.push({ cmd, args: [...args], cwd }); await fixtureExec(cmd, args, cwd); } });
     assert.equal(result.buildId, buildId);
     assert.equal(result.reused, true);
-    assert.deepEqual(calls, [{ cmd: "node", args: ["scripts/verify-release-version.mjs"], cwd: src }]);
+    assert.deepEqual(calls.slice(0, 2), [
+      { cmd: "node", args: ["scripts/verify-release-version.mjs"], cwd: src },
+      { cmd: "node", args: ["scripts/verify-integration.mjs"], cwd: result.path },
+    ]);
+    assert.equal(calls.length, 3);
+    assert.equal(calls[2].args[0], "--input-type=module");
     const record = await loadBuildRecord(result.path);
     assert.equal(record.buildId, buildId);
   } finally {
@@ -413,23 +509,20 @@ test("fresh prepare builds with the locked toolchain before pruning dev dependen
       baseDir: base,
       exec: async (cmd, args, cwd) => {
         calls.push({ cmd, args: [...args] });
-        if (args[0] === "ci") {
-          await mkdir(path.join(cwd, "node_modules"), { recursive: true });
-        }
-        if (args[0] === "run" && args[1] === "build") {
-          await mkdir(path.join(cwd, "dist", "src"), { recursive: true });
-          await writeFile(path.join(cwd, "dist", "src", "server.js"), "built\n");
-        }
+        await fixtureExec(cmd, args, cwd);
       },
     });
     assert.equal(result.reused, false);
-    assert.deepEqual(calls, [
+    assert.deepEqual(calls.slice(0, 5), [
       { cmd: "node", args: ["scripts/verify-release-version.mjs"] },
       { cmd: "npm", args: ["ci", "--include=dev"] },
       { cmd: "npm", args: ["run", "build"] },
       { cmd: "npm", args: ["prune", "--omit=dev"] },
       { cmd: "node", args: ["scripts/verify-integration.mjs"] },
     ]);
+    assert.equal(calls.length, 6);
+    assert.equal(calls[5].cmd, "node");
+    assert.equal(calls[5].args[0], "--input-type=module");
     assert.equal(await readFile(path.join(result.path, "dist", "src", "server.js"), "utf8"), "built\n");
     assert.equal((await loadBuildRecord(result.path)).buildId, result.buildId);
   } finally {
@@ -443,7 +536,7 @@ test("source release gate failure blocks preparation and reuse without changing 
   try {
     const { buildId } = await hashSourceTree(src);
     for (const existing of [false, true]) {
-      if (existing) await seedBuild(base, buildId);
+      if (existing) await seedBuild(base, "unused", src);
       const calls: string[] = [];
       await assert.rejects(prepareBuild({ sourceDir: src, baseDir: base, exec: async (cmd, args, cwd) => {
         assert.equal(cwd, src);
@@ -457,21 +550,25 @@ test("source release gate failure blocks preparation and reuse without changing 
   } finally { await Promise.all([rm(src, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]); }
 });
 
-test("prepare refuses to delete a corrupt build referenced by current", async () => {
+test("prepare never replaces corrupt immutable builds, including missing records and referenced builds", async () => {
   const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
   const base = await tempDir("opencode-deploy-protected-");
   try {
     const { buildId } = await hashSourceTree(src);
-    const dir = await seedBuild(base, buildId);
+    const { path: dir } = await seedBuild(base, "unused", src);
     const paths = deploymentPaths(base);
     await pointLinkAtomically(paths.currentLink, dir);
     await rm(path.join(dir, "dist", "src", "server.js"), { force: true });
     await assert.rejects(
       prepareBuild({ sourceDir: src, baseDir: base, exec: async () => {} }),
-      /refusing to replace corrupt build .*referenced by current/,
+      /refusing to reuse corrupt build/,
     );
     assert.equal((await stat(dir)).isDirectory(), true);
     assert.equal((await readLinkState(paths.currentLink))?.path, dir);
+    await rm(paths.currentLink);
+    await rm(path.join(dir, "build.json"));
+    await assert.rejects(prepareBuild({ sourceDir: src, baseDir: base, exec: fixtureExec }), /refusing to reuse corrupt build/);
+    assert.equal((await stat(dir)).isDirectory(), true);
   } finally {
     await Promise.all([rm(src, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]);
   }
@@ -554,20 +651,20 @@ test("status reports links, service state and live/source without throwing", asy
   const base = await tempDir("opencode-deploy-status-");
   try {
     const paths = deploymentPaths(base);
-    const cur = await seedBuild(base, "aaaaaaaaaaaaaaaa");
-    await pointLinkAtomically(paths.currentLink, cur);
+    const cur = await seedBuild(base, "current");
+    await pointLinkAtomically(paths.currentLink, cur.path);
     const status = await deploymentStatus({
       baseDir: base,
       sourceDir: base,
       systemctl: async () => "active",
-      fetchHealth: async () => ({ ok: true, version: "0.5.0", buildId: "aaaaaaaaaaaaaaaa" }),
+      fetchHealth: async () => ({ ok: true, version: "0.10.0", buildId: cur.buildId }),
     });
-    assert.equal(status.current?.buildId, "aaaaaaaaaaaaaaaa");
+    assert.equal(status.current?.buildId, cur.buildId);
     assert.equal(status.current?.runnable, true);
     assert.equal(status.previous, null);
     assert.equal(status.service.state, "active");
     assert.equal(status.live.reachable, true);
-    assert.equal(status.live.buildId, "aaaaaaaaaaaaaaaa");
+    assert.equal(status.live.buildId, cur.buildId);
     assert.equal(status.drift, false);
     const drifted = await deploymentStatus({
       baseDir: base,
@@ -596,25 +693,5 @@ test("source metadata never throws outside git", async () => {
     assert.equal(meta.available, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("build info prefers release build.json and falls back to source identity", async () => {
-  const release = await tempDir("opencode-deploy-buildinfo-");
-  const empty = await tempDir("opencode-deploy-buildinfo-empty-");
-  try {
-    await writeFile(path.join(release, "build.json"), JSON.stringify({
-      buildId: "aaaaaaaaaaaaaaaa", version: "0.5.0", commit: "abc", commitShort: "abc",
-      branch: "main", dirty: false, builtAt: new Date().toISOString(),
-    }));
-    const info = await loadBuildInfo(release);
-    assert.equal(info.buildId, "aaaaaaaaaaaaaaaa");
-    assert.equal(info.release, true);
-    const fallback = await loadBuildInfo(empty);
-    assert.equal(fallback.buildId, "source");
-    assert.equal(fallback.release, false);
-    assert.equal(sourceBuildInfo().buildId, "source");
-  } finally {
-    await Promise.all([rm(release, { recursive: true, force: true }), rm(empty, { recursive: true, force: true })]);
   }
 });

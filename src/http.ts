@@ -25,9 +25,10 @@ export function createHttpApp(handler: ReturnType<typeof createHttpHandler>, hos
     } });
   };
   app.use(parserError);
+  const handle = toNodeHandler(handler, { maxRequestBodySize: MAX_REQUEST_BODY_BYTES });
   app.all("/mcp", (req, res) => {
     if (req.method === "OPTIONS") { res.status(204).end(); return; }
-    return toNodeHandler(handler)(req, res, req.body);
+    return handle(req, res, req.body);
   });
   return app;
 }

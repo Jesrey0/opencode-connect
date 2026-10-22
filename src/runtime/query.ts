@@ -30,8 +30,8 @@ type Client = OpenCodeClient;
 
 // Native agent reads surface absence as a dedicated native error rather than an
 // empty list, so a missing agent ID must stay distinguishable from "no agents".
-async function readAgent(client: Client, agentId: string, cwd?: string) {
-  try { return await client.agent.get({ agentID: agentId, ...(cwd ? { location: { directory: cwd } } : {}) }); }
+async function readAgent(client: Client, agentId: string, cwd?: string, signal?: AbortSignal) {
+  try { return await client.agent.get({ agentID: agentId, ...(cwd ? { location: { directory: cwd } } : {}) }, { signal }); }
   catch (error) {
     if (isAgentNotFoundError(error)) throw new CatalogError(agentId);
     throw error;
@@ -64,30 +64,31 @@ export type NativeQueryInput = (
   | { type: "sessions"; cursor?: string; limit?: number; cwd?: string; searchTerm?: string }
   | { type: "session"; sessionId: string });
 
-export async function resolveNativeQuery(client: Client, query: NativeQueryInput): Promise<unknown> {
+export async function resolveNativeQuery(client: Client, query: NativeQueryInput, signal?: AbortSignal): Promise<unknown> {
+  signal?.throwIfAborted();
   if (query.type === "skill") {
-    const skills = (await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined)).data;
+    const skills = (await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined, { signal })).data;
     const skill = skills.find((entry) => entry.id === query.skillId);
     if (!skill) throw new Error("canonical skill absent from catalog");
     return { ...projectSkill(skill), ...textPage(skill.content, query.textOffset, query.textLimit, query.textFingerprint) };
   }
   if (query.type === "sessionDiff") {
-    const session = await client.session.get({ sessionID: query.sessionId });
-    for (const id of [query.from, query.to]) if (id) await client.session.message.get({ sessionID: session.id, messageID: id });
-    const diff = await client.session.diff({ sessionID: session.id, from: query.from, to: query.to, context: integer(query.context, 3, 1000) });
+    const session = await client.session.get({ sessionID: query.sessionId }, { signal });
+    for (const id of [query.from, query.to]) if (id) await client.session.message.get({ sessionID: session.id, messageID: id }, { signal });
+    const diff = await client.session.diff({ sessionID: session.id, from: query.from, to: query.to, context: integer(query.context, 3, 1000) }, { signal });
     const file = query.file ? diff.find((entry) => entry.file === query.file) : undefined;
     if (query.file && !file) throw new Error("file absent from native session diff");
     return { sessionId: session.id, from: query.from ?? null, to: query.to ?? null, ...(file ? { file: file.file, additions: file.additions, deletions: file.deletions, status: file.status, ...textPage(file.patch, query.textOffset, query.textLimit, query.textFingerprint) } : page(diff.map(({ patch, ...entry }) => ({ ...entry, patchSize: patch.length, patchFingerprint: fingerprint(patch) })), query)) };
   }
   if (query.type === "inbox") {
-    await client.session.get({ sessionID: query.sessionId });
-    const inbox = await client.session.inbox.list({ sessionID: query.sessionId });
+    await client.session.get({ sessionID: query.sessionId }, { signal });
+    const inbox = await client.session.inbox.list({ sessionID: query.sessionId }, { signal });
     const selected = query.inboxId ? inbox.find((entry) => entry.id === query.inboxId) : undefined;
     if (query.inboxId && !selected) throw new Error("inbox entry not pending in targeted session");
     return selected ? { ...projectInbox(selected), ...textPage("text" in selected.payload ? selected.payload.text : "", query.textOffset, query.textLimit, query.textFingerprint) } : page(inbox.map(projectInbox), query);
   }
   if (query.type === "tools" || query.type === "tool") {
-    const message = await client.session.message.get({ sessionID: query.sessionId, messageID: query.messageId });
+    const message = await client.session.message.get({ sessionID: query.sessionId, messageID: query.messageId }, { signal });
     if (message.type !== "assistant") throw new Error("tool evidence requires canonical assistant message");
     const tools = message.content.filter((part) => part.type === "tool");
     const identity = { sessionId: query.sessionId, messageId: message.id };
@@ -117,7 +118,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
     return { ...identity, toolId: tool.id, name: tool.name, status: state.status, time: tool.time, executed: tool.executed ?? null, field: query.field, contentType, contentTotal, contentIndex: query.contentIndex ?? 0, file, ...textPage(text, query.textOffset, query.textLimit, query.textFingerprint) };
   }
   if (query.type === "models") {
-    const response = await client.model.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
+    const response = await client.model.list(query.cwd ? { location: { directory: query.cwd } } : undefined, { signal });
     const view = query.view ?? "full";
     const data = response.data.map((model) => ({
       id: modelKey(model),
@@ -142,7 +143,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
     return { location: response.location, view, ...contextualPage(data, query, { location: response.location, view }) };
   }
   if (query.type === "agents") {
-    const response = await client.agent.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
+    const response = await client.agent.list(query.cwd ? { location: { directory: query.cwd } } : undefined, { signal });
     const location = response.location;
     const view = query.view ?? "compact";
     const includeHidden = query.includeHidden ?? false;
@@ -155,36 +156,36 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
     };
   }
   if (query.type === "skills") {
-    const response = await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
+    const response = await client.skill.list(query.cwd ? { location: { directory: query.cwd } } : undefined, { signal });
     return { location: response.location, ...contextualPage(response.data.map(projectSkill), query, { location: response.location }) };
   }
   if (query.type === "providers") {
-    const response = await client.provider.list(query.cwd ? { location: { directory: query.cwd } } : undefined);
+    const response = await client.provider.list(query.cwd ? { location: { directory: query.cwd } } : undefined, { signal });
     return { location: response.location, ...contextualPage(response.data.map((provider) => ({ id: provider.id, name: provider.name, activation: provider.activation })), query, { location: response.location }) };
   }
   if (query.type === "usage") {
-    return client.session.stats();
+    return client.session.stats(undefined, { signal });
   }
   if (query.type === "sessions") {
     const [response, active] = await Promise.all([
-      client.session.list({ limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: "desc" as const }), directory: query.cwd, search: query.searchTerm }),
-      client.session.active(),
+      client.session.list({ limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: "desc" as const }), directory: query.cwd, search: query.searchTerm }, { signal }),
+      client.session.active({ signal }),
     ]);
     return { runtime: "opencode", sessions: response.data.map((session) => ({ ...projectSession(session, active), outcomeBasis: "unavailable" })), cursor: response.cursor };
   }
   if (query.type === "agent") {
-    const response = await readAgent(client, query.agentId, query.cwd);
+    const response = await readAgent(client, query.agentId, query.cwd, signal);
     const agent = response.data;
     const field = query.field ?? "system";
     return { ...projectAgent(agent), location: response.location, field, ...(field === "permissions" ? { permissions: page(agent.permissions, query) } : textPage(agent[field] ?? "", query.textOffset, query.textLimit, query.textFingerprint)) };
   }
   if (query.type === "messages") {
     if (query.cursor && query.order) throw new Error("native message cursor cannot be combined with order");
-    const response = await client.message.list({ sessionID: query.sessionId, limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: query.order ?? "desc" }) });
+    const response = await client.message.list({ sessionID: query.sessionId, limit: integer(query.limit, 25, 50, 1), ...(query.cursor ? { cursor: query.cursor } : { order: query.order ?? "desc" }) }, { signal });
     return { messages: response.data.map((message) => projectMessage(message, 0, MESSAGE_PREVIEW_LIMIT, undefined, query.sessionId, true)), cursor: response.cursor };
   }
   if (query.type === "message") {
-    const message = await client.session.message.get({ sessionID: query.sessionId, messageID: query.messageId });
+    const message = await client.session.message.get({ sessionID: query.sessionId, messageID: query.messageId }, { signal });
     if (query.field) {
       if (message.type !== "compaction") throw new Error("field recovery requires a canonical compaction message");
       const full = query.field === "summary" && "summary" in message ? message.summary
@@ -196,18 +197,18 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
     return projectMessage(message, query.textOffset, query.textLimit, query.textFingerprint, query.sessionId);
   }
   if (query.type === "permissions") {
-    const session = await client.session.get({ sessionID: query.sessionId });
-    const requests = query.section === "pending" ? await client.permission.list({ sessionID: session.id }) : [];
+    const session = await client.session.get({ sessionID: query.sessionId }, { signal });
+    const requests = query.section === "pending" ? await client.permission.list({ sessionID: session.id }, { signal }) : [];
     return { sessionId: session.id, section: query.section ?? "rules", ...((query.section ?? "rules") === "rules" ? { rules: page(session.permissions ?? [], query) } : { pending: page(requests.map(projectPermission), query) }) };
   }
   if (query.type === "savedApprovals") {
-    const session = await client.session.get({ sessionID: query.sessionId });
-    const saved = await client.permission.saved.list({ projectID: session.projectID });
+    const session = await client.session.get({ sessionID: query.sessionId }, { signal });
+    const saved = await client.permission.saved.list({ projectID: session.projectID }, { signal });
     return { projectId: session.projectID, ...page(saved, query) };
   }
   if (query.type === "runtime") {
     const location = { directory: query.cwd };
-    const [runtime, plugins, mcp, commands] = await Promise.all([client.location.get({ location }), client.plugin.list({ location }), client.mcp.list({ location }), client.command.list({ location })]);
+    const [runtime, plugins, mcp, commands] = await Promise.all([client.location.get({ location }, { signal }), client.plugin.list({ location }, { signal }), client.mcp.list({ location }, { signal }), client.command.list({ location }, { signal })]);
     const inventory = [
       ...plugins.data.map((plugin) => ({ type: "plugin", id: plugin.id ?? null, sourceType: plugin.source.type, features: plugin.features, status: plugin.state.status })),
       ...mcp.data.map((server) => ({ type: "mcp", name: server.name, status: server.status.status })),
@@ -217,8 +218,8 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
   }
   if (query.type === "session") {
     const [session, active] = await Promise.all([
-      client.session.get({ sessionID: query.sessionId }),
-      client.session.active(),
+      client.session.get({ sessionID: query.sessionId }, { signal }),
+      client.session.active({ signal }),
     ]);
     return projectSession(session, active);
   }
