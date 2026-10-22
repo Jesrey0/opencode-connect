@@ -1,6 +1,4 @@
-import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { toNodeHandler } from "@modelcontextprotocol/node";
-import { createHttpHandler } from "./http.js";
+import { createHttpApp, createHttpHandler } from "./http.js";
 import type { Request, Response } from "express";
 import { OpenCodeBackend } from "./opencode.js";
 import { loadBuildInfo } from "./buildInfo.js";
@@ -18,7 +16,8 @@ await bootstrapNative();
 await backend.health();
 const BUILD = await loadBuildInfo();
 
-const app = createMcpExpressApp({ host: HOST });
+const mcp = createHttpHandler(backend, undefined, events);
+const app = createHttpApp(mcp, HOST);
 
 app.get("/", (_req: Request, res: Response) => res.type("text/plain").send("OpenCode Connect\n"));
 app.get("/health", async (_req: Request, res: Response) => {
@@ -33,12 +32,7 @@ app.get("/health", async (_req: Request, res: Response) => {
 // Local observation only: shared ingress routes only the authenticated /mcp path.
 app.get("/observe", (_req: Request, res: Response) => res.json({ events: events.snapshot() }));
 
-const mcp = createHttpHandler(backend, undefined, events);
 for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { void mcp.close().finally(() => process.exit(0)); });
-app.all("/mcp", (req: Request, res: Response) => {
-  if (req.method === "OPTIONS") { res.status(204).end(); return; }
-  return toNodeHandler(mcp)(req, res, req.body);
-});
 
 app.listen(PORT, HOST, () => console.log(`OpenCode Connect listening on http://${HOST}:${PORT}/mcp`));
 

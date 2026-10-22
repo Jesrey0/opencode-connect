@@ -9,6 +9,7 @@
 There are two runtime components and one source/install lock. This repository is the sole source owner. PlatformPlane `$0xOperator` guidance is separately managed by ChatGPT, while runtime-specific operator knowledge lives in native OpenCode global skills under `~/.config/opencode/skills/` and is discovered at runtime; neither is mirrored into this repository. A legacy standalone plugin checkout, if one still exists, is superseded rather than a parallel source owner and may be retired only after independent acceptance and rollback verification.
 
 ## Module ownership
+- src/http.ts owns the Node/Express application and Fetch MCP entry, with one request-body budget. src/mcp.ts owns the SDK tool-input complexity budget. The SDK creates a fresh MCP server per request; shared backends retain native supervision state without sharing protocol exchanges.
 - src/opencode.ts is the public WorkerPlane facade: admission, wait/act orchestration, runtime routing and query envelopes.
 - src/runtime/query.ts owns the native query union and exhaustive resolution, reading native catalogs directly.
 - src/runtime/result.ts owns the inspection contract and bounded, fingerprint-pinned assistant selection. It imports only projections/bounds/continuations, never the facade.

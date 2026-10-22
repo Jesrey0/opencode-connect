@@ -6,12 +6,10 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { deflateSync } from "node:zlib";
 import { request as httpRequest } from "node:http";
-import { createMcpExpressApp } from "@modelcontextprotocol/express";
-import { toNodeHandler } from "@modelcontextprotocol/node";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/server/validators/ajv";
 import { createMcpHandler, type JsonSchemaType } from "@modelcontextprotocol/server";
 import { createServer } from "../src/mcp.js";
-import { createHttpHandler } from "../src/http.js";
+import { createHttpApp, createHttpHandler, MAX_REQUEST_BODY_BYTES } from "../src/http.js";
 import { OpenCodeBackend } from "../src/opencode.js";
 import { HostBackend } from "../src/host.js";
 import { Events } from "../src/events.js";
@@ -28,8 +26,7 @@ async function httpFixture(native: ReturnType<typeof nativeFixture>, events?: Ev
   // Protocol tests exercise the base OpenCode/Host catalog independently of
   // whether a developer's host has optional browser support enabled.
   const handler = createHttpHandler(new OpenCodeBackend(native.connect, waitTimeoutMs), host, events, new BrowserBackend({ enabled: false }));
-  const app = createMcpExpressApp();
-  app.all("/mcp", (req, res) => toNodeHandler(handler)(req, res, req.body));
+  const app = createHttpApp(handler);
   const server = app.listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const address = server.address(); assert.ok(address && typeof address !== "string");
@@ -186,6 +183,103 @@ test("HTTP disconnect cancels the wait observer promptly without interrupting th
     const inspection = await http.send("tools/call", { name: "opencode.inspect", arguments: { sessionId: "s", messageId: "u" } });
     assert.equal(inspection.reply.result.structuredContent.session.status, "inProgress");
   } finally { request.destroy(); await http.close(); }
+});
+
+test("tool input complexity is bounded before schema parsing or native access", async () => {
+  const native = nativeFixture(() => { throw new Error("over-budget arguments must not reach native state"); });
+  const http = await httpFixture(native);
+  try {
+    for (const answer of [
+      { choice: Array(4092).fill("PRIVATE-INPUT") },
+      Object.fromEntries(Array.from({ length: 4093 }, (_, index) => [`field${index}`, "PRIVATE-INPUT"])),
+    ]) {
+      const response = await http.send("tools/call", { name: "opencode.act", arguments: { action: "respondForm", sessionId: "s", formId: "f", answer } });
+      assert.equal(response.reply.result.isError, true);
+      assert.match(response.reply.result.content[0].text, /maximum of 4096 elements/);
+      assert.equal(JSON.stringify(response.reply).includes("PRIVATE-INPUT"), false);
+    }
+    assert.equal(native.requests.length, 0);
+  } finally { await http.close(); }
+});
+
+test("HTTP admits bounded form answers at the element limit and above Express's default byte limit", async () => {
+  const replies: unknown[] = [];
+  const native = nativeFixture(({ path, body }) => {
+    if (path === "/api/session/s") return { data: session() };
+    if (path.endsWith("/form")) return { data: [{ id: "f", sessionID: "s" }] };
+    if (path.endsWith("/reply")) { replies.push(body); return undefined; }
+    throw new Error(`unexpected ${path}`);
+  });
+  const http = await httpFixture(native);
+  try {
+    // Four root keys + one answer key + 4091 array entries = 4096 elements.
+    for (const answer of [{ choice: Array(4091).fill("x") }, { text: "x".repeat(128 * 1024) }]) {
+      const response = await http.send("tools/call", { name: "opencode.act", arguments: { action: "respondForm", sessionId: "s", formId: "f", answer } });
+      assert.notEqual(response.reply.result.isError, true, JSON.stringify(response.reply));
+      assert.deepEqual(replies.at(-1), { answer });
+    }
+  } finally { await http.close(); }
+});
+
+test("Node and Fetch HTTP entries bound complete bodies and redact parser errors", async () => {
+  const native = nativeFixture(() => { throw new Error("wire rejection must not access native state"); });
+  const http = await httpFixture(native);
+  const handler = createHttpHandler(new OpenCodeBackend(native.connect), new HostBackend(native.connect), undefined, new BrowserBackend({ enabled: false }));
+  const headers = { "content-type": "application/json", accept: "application/json", "mcp-protocol-version": version, "mcp-method": "server/discover" };
+  const envelope = { jsonrpc: "2.0", id: 1, method: "server/discover", params: { _meta: { ...meta, padding: "" } } };
+  const padded = JSON.stringify({ ...envelope, params: { _meta: { ...meta, padding: "x".repeat(MAX_REQUEST_BODY_BYTES - Buffer.byteLength(JSON.stringify(envelope))) } } });
+  assert.equal(Buffer.byteLength(padded), MAX_REQUEST_BODY_BYTES);
+  try {
+    for (const send of [
+      (body: string) => fetch(http.url, { method: "POST", headers, body }),
+      (body: string) => handler.fetch(new Request(http.url, { method: "POST", headers, body })),
+    ]) {
+      const atLimit = await send(padded);
+      assert.equal(atLimit.status, 200);
+      assert.equal((await atLimit.json() as any).result.resultType, "complete");
+      const overLimit = await send(padded + " ");
+      assert.equal(overLimit.status, 413);
+      assert.equal(typeof (await overLimit.json() as any).error.code, "number");
+      const malformed = await send('{"PRIVATE-PARSER-CONTENT":');
+      assert.equal(malformed.status, 400);
+      const body = await malformed.text();
+      assert.equal(body.includes("PRIVATE-PARSER-CONTENT"), false);
+      assert.equal(body.includes("node_modules"), false);
+      assert.equal(typeof JSON.parse(body).error.code, "number");
+    }
+    assert.equal(native.requests.length, 0);
+  } finally { await handler.close(); await http.close(); }
+});
+
+test("overlapping HTTP requests with the same JSON-RPC id keep their own results", async () => {
+  let started!: () => void, release!: () => void;
+  const firstStarted = new Promise<void>(resolve => { started = resolve; });
+  const firstReleased = new Promise<void>(resolve => { release = resolve; });
+  const native = nativeFixture(async ({ path, body }) => {
+    if (path === "/api/location") return { directory: "/tmp" };
+    if (path === "/api/shell") {
+      const command = (body as { command: string }).command;
+      if (command === "first") { started(); await firstReleased; }
+      return { location: { directory: "/tmp" }, data: { id: command, cwd: "/tmp", status: "running", time: { started: 1 } } };
+    }
+    throw new Error(`unexpected ${path}`);
+  });
+  const http = await httpFixture(native);
+  const send = async (command: string) => {
+    const response = await fetch(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "command.start" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { _meta: meta, name: "command.start", arguments: { kind: "shell", cwd: "/tmp", command } } }) });
+    return response.json() as Promise<any>;
+  };
+  try {
+    const first = send("first");
+    await firstStarted;
+    const second = await send("second");
+    assert.equal(second.id, 7);
+    assert.equal(second.result.structuredContent.id, "second");
+    release();
+    const result = await first;
+    assert.equal(result.id, 7);
+    assert.equal(result.result.structuredContent.id, "first");
+  } finally { release(); await http.close(); }
 });
 
 test("HTTP disconnect cancels the Codex quota RPC rather than leaving its reader running", { timeout: 5_000 }, async () => {

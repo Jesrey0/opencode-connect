@@ -134,6 +134,9 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   const capabilities = { tools: { listChanged: false }, ...(events ? { events: {} } : {}) };
   const server = new McpServer({ name: "opencode-connect", version: VERSION }, {
     capabilities, supportedProtocolVersions: ["2026-07-28"], inputRequired: { legacyShim: false },
+    // Bounds recursive validation work independently of serialized string size.
+    // Full permission/attachment sets and 12-step browser workflows fit this budget.
+    maxToolInputElements: 4096,
     instructions: "host.inspect uses type; command.start uses kind; host.worktree, command.control and opencode.act use action. Preserve native IDs and canonical cwd. Start commands with command.start, then read the saved handle/cursor with command.read. Use returned nextCall for read-only paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
   });
   if (events) {

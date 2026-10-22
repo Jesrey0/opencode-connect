@@ -225,6 +225,12 @@ using `server/discover`, per-request `_meta`, and matching standard
 `MCP-Protocol-Version`, `Mcp-Method`, and method-specific `Mcp-Name` headers.
 Client capabilities are required; client identity follows the SDK's current
 [protocol contract](https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle).
+The HTTP entry caps complete request bodies at **4 MiB**, including metadata,
+at both the Express parser and Fetch handler. This accommodates multi-step
+Unicode browser input and full permission/attachment sets. SDK tool validation
+allows at most **4,096 object keys and array elements** across one argument tree,
+independently of byte size; oversized input fails before tool execution.
+Parser failures return sanitized JSON errors without body or stack diagnostics.
 Input/output discovery uses JSON Schema 2020-12. Strict discriminated
 unions own validation and publish model-visible properties plus variant restrictions.
 Discovery also includes concise server instructions for shared selector, command
