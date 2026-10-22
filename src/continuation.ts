@@ -1,5 +1,5 @@
 type ReadTool =
-  | "opencode.inspect"
+  | "opencode.inspectResult"
   | "opencode.sessionDiff" | "opencode.inbox" | "opencode.skill" | "opencode.tools" | "opencode.tool"
   | "opencode.models" | "opencode.agents" | "opencode.agent" | "opencode.messages" | "opencode.message"
   | "opencode.permissions" | "opencode.savedApprovals" | "opencode.runtime" | "opencode.skills"
@@ -7,7 +7,7 @@ type ReadTool =
   | "host.list" | "host.read" | "host.find" | "host.vcs" | "host.vcsStatus"
   | "host.vcsBranch" | "host.vcsDiff" | "host.commands" | "host.terminalScreen"
   | "host.terminalSnapshot" | "host.worktreeList";
-type QueryTool = Exclude<Extract<ReadTool, `opencode.${string}`>, "opencode.inspect">;
+type QueryTool = Exclude<Extract<ReadTool, `opencode.${string}`>, "opencode.inspectResult">;
 
 const queryTools = {
   sessionDiff: "opencode.sessionDiff", inbox: "opencode.inbox", skill: "opencode.skill", tools: "opencode.tools",

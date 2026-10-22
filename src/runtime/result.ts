@@ -77,7 +77,7 @@ export async function latestResult(client: Client, input: ResultSelectionInput, 
     : assistant.error || assistant.finish === "error" ? "failed"
     : assistant.time.completed === undefined || assistant.finish !== "stop" ? "incomplete" : "completed";
   const paged = textPage(text, input.textOffset, input.textLimit, input.textFingerprint);
-  const continuation = cursor && messageId ? nextCall("opencode.inspect", { sessionId, messageId, detail: "result", selectionCursor: cursor, selectionFingerprint, ...(assistant ? { candidateAssistantMessageId: assistant.id } : {}), ...(input.textLimit === undefined ? {} : { textLimit: input.textLimit }) })
+  const continuation = cursor && messageId ? nextCall("opencode.inspectResult", { sessionId, messageId, selectionCursor: cursor, selectionFingerprint, ...(assistant ? { candidateAssistantMessageId: assistant.id } : {}), ...(input.textLimit === undefined ? {} : { textLimit: input.textLimit }) })
     : cursor ? nextCall("opencode.messages", { sessionId, cursor, limit: 50 }) : null;
   const textNextCall = selectionComplete && assistant ? pageNextCall("opencode.message", { sessionId, messageId: assistant.id, ...(input.textLimit === undefined ? {} : { textLimit: input.textLimit }) }, paged) : null;
   return {

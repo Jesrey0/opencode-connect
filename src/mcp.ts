@@ -137,7 +137,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     // Bounds recursive validation work independently of serialized string size.
     // Full permission/attachment sets and 12-step browser workflows fit this budget.
     maxToolInputElements: 4096,
-      instructions: "Host, command, OpenCode query, and OpenCode session actions are separately named purpose-specific tools. Preserve native IDs and canonical cwd. Start commands with command.startShell, command.startPty or command.startPersistentPty, then read the saved handle/cursor with command.read. Follow returned nextCall for paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
+      instructions: "Use purpose-specific tools; no generic runners. Status readiness/recovery, OpenCode create/continue/fork, and inspect activity/result are distinct. Preserve native IDs and canonical cwd; follow nextCall. Reconcile uncertain mutations; worker termination is not task success. Start commands with command.startShell, command.startPty or command.startPersistentPty; read saved handles with command.read.",
   });
   if (events) {
     const authenticated = async (extra: ServerContext) => {
@@ -176,14 +176,12 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     }) as never);
   }) as typeof server.registerTool;
 
-  registerTool("status", {
-    title: "Read OpenCode Connect Status",
-    description: "Use detail readiness for connector identity and OpenCode availability without worker history or a browser probe. Omitted detail or recovery includes active/recent native workers, selected by runtime. Readiness does not verify the Codex plugin or browser leases. Execution termination does not prove assistant success; inspect exact result evidence.",
-    inputSchema: z.object({ runtime: runtimeSchema, detail: z.enum(["readiness", "recovery"]).optional().describe("Defaults to recovery; readiness skips worker/session/result reads. Runtime selects recovery inventory only.").meta({ default: "recovery" }) }).strict(),
-    outputSchema: outputSchemas.status,
+  registerTool("status.readiness", {
+    title: "Check Connector Readiness",
+    description: "Check connector identity and OpenCode availability without reading worker history or probing browser readiness. Does not verify the Codex plugin or browser leases.",
+    inputSchema: z.object({}).strict(), outputSchema: outputSchemas.status,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
-  }, async ({ runtime, detail }) => {
-    if (detail !== "readiness") return structuredResult({ ...await backend.status(runtime), ...(events ? { events: events.snapshot() } : {}) });
+  }, async () => {
     const { version, buildId, release } = await loadBuildInfo();
     let opencode: { ready: boolean; release: string | null; serverPid: number | null; error: string | null };
     try {
@@ -201,6 +199,12 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       },
     }), ...(opencode.ready ? {} : { isError: true }) };
   });
+  registerTool("status.recovery", {
+    title: "Recover Worker Status",
+    description: "Read active/recent native worker inventory and result evidence for the selected runtime. Execution termination does not prove assistant success.",
+    inputSchema: z.object({ runtime: runtimeSchema }).strict(), outputSchema: outputSchemas.status,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async ({ runtime }) => structuredResult({ ...await backend.status(runtime), ...(events ? { events: events.snapshot() } : {}) }));
 
   const hostTools = [
     ["host.list", "list", "List directory entries beneath canonical cwd. Continue with the returned fingerprint-bound nextCall.", true],
@@ -274,55 +278,33 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     }, async (input) => structuredResult(await host.control({ ...input, action } as any)));
   }
 
-  registerTool("opencode.start", {
-    title: "Start OpenCode Work",
-    description: "Admit fresh, idle-resume or forked native work. OpenCode chooses configured model/agent defaults when omitted; agents[] supplies prompt context. Select runtime, retain native sessionId and any returned user messageId; reconcile uncertain admission. Codex selects a native mode (fresh default agent), returns messageId null, and supports idle continuation.",
-    inputSchema: z.object({
-      runtime: runtimeSchema,
-      mode: z.enum(CODEX_MODES).optional().describe("Codex native preset. Fresh default agent permits workspace writes with automatic approval review. Continuation inherits locally known mode; recovered conversations require an explicit mode."),
-      task: z.string().min(1).max(65536).describe("Self-contained objective or next delta for the workstream."),
-      model: z.string().min(1).optional().describe("Optional canonical provider/model ID for fresh OpenCode work; omission lets OpenCode choose its configured default. Resume/fork inherit and reject conflicts. Codex rejects this field."),
-      cwd: z.string().min(1).optional().describe("Required for fresh work; resume/fork inherit canonical cwd."),
-      sessionId: z.string().min(1).optional().describe("Persisted idle session to continue."),
-      forkFromSessionId: z.string().min(1).optional().describe("Persisted session to fork into a new workstream."),
-      beforeMessageId: z.string().min(1).optional().describe("Optional fork boundary; requires forkFromSessionId."),
-      agent: z.string().min(1).optional().describe("Optional executing canonical agent ID for fresh OpenCode work; omission lets OpenCode choose its configured default. Resume/fork inherit and reject conflicts."),
-      title: z.string().min(1).optional().describe("OpenCode-only optional title for a fresh session; Codex rejects this field."),
-      permissions: permissionsSchema.optional().describe("Canonical ordered session rules for fresh work. Omission preserves native policy. Session rules follow agent rules; broad allow can override agent restrictions."),
-      variant: z.string().min(1).optional().describe("Fresh only: native model variant persisted before the first prompt; requires model. Resume/fork inherit and reject overrides."),
-      ...attachmentShape,
-    }).strict()
-      // Publish the fresh/resume/fork admission rules the backend already enforces, so
-      // discovery describes the contract and rejected combinations fail before any native
-      // access. These mirror the guards in OpenCodeBackend.start; both layers must agree.
-      .superRefine((input, context) => {
-        if (input.runtime !== "codex") return;
-        for (const field of codexUnsupportedStartFields) {
-          if (input[field] !== undefined) context.addIssue({ code: "custom", message: `${field} is OpenCode-only and is not supported by Codex start`, path: [field] });
-        }
-      })
-      .refine((input) => input.mode === undefined || input.runtime === "codex", { message: "mode is only valid for Codex", path: ["mode"] })
-      .refine((input) => !input.sessionId || !input.forkFromSessionId, { message: "sessionId and forkFromSessionId are mutually exclusive", path: ["forkFromSessionId"] })
-      .refine((input) => !input.beforeMessageId || !!input.forkFromSessionId, { message: "beforeMessageId requires forkFromSessionId", path: ["beforeMessageId"] })
-      .refine((input) => !!input.sessionId || !!input.forkFromSessionId || !!input.cwd, { message: "fresh opencode.start requires an explicit cwd", path: ["cwd"] })
-      .refine((input) => !input.cwd || (!input.sessionId && !input.forkFromSessionId), { message: "resume and fork inherit cwd and reject cwd overrides", path: ["cwd"] })
-      .refine((input) => !input.permissions || (!input.sessionId && !input.forkFromSessionId), { message: "permissions are only valid for fresh sessions", path: ["permissions"] })
-      .refine((input) => input.variant === undefined || (!input.sessionId && !input.forkFromSessionId), { message: "resume and fork inherit canonical variant and reject overrides", path: ["variant"] })
-      .refine((input) => input.variant === undefined || input.model !== undefined, { message: "variant requires an explicit model", path: ["variant"] })
-      .meta({
-        not: { required: ["sessionId", "forkFromSessionId"] },
-        dependentRequired: { beforeMessageId: ["forkFromSessionId"], variant: ["model"] },
-        anyOf: [{ required: ["cwd"] }, { required: ["sessionId"] }, { required: ["forkFromSessionId"] }],
-        allOf: [
-          { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: codexUnsupportedStartFields.map(field => ({ required: [field] })) } }, else: { not: { required: ["mode"] } } },
-          { not: { anyOf: [{ required: ["sessionId", "cwd"] }, { required: ["forkFromSessionId", "cwd"] }] } },
-          { not: { anyOf: [{ required: ["sessionId", "permissions"] }, { required: ["forkFromSessionId", "permissions"] }] } },
-          { not: { anyOf: [{ required: ["sessionId", "variant"] }, { required: ["forkFromSessionId", "variant"] }] } },
-        ],
-      }),
-    outputSchema: outputSchemas.start,
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
-  }, async (input) => structuredResult(await backend.start(input)));
+  const startAnnotations = { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false } as const;
+  const taskShape = { task: z.string().min(1).max(65536).describe("Self-contained objective or next delta for the workstream.") };
+  const modelShape = { model: z.string().min(1).optional().describe("Canonical model ID; for continuation/fork this must match persisted selection.") };
+  const agentShape = { agent: z.string().min(1).optional().describe("Canonical executing agent ID; for continuation/fork this must match persisted selection.") };
+  const modeShape = { mode: z.enum(CODEX_MODES).optional().describe("Codex native preset. Continuation inherits the locally known mode; recovered conversations require an explicit mode.") };
+  const createSchema = z.object({
+    runtime: runtimeSchema, ...modeShape, ...taskShape, cwd: z.string().min(1), ...modelShape, ...agentShape,
+    title: z.string().min(1).optional().describe("Optional OpenCode-only title for the fresh session."), permissions: permissionsSchema.optional(), variant: z.string().min(1).optional(), ...attachmentShape,
+  }).strict().superRefine((input, context) => {
+    if (input.runtime === "codex") for (const field of codexUnsupportedStartFields) if ((input as Record<string, unknown>)[field] !== undefined) context.addIssue({ code: "custom", message: `${field} is OpenCode-only and is not supported by Codex create`, path: [field] });
+    if (input.mode !== undefined && input.runtime !== "codex") context.addIssue({ code: "custom", message: "mode is only valid for Codex", path: ["mode"] });
+    if (input.variant !== undefined && input.model === undefined) context.addIssue({ code: "custom", message: "variant requires an explicit model", path: ["model"] });
+  }).meta({ dependentRequired: { variant: ["model"] }, if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: codexUnsupportedStartFields.map(field => ({ required: [field] })) } }, else: { not: { required: ["mode"] } } });
+  const continueSchema = z.object({ runtime: runtimeSchema, ...modeShape, ...taskShape, sessionId: z.string().min(1), ...modelShape, ...agentShape }).strict()
+    .superRefine((input, context) => {
+      if (input.mode !== undefined && input.runtime !== "codex") context.addIssue({ code: "custom", message: "mode is only valid for Codex", path: ["mode"] });
+      if (input.runtime === "codex") for (const field of ["model", "agent"] as const) if (input[field] !== undefined) context.addIssue({ code: "custom", message: `${field} is OpenCode-only and is not supported by Codex continuation`, path: [field] });
+    })
+    .meta({ allOf: [
+      { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: [{ required: ["model"] }, { required: ["agent"] }] } }, else: { not: { required: ["mode"] } } },
+    ] });
+  const forkSchema = z.object({ runtime: z.literal("opencode").optional(), ...taskShape, forkFromSessionId: z.string().min(1), beforeMessageId: z.string().min(1).optional(), ...modelShape, ...agentShape, ...attachmentShape }).strict();
+  for (const [name, title, description, inputSchema] of [
+    ["opencode.create", "Create OpenCode Work", "Create a fresh native session and submit its first task. Omit model/agent for native defaults; reconcile uncertain admission using returned canonical IDs.", createSchema],
+    ["opencode.continue", "Continue OpenCode Work", "Submit a task to one idle native session. Cwd, permissions and variant are inherited; model/agent overrides must match persisted selection. Codex may require mode after restart.", continueSchema],
+    ["opencode.fork", "Fork OpenCode Work", "Fork an OpenCode session at an optional canonical message boundary, then submit the task. Runtime is OpenCode only; cwd and configuration inherit from the source.", forkSchema],
+  ] as const) registerTool(name, { title, description, inputSchema, outputSchema: outputSchemas.start, annotations: startAnnotations }, async (input: any) => structuredResult(await backend.start(input)));
 
   registerTool("opencode.wait", {
     title: "Wait for OpenCode Work",
@@ -337,28 +319,28 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async ({ sessionId, messageId, runtime }, context) => structuredResult(await backend.wait(sessionId, messageId, context.mcpReq.signal, runtime)));
 
-  registerTool("opencode.inspect", {
-    title: "Inspect OpenCode Work",
-    description: "Read native activity or result. Codex returns the current session turn, with explicit execution knowledge; exact-prompt selection is unsupported. Complete selection before interpreting outcome; text continuation is separate. Use returned read-only nextCall arguments.",
-    inputSchema: z.object({
-      runtime: runtimeSchema,
-      sessionId: z.string().min(1),
-      messageId: z.string().min(1).optional(),
-      detail: z.enum(["semantic", "result"]).default("semantic"),
-      selectionCursor: z.string().min(1).optional().describe("Native continuation from an incomplete result scan; retain candidateAssistantMessageId too."),
-      candidateAssistantMessageId: z.string().min(1).optional(),
-      selectionFingerprint: z.string().min(1).optional().describe("Required with selectionCursor; session changes invalidate continuation."),
-      ...textShape,
-    }).strict()
-      // These continuation arguments only mean something together. Publish the
-      // dependencies the backend enforces in latestResult so an incomplete
-      // recovery call is rejected by the contract instead of being ignored.
-      .refine((input) => !input.selectionCursor || !!input.messageId, { message: "selectionCursor requires the original user messageId", path: ["messageId"] })
-      .refine((input) => !input.candidateAssistantMessageId || !!input.selectionCursor, { message: "candidate requires selectionCursor", path: ["candidateAssistantMessageId"] })
-      .meta({ dependentRequired: { selectionCursor: ["messageId"], candidateAssistantMessageId: ["selectionCursor"] } }),
-    outputSchema: outputSchemas.inspect,
+  const inspectResultSchema = z.object({
+    runtime: runtimeSchema, sessionId: z.string().min(1), messageId: z.string().min(1).optional(),
+    selectionCursor: z.string().min(1).optional().describe("Native continuation from an incomplete result scan; retain candidateAssistantMessageId too."),
+    candidateAssistantMessageId: z.string().min(1).optional(), selectionFingerprint: z.string().min(1).optional(), ...textShape,
+  }).strict()
+    .refine(input => !input.selectionCursor || !!input.messageId, { message: "selectionCursor requires the original user messageId", path: ["messageId"] })
+    .refine(input => !input.candidateAssistantMessageId || !!input.selectionCursor, { message: "candidate requires selectionCursor", path: ["candidateAssistantMessageId"] })
+    .refine(input => input.runtime !== "codex" || (!input.messageId && !input.selectionCursor && !input.candidateAssistantMessageId && !input.selectionFingerprint), { message: "Codex exact-prompt result selection is unsupported", path: ["messageId"] })
+    .meta({ dependentRequired: { selectionCursor: ["messageId"], candidateAssistantMessageId: ["selectionCursor"] }, if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: ["messageId", "selectionCursor", "candidateAssistantMessageId", "selectionFingerprint"].map(field => ({ required: [field] })) } } });
+  const inspectActivitySchema = z.object({ runtime: runtimeSchema, sessionId: z.string().min(1), messageId: z.string().min(1).optional() }).strict()
+    .refine(input => input.runtime !== "codex" || input.messageId === undefined, { message: "Codex exact-prompt inspection is unsupported", path: ["messageId"] })
+    .meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { required: ["messageId"] } } });
+  registerTool("opencode.inspectActivity", {
+    title: "Inspect OpenCode Activity", description: "Read current native activity and pending actions, optionally scoped to a canonical OpenCode prompt. Codex observes the current session turn and does not support exact-prompt selection.",
+    inputSchema: inspectActivitySchema, outputSchema: outputSchemas.inspect,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
-  }, async (input) => structuredResult(await backend.inspect(input)));
+  }, async input => structuredResult(await backend.inspect({ ...input, detail: "semantic" })));
+  registerTool("opencode.inspectResult", {
+    title: "Inspect OpenCode Result", description: "Select the result for a canonical OpenCode prompt, or observe the current Codex turn. Complete selection before interpreting outcome; continue with returned read-only nextCall.",
+    inputSchema: inspectResultSchema, outputSchema: outputSchemas.inspect,
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async input => structuredResult(await backend.inspect({ ...input, detail: "result" })));
 
   const queryTools = [
     ["opencode.sessionDiff", "sessionDiff", "Read a session's native file diff, optionally paged or narrowed to one file patch."],

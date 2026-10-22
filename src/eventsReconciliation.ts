@@ -38,10 +38,10 @@ export class EventReconciler {
               this.continuations.delete(key); break;
             }
             const next = result?.nextCall;
-            if (!result?.terminal || next?.tool !== "opencode.inspect" || !this.sameTarget(target, next.arguments)) {
+            if (!result?.terminal || next?.tool !== "opencode.inspectResult" || !this.sameTarget(target, next.arguments)) {
               this.continuations.delete(key); break;
             }
-            this.continuations.set(key, next.arguments!);
+            this.continuations.set(key, { ...next.arguments!, detail: "result" });
           }
         } catch (error) {
           this.continuations.delete(key);
@@ -54,6 +54,6 @@ export class EventReconciler {
     } finally { this.busy = false; }
   }
   private sameTarget(target: Target, input?: Input) {
-    return input?.sessionId === target.sessionId && input.messageId === target.messageId && input.detail === "result";
+    return input?.sessionId === target.sessionId && input.messageId === target.messageId;
   }
 }

@@ -22,9 +22,10 @@ async function fixture(native: ReturnType<typeof nativeFixture>, events?: Events
   const [a, b] = InMemoryTransport.createLinkedPair();
   await server.connect(a); await client.connect(b);
   const { tools } = await client.listTools();
-  const status = tools.find(tool => tool.name === "status")!;
+  const status = tools.find(tool => tool.name === "status.recovery")!;
+  const readiness = tools.find(tool => tool.name === "status.readiness")!;
   const validate = new AjvJsonSchemaValidator().getValidator(status.outputSchema! as JsonSchemaType);
-  return { client, status, validate, close: async () => { await client.close(); await server.close(); browser?.close(); } };
+  return { client, status, readiness, validate, close: async () => { await client.close(); await server.close(); browser?.close(); } };
 }
 
 test("MCP readiness reads native info only and reports concise local components for either runtime", async () => {
@@ -40,12 +41,12 @@ test("MCP readiness reads native info only and reports concise local components 
   const f = await fixture(native, events, browser);
   try {
     assert.equal(native.requests.length, 0, "discovery is passive");
-    const validateInput = new AjvJsonSchemaValidator().getValidator(f.status.inputSchema as JsonSchemaType);
-    assert.equal((f.status.inputSchema.properties!.detail as { default: string }).default, "recovery");
+    const validateInput = new AjvJsonSchemaValidator().getValidator(f.readiness.inputSchema as JsonSchemaType);
+    assert.deepEqual(f.readiness.inputSchema.properties, {});
     for (const runtime of [undefined, "opencode", "codex"]) {
-      const args = { detail: "readiness", ...(runtime ? { runtime } : {}) };
+      const args = {};
       assert.equal(validateInput(args).valid, true);
-      const response = await f.client.callTool({ name: "status", arguments: args });
+      const response = await f.client.callTool({ name: "status.readiness", arguments: args });
       assert.notEqual(response.isError, true);
       assert.deepEqual(response.content, []);
       assert.equal(f.validate(response.structuredContent).valid, true);
@@ -61,9 +62,11 @@ test("MCP readiness reads native info only and reports concise local components 
       assert.ok(Buffer.byteLength(JSON.stringify(response.structuredContent)) < 1024);
     }
     assert.deepEqual(native.requests.map(request => request.path), ["/api/info", "/api/info", "/api/info"]);
-    const rejected = await f.client.callTool({ name: "status", arguments: { detail: "light" } });
+    const rejected = await f.client.callTool({ name: "status.readiness", arguments: { detail: "light" } });
     assert.equal(rejected.isError, true);
-    assert.equal(native.requests.length, 3, "invalid detail is rejected before native access");
+    const wrongScope = await f.client.callTool({ name: "status.readiness", arguments: { runtime: "codex" } });
+    assert.equal(wrongScope.isError, true);
+    assert.equal(native.requests.length, 3, "invalid readiness inputs are rejected before native access");
   } finally { await f.close(); await events.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -71,7 +74,7 @@ test("MCP readiness retains connector identity and sanitizes unavailable OpenCod
   const native = nativeFixture(() => Response.json({ _tag: "UnauthorizedError", message: "PRIVATE-UPSTREAM" }, { status: 401 }));
   const f = await fixture(native);
   try {
-    const response = await f.client.callTool({ name: "status", arguments: { detail: "readiness" } });
+    const response = await f.client.callTool({ name: "status.readiness", arguments: {} });
     assert.equal(response.isError, true);
     assert.deepEqual(response.content, []);
     assert.equal(f.validate(response.structuredContent).valid, true);
@@ -104,8 +107,8 @@ test("MCP omitted and explicit recovery retain worker result evidence and runtim
   const f = await fixture(native);
   try {
     let defaultResult: unknown;
-    for (const args of [{}, { detail: "recovery" }, { detail: "recovery", runtime: "opencode" }]) {
-      const response = await f.client.callTool({ name: "status", arguments: args });
+    for (const args of [{}, { runtime: "opencode" }]) {
+      const response = await f.client.callTool({ name: "status.recovery", arguments: args });
       assert.notEqual(response.isError, true);
       assert.equal(f.validate(response.structuredContent).valid, true);
       const result = response.structuredContent as any;
@@ -120,7 +123,7 @@ test("MCP omitted and explicit recovery retain worker result evidence and runtim
     }
     assert.ok(native.requests.some(request => request.path.endsWith("/message")));
     const before = native.requests.length;
-    const codex = await f.client.callTool({ name: "status", arguments: { runtime: "codex", detail: "recovery" } });
+    const codex = await f.client.callTool({ name: "status.recovery", arguments: { runtime: "codex" } });
     assert.notEqual(codex.isError, true);
     assert.equal(f.validate(codex.structuredContent).valid, true);
     assert.deepEqual((codex.structuredContent as any).workers, []);

@@ -122,12 +122,12 @@ test("MCP removes job actions and enforces OpenCode prompt identity requirements
     const { tools } = await client.listTools();
     const published = JSON.stringify(tools);
     for (const removed of ["codexStart", "codexCancel", "codexJob", "jobId"]) assert.equal(published.includes(removed), false);
-    const valid = await client.callTool({ name: "opencode.start", arguments: { runtime: "codex", cwd: "/tmp", task: "review" } });
+    const valid = await client.callTool({ name: "opencode.create", arguments: { runtime: "codex", cwd: "/tmp", task: "review" } });
     assert.notEqual(valid.isError, true);
     assert.equal((valid.structuredContent as any).messageId, null);
     const before = f.requests.length;
     for (const [name, args] of [
-      ["opencode.start", { task: "missing cwd" }],
+      ["opencode.create", { task: "missing cwd" }],
       ["opencode.wait", { sessionId: "native-thread" }],
       ["opencode.interrupt", {}],
     ] as const) assert.equal((await client.callTool({ name, arguments: args })).isError, true);
@@ -212,7 +212,7 @@ test("MCP routes exact Codex options and rejects mixing runtime decision formats
   const client = new Client({ name: "codex-mode-contract", version: "1" });
   const [a,b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
   try {
-    const admitted = await client.callTool({ name: "opencode.start", arguments: { runtime: "codex", cwd: "/tmp", task: "implement", mode: "workspace-write" } });
+    const admitted = await client.callTool({ name: "opencode.create", arguments: { runtime: "codex", cwd: "/tmp", task: "implement", mode: "workspace-write" } });
     assert.notEqual(admitted.isError, true);
     assert.equal((admitted.structuredContent as any).mode, "workspace-write");
     const accepted = await client.callTool({ name: "opencode.respondPermission", arguments: { runtime: "codex", sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
@@ -227,7 +227,7 @@ test("MCP routes exact Codex options and rejects mixing runtime decision formats
       { sessionId: "native-thread", requestId: "native-request", optionId: "native-once" },
       { runtime: "codex", sessionId: "native-thread", requestId: "native-request", decision: "always", optionId: "native-once" },
     ]) assert.equal((await client.callTool({ name: "opencode.respondPermission", arguments: args })).isError, true);
-    assert.equal((await client.callTool({ name: "opencode.start", arguments: { cwd: "/tmp", task: "native", model: "openai/model", mode: "agent" } })).isError, true);
+    assert.equal((await client.callTool({ name: "opencode.create", arguments: { cwd: "/tmp", task: "native", model: "openai/model", mode: "agent" } })).isError, true);
     assert.equal(f.requests.length, before);
   } finally { await client.close(); await server.close(); }
 });

@@ -101,7 +101,7 @@ export function projectWorker(session: SessionInfo, active: Record<string, unkno
     outcome: evidence.outcome,
     outcomeBasis: evidence.basis,
     outcomeEvidence: evidence,
-    nextCall: continuation ?? nextCall("opencode.inspect", { sessionId: session.id, detail: "result" }),
+    nextCall: continuation ?? nextCall("opencode.inspectResult", { sessionId: session.id }),
     title: session.title ?? null,
     model: session.model ? modelKey(session.model) : null,
     modelVariant: session.model?.variant ?? null,

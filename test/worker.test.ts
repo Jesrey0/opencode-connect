@@ -63,11 +63,11 @@ test("bounded result scan continues past 500 with canonical cursor and candidate
   assert.equal(first.text, "");
   assert.equal(first.outcome, "unknown");
   assert.equal(first.textNextCall, null);
-  assert.equal(first.nextCall?.tool, "opencode.inspect");
+  assert.equal(first.nextCall?.tool, "opencode.inspectResult");
   const input = { sessionId: "s", messageId: "target", selectionCursor: first.selectionCursor!, candidateAssistantMessageId: first.candidateAssistantMessageId!, selectionFingerprint: first.selectionFingerprint };
   const next = await latestResult(native.client, input, true);
   assert.equal(next.selectionComplete, true); assert.equal(next.assistantMessageId, "a629"); assert.equal(next.text, "step629");
-  assert.deepEqual(first.nextCall?.arguments, { ...input, detail: "result" });
+  assert.deepEqual(first.nextCall?.arguments, input);
   native.state.time.updated++;
   await assert.rejects(latestResult(native.client, input, true), /changed/);
   await assert.rejects(latestResult(native.client, { ...input, selectionFingerprint: undefined }, true), /fingerprint/);
@@ -92,8 +92,8 @@ test("result selection and full-text continuations are independent reusable cano
   const native = messageFixture([user("target"), ...Array.from({ length: 630 }, (_, i) => assistant(`a${i}`, i === 629 ? "😀".repeat(8000) : "step"))]);
   const backend = new OpenCodeBackend(native.connect);
   const initial = await latestResult(native.client, { sessionId: "s", messageId: "target", textLimit: 1000 }, true);
-  assert.equal(initial.nextCall?.tool, "opencode.inspect");
-  const selected = await backend.inspect({ ...initial.nextCall!.arguments, runtime: "opencode" } as Parameters<typeof backend.inspect>[0] & { runtime: "opencode" });
+  assert.equal(initial.nextCall?.tool, "opencode.inspectResult");
+  const selected = await backend.inspect({ ...initial.nextCall!.arguments, runtime: "opencode", detail: "result" } as Parameters<typeof backend.inspect>[0] & { runtime: "opencode" });
   assert.ok("result" in selected);
   assert.equal(selected.result.selectionComplete, true);
   assert.equal(selected.result.outcome, "completed");

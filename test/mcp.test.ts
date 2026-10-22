@@ -28,11 +28,11 @@ test("MCP discovery uses host/command groups and canonical worker names without 
     const focused = ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.read", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"];
     const queries = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
     const actions = ["steer", "cancelInbox", "updateInbox", "compact", "command", "invokeSkill", "interrupt", "respondPermission", "respondForm", "cancelForm", "delete", "revertStage", "revertClear", "revertCommit", "switchModel", "switchAgent", "setPermissions", "removeSavedApproval", "synthetic"].map(action => `opencode.${action}`);
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["status", "opencode.start", "opencode.wait", "opencode.inspect", ...queries, ...actions, "host.write", ...focused].sort());
+    assert.deepEqual(tools.map((t) => t.name).sort(), ["status.readiness", "status.recovery", "opencode.create", "opencode.continue", "opencode.fork", "opencode.wait", "opencode.inspectActivity", "opencode.inspectResult", ...queries, ...actions, "host.write", ...focused].sort());
     // OpenAI plugin reference/guidelines reviewed 2026-10-15; see
     // docs/chatgpt-mcp-review.md for sources and behavior justifications.
     for (const [name, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of [
-      ["status", true, false, false, true],
+      ["status.readiness", true, false, false, true], ["status.recovery", true, false, false, true],
       ["host.write", false, true, false, false],
       ["command.read", false, true, false, false],
       ...["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList"].map(name => [name, true, false, false, true] as const),
@@ -43,9 +43,9 @@ test("MCP discovery uses host/command groups and canonical worker names without 
       ["opencode.revertStage", false, false, false, false], ["opencode.revertClear", false, false, false, true],
       ["host.worktreeRefresh", false, false, false, true],
       ["command.resize", false, false, false, true],
-      ["opencode.start", false, true, true, false],
+      ...["opencode.create", "opencode.continue", "opencode.fork"].map(name => [name, false, true, true, false] as const),
       ["opencode.wait", true, false, false, true],
-      ["opencode.inspect", true, false, false, true],
+      ["opencode.inspectActivity", true, false, false, true], ["opencode.inspectResult", true, false, false, true],
       ...queries.map(name => [name, true, false, false, true] as const),
     ] as const) {
       const tool = tools.find((t) => t.name === name)!;
@@ -53,11 +53,11 @@ test("MCP discovery uses host/command groups and canonical worker names without 
       const annotations = tools.find((t) => t.name === name)!.annotations!;
       assert.deepEqual(annotations, { readOnlyHint, destructiveHint, openWorldHint, idempotentHint }, name);
     }
-    const start = tools.find((t) => t.name === "opencode.start")!.inputSchema;
+    const start = tools.find((t) => t.name === "opencode.create")!.inputSchema;
     assert.equal("permissionMode" in start.properties!, false);
     assert.equal("permissions" in start.properties!, true);
     assert.equal(start.additionalProperties, false);
-    const rejected = await fixture.client.callTool({ name: "opencode.start", arguments: { task: "x", model: "openai/a", cwd: "/tmp", permissionMode: "allow" } });
+    const rejected = await fixture.client.callTool({ name: "opencode.create", arguments: { task: "x", model: "openai/a", cwd: "/tmp", permissionMode: "allow" } });
     assert.equal(rejected.isError, true);
   } finally { await fixture.close(); }
 });
@@ -85,7 +85,7 @@ test("focused host and command tools have unique purpose-specific schemas and tr
     assert.deepEqual([resize.readOnlyHint, resize.destructiveHint, resize.idempotentHint], [false, false, true]);
     const read = tools.find(tool => tool.name === "command.read")!.annotations!;
     assert.deepEqual([read.readOnlyHint, read.destructiveHint], [false, true], "persistent observer may remove an exited handle");
-    for (const name of ["host.inspect", "host.worktree", "command.start", "command.control", "opencode.query", "opencode.act"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
+    for (const name of ["host.inspect", "host.worktree", "command.start", "command.control", "opencode.query", "opencode.act", "opencode.start", "opencode.inspect", "status"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
   } finally { await fixture.close(); }
 });
 
@@ -290,7 +290,7 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
     for (const field of ["cursor", "limit", "cwd", "searchTerm", "runtime"]) assert.ok(field in sessionsTool.properties!, `sessions.${field}`);
     assert.equal((sessionsTool.properties!.limit as { default?: number }).default, 25);
     assert.equal((schemas.get("opencode.message")!.properties!.textLimit as { default?: number }).default, 12000);
-    const start = schemas.get("opencode.start")!;
+    const start = schemas.get("opencode.create")!;
     assert.equal((start.properties!.agent as { type: string }).type, "string");
     const contextAgents = start.properties!.agents as { type: string; maxItems: number; items: { type: string; properties: Record<string, { type: string }>; required: string[]; additionalProperties: boolean } };
     assert.equal(contextAgents.type, "array");
@@ -352,7 +352,7 @@ test("discovered output schemas accept existing safe structured errors, includin
     const { tools } = await fixture.client.listTools();
     for (const [name, args] of [
        ["host.vcs", { cwd: "/workspace" }],
-      ["opencode.start", { cwd: "/workspace", model: "openai/a", task: "test" }],
+      ["opencode.create", { cwd: "/workspace", model: "openai/a", task: "test" }],
       ["opencode.delete", { runtime: "opencode", sessionId: "s" }],
     ] as const) {
       const response = await fixture.client.callTool({ name, arguments: args });
@@ -407,23 +407,23 @@ test("Codex start rejects OpenCode-only fields at MCP admission while OpenCode t
   const fixture = await mcpFixture(native, new AdmissionBackend(native.connect));
   try {
     const { tools } = await fixture.client.listTools();
-    const schema = tools.find(tool => tool.name === "opencode.start")!.inputSchema;
+    const schema = tools.find(tool => tool.name === "opencode.create")!.inputSchema;
     const validate = new AjvJsonSchemaValidator().getValidator(schema as JsonSchemaType);
     assert.match((schema.properties!.title as { description: string }).description, /OpenCode-only/);
     const codex = { runtime: "codex", cwd: "/tmp", task: "test" };
     assert.equal(validate(codex).valid, true);
-    for (const [field, value] of Object.entries({ model: "openai/a", agent: "build", variant: "high", permissions: [], forkFromSessionId: "s", beforeMessageId: "m", title: "x", files: [], agents: [], skills: [] })) {
+    for (const [field, value] of Object.entries({ model: "openai/a", agent: "build", variant: "high", permissions: [], title: "x", files: [], agents: [], skills: [] })) {
       const args = { ...codex, [field]: value };
       assert.equal(validate(args).valid, false, field);
-      const response = await fixture.client.callTool({ name: "opencode.start", arguments: args });
+      const response = await fixture.client.callTool({ name: "opencode.create", arguments: args });
       assert.equal(response.isError, true, field);
-      assert.ok(JSON.stringify(response.content).includes(`${field} is OpenCode-only and is not supported by Codex start`), field);
+      assert.ok(JSON.stringify(response.content).includes(`${field} is OpenCode-only and is not supported by Codex create`), field);
       assert.equal(starts.length, 0, "rejected without backend invocation");
     }
     for (const runtime of [undefined, "opencode"]) {
       const args = { ...(runtime ? { runtime } : {}), cwd: "/tmp", task: "test", model: "openai/a", title: "x" };
       assert.equal(validate(args).valid, true);
-      await fixture.client.callTool({ name: "opencode.start", arguments: args });
+      await fixture.client.callTool({ name: "opencode.create", arguments: args });
       assert.deepEqual(starts.at(-1), args, "OpenCode title is passed through unchanged");
     }
     assert.equal(starts.length, 2);
@@ -431,52 +431,52 @@ test("Codex start rejects OpenCode-only fields at MCP admission while OpenCode t
   } finally { await fixture.close(); }
 });
 
-test("published start/inspect contracts self-describe the exact admission and continuation guards the backend enforces", async () => {
-  const native = nativeFixture((request) => {
-    if (request.path === "/api/session/s") return { data: session() };
-    if (request.path === "/api/session/active") return { data: {} };
-    throw new Error(`guarded input must not reach native ${request.path}`);
-  });
-  const fixture = await mcpFixture(native);
-  const backend = new OpenCodeBackend(native.connect);
+test("focused start and inspect schemas reject cross-purpose and runtime-invalid inputs before dispatch", async () => {
+  let starts = 0, inspects = 0;
+  class DispatchBackend extends OpenCodeBackend {
+    override async start(input: Parameters<OpenCodeBackend["start"]>[0]): Promise<never> { starts++; throw new Error("start dispatched"); }
+    override async inspect(input: Parameters<OpenCodeBackend["inspect"]>[0]): Promise<never> { inspects++; throw new Error("inspect dispatched"); }
+  }
+  const native = nativeFixture(() => { throw new Error("invalid schema input reached native access"); });
+  const fixture = await mcpFixture(native, new DispatchBackend(native.connect));
   try {
     const { tools } = await fixture.client.listTools();
-    const schemas = new Map(tools.map((tool) => [tool.name, tool.inputSchema]));
-    const rules = [{ action: "read", resource: "*", effect: "allow" }];
-    const guarded: [string, Record<string, unknown>, (input: never) => Promise<unknown>, string][] = [
-      ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", forkFromSessionId: "f" }, (i) => backend.start(i), "sessionId and forkFromSessionId are mutually exclusive"],
-      ["opencode.start", { task: "t", model: "openai/a", cwd: "/tmp", beforeMessageId: "m" }, (i) => backend.start(i), "beforeMessageId requires forkFromSessionId"],
-      ["opencode.start", { task: "t", model: "openai/a" }, (i) => backend.start(i), "fresh opencode.start requires an explicit cwd"],
-      ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", cwd: "/tmp" }, (i) => backend.start(i), "resume and fork inherit cwd and reject cwd overrides"],
-      ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", permissions: rules }, (i) => backend.start(i), "permissions are only valid for fresh sessions"],
-      ["opencode.start", { task: "t", model: "openai/a", sessionId: "s", variant: "high" }, (i) => backend.start(i), "resume and fork inherit canonical variant and reject overrides"],
-      ["opencode.start", { task: "t", model: "openai/a", forkFromSessionId: "f", variant: "high" }, (i) => backend.start(i), "resume and fork inherit canonical variant and reject overrides"],
-      ["opencode.inspect", { sessionId: "s", detail: "result", selectionCursor: "c" }, (i) => backend.inspect(i), "selectionCursor requires the original user messageId"],
-      ["opencode.inspect", { sessionId: "s", detail: "result", candidateAssistantMessageId: "a" }, (i) => backend.inspect(i), "candidate requires selectionCursor"],
+    const schemas = new Map(tools.map(tool => [tool.name, tool.inputSchema]));
+    const validator = (tool: string, args: Record<string, unknown>) => new AjvJsonSchemaValidator().getValidator(schemas.get(tool)! as JsonSchemaType)(args).valid;
+    const accepted: [string, Record<string, unknown>][] = [
+      ["opencode.create", { cwd: "/tmp", task: "create", variant: "high", model: "openai/model" }],
+      ["opencode.continue", { sessionId: "s", task: "continue", runtime: "codex", mode: "agent" }],
+      ["opencode.fork", { forkFromSessionId: "s", beforeMessageId: "m", task: "fork" }],
+      ["opencode.inspectActivity", { sessionId: "s" }],
+      ["opencode.inspectResult", { sessionId: "s", messageId: "u", selectionCursor: "c", selectionFingerprint: "f", candidateAssistantMessageId: "a" }],
+      ["opencode.inspectResult", { sessionId: "s", runtime: "codex", textLimit: 100 }],
     ];
-    for (const [name, args, call, expected] of guarded) {
-      const label = `${name} ${JSON.stringify(args)}`;
-      // Discovery publishes the rule, so the combination is not merely rejected later.
-      assert.equal(new AjvJsonSchemaValidator().getValidator(schemas.get(name)! as JsonSchemaType)(args).valid, false, label);
-      const before = native.requests.length;
+    for (const [name, args] of accepted) assert.equal(validator(name, args), true, `${name} ${JSON.stringify(args)}`);
+    const rejected: [string, Record<string, unknown>][] = [
+      ["opencode.create", { task: "missing cwd" }],
+      ["opencode.create", { cwd: "/tmp", task: "codex", runtime: "codex", title: "unsupported" }],
+      ["opencode.continue", { sessionId: "s", task: "continue", cwd: "/tmp" }],
+      ["opencode.continue", { sessionId: "s", task: "continue", permissions: [] }],
+      ["opencode.continue", { sessionId: "s", task: "continue", variant: "high" }],
+      ["opencode.continue", { sessionId: "s", task: "continue", mode: "agent" }],
+      ["opencode.continue", { sessionId: "s", task: "continue", runtime: "codex", model: "openai/model" }],
+      ["opencode.fork", { forkFromSessionId: "s", task: "fork", runtime: "codex" }],
+      ["opencode.inspectActivity", { sessionId: "s", detail: "result" }],
+      ["opencode.inspectActivity", { sessionId: "s", runtime: "codex", messageId: "u" }],
+      ["opencode.inspectResult", { sessionId: "s", selectionCursor: "c" }],
+      ["opencode.inspectResult", { sessionId: "s", candidateAssistantMessageId: "a" }],
+      ["opencode.inspectResult", { sessionId: "s", runtime: "codex", messageId: "u" }],
+    ];
+    for (const [name, args] of rejected) {
+      assert.equal(validator(name, args), false, `${name} schema`);
       const response = await fixture.client.callTool({ name, arguments: args });
-      assert.equal(response.isError, true, label);
-      assert.equal(native.requests.length, before, `${label}: rejected before native access`);
-      // The contract states the same reason the backend guard uses, for non-MCP callers.
-      assert.ok(JSON.stringify(response.content).includes(expected), `${label}: contract reports "${expected}"`);
-      await assert.rejects(call(args as never), (error: Error) => error.message === expected, `${label}: backend keeps its own guard`);
+      assert.equal(response.isError, true, `${name} runtime`);
+      assert.equal(starts + inspects, 0, "invalid input rejected before backend dispatch");
     }
-    // Every combination the connector itself emits for recovery stays accepted.
-    for (const args of [
-      { task: "t", model: "openai/a", cwd: "/tmp", permissions: rules, variant: "high" },
-      { task: "t", model: "openai/a", sessionId: "s" },
-      { task: "t", model: "openai/a", forkFromSessionId: "f", beforeMessageId: "m" },
-    ]) assert.equal(new AjvJsonSchemaValidator().getValidator(schemas.get("opencode.start")! as JsonSchemaType)(args).valid, true, JSON.stringify(args));
-    for (const args of [
-      { sessionId: "s" },
-      { sessionId: "s", messageId: "u", detail: "result" },
-      { sessionId: "s", messageId: "u", detail: "result", selectionCursor: "c", selectionFingerprint: "f", candidateAssistantMessageId: "a" },
-    ]) assert.equal(new AjvJsonSchemaValidator().getValidator(schemas.get("opencode.inspect")! as JsonSchemaType)(args).valid, true, JSON.stringify(args));
+    for (const [name, args] of accepted) await fixture.client.callTool({ name, arguments: args });
+    assert.equal(starts, 3);
+    assert.equal(inspects, 3);
+    assert.equal(native.requests.length, 0);
   } finally { await fixture.close(); }
 });
 
@@ -563,7 +563,7 @@ test("semantic and action-required recovery stay transport-bounded with long Uni
     return response.structuredContent as any;
   };
   try {
-    const semantic = await call("opencode.inspect", { sessionId: "s", detail: "semantic" });
+    const semantic = await call("opencode.inspectActivity", { sessionId: "s" });
     const waited = await call("opencode.wait", { sessionId: "s", messageId: "u" });
     assert.equal(waited.wakeReason, "actionRequired"); assert.equal(waited.pendingActions.length, 1);
     const preview = semantic.currentActivity;

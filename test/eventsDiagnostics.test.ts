@@ -33,7 +33,7 @@ test("existing status tool exposes the same sanitized event snapshot as local ob
   const [a, b] = InMemoryTransport.createLinkedPair();
   await server.connect(a); await client.connect(b);
   try {
-    const response = await client.callTool({ name: "status", arguments: {} });
+    const response = await client.callTool({ name: "status.recovery", arguments: {} });
     assert.equal(response.isError, undefined);
     assert.deepEqual((response.structuredContent as any).events, events.snapshot());
     assert.equal((response.structuredContent as any).ready, true);

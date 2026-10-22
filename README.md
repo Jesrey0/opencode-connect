@@ -203,7 +203,8 @@ at 5 s. Shell timeout defaults to 120 s and caps at 24 hours.
 
 ## WorkerPlane
 
-`status`, `opencode.start`, `opencode.wait`, `opencode.inspect`, individually
+`status.readiness`, `status.recovery`, `opencode.create`, `opencode.continue`,
+`opencode.fork`, `opencode.wait`, `opencode.inspectActivity`, `opencode.inspectResult`, individually
 named `opencode.*` query tools, and individually named `opencode.*` session action
 tools retain OpenCode's native worker identities. Actions include `opencode.steer`,
 `opencode.updateInbox`, `opencode.respondPermission`, `opencode.switchModel`, and
@@ -216,13 +217,15 @@ state even when the terminal event was missed. SDK request cancellation or HTTP
 disconnect releases the wait's native read/event observer without interrupting
 the retained worker; use `opencode.interrupt` to stop native execution.
 
-For a quick availability check, use `status` with `detail: "readiness"`.
+For a quick availability check, use `status.readiness`; use `status.recovery` for
+active/recent worker inventory and result evidence. These have separate inputs;
+readiness performs no worker inventory reads.
 It returns connector version/build identity and OpenCode readiness without reading
 worker/session history or Codex RPC. Component summaries cover events and the local
 browser supervisor; they do not probe Chrome, validate a lease, or verify the Codex
 plugin or quota. An unavailable OpenCode returns `ready: false` with connector
-identity and a sanitized issue. Omitted detail or `detail: "recovery"` preserves the
-existing worker/result evidence; `runtime` selects that recovery inventory.
+identity and a sanitized issue. `status.recovery` accepts an optional runtime to
+select that worker inventory and preserves existing result evidence.
 Use `browser.status` for browser endpoint and attachment diagnosis. See the
 [operator acceptance matrix](docs/operator-acceptance.md) for measurement and
 the remaining ChatGPT workflow checks.
@@ -290,9 +293,9 @@ only after current ingress grant validation. The private
 forwarded `x-host-ingress-auth-context` and later checks the stored opaque grant
 context; callback credentials and grant contexts are stored only in the private
 state file. Events do not replay missed history; consumers should deduplicate by
-stable `eventId` and reconcile with `opencode.inspect`.
+stable `eventId` and reconcile with `opencode.inspectResult`.
 
-Event lifecycle diagnostics are available in the existing authenticated `status`
+Event lifecycle diagnostics are available in the authenticated `status.recovery`
 tool's `events` field and at local `GET /observe` under `events`; shared ingress
 exposes only `/mcp`, not this observation endpoint. Diagnostics include sanitized
 subscription IDs, exact session/message IDs, expiration/verification-cache times,
@@ -599,7 +602,7 @@ uncertain admission or mutation; reconcile native state first.
 
 ### Codex sessions
 
-Use `opencode.start` with `runtime: "codex"`, `task`, and an existing absolute
+Use `opencode.create` with `runtime: "codex"`, `task`, and an existing absolute
 `cwd`. Admission returns the actual native Codex `sessionId` after session setup
 and native mode selection. Fresh sessions default to native `agent` mode.
 Optional `mode` selects `read-only`, `workspace-write`, `agent`, or
@@ -608,7 +611,7 @@ Optional `mode` selects `read-only`, `workspace-write`, `agent`, or
 admission. Retain the runtime and session ID together. Never retry uncertain
 admission automatically; a known session ID remains available for reconciliation.
 
-`opencode.inspect` and `opencode.wait` accept the same runtime and session ID.
+`opencode.inspectActivity`, `opencode.inspectResult`, and `opencode.wait` accept the same runtime and session ID.
 They observe the current session turn, not an exact historical prompt. Omit
 `messageId`; `capabilities.exactPromptWait` is false. Results retain the native
 assistant ID when available, bounded text pagination and explicit truncation.
@@ -618,7 +621,7 @@ completion from objective success. Pending native permissions wake wait with
 native conversation history is recoverable, but execution termination evidence
 is unavailable: outcome stays unknown and wait returns `executionUnavailable`.
 
-Continue an idle session with `opencode.start runtime: "codex" sessionId task`.
+Continue an idle session with `opencode.continue runtime: "codex" sessionId task`.
 Continuation inherits cwd and the locally known mode. If selection was lost
 after cache eviction or restart, continuation requires an explicit `mode`;
 native history does not prove the previous selection. Interrupt with
@@ -726,8 +729,8 @@ protection, and cancellation without worker interruption. Published `tools/list`
 and nested query object properties/discriminator enums alongside strict variant
 constraints; JSON Schema validation tests verify unsupported combinations and
 bounds independently of the Zod parser. Published schemas also carry the
-`opencode.start` fresh/resume/fork admission rules and the `opencode.inspect`
-selection-continuation dependencies that the backend already enforced at runtime,
+`opencode.create`/`opencode.continue`/`opencode.fork` admission rules and the
+`opencode.inspectResult` selection-continuation dependencies that the backend already enforced at runtime,
 so those combinations are refused by the contract with the same reason and before
 any native access, instead of failing or being ignored after a round trip. Both
 layers stay in force: the backend guards remain authoritative for non-MCP callers,

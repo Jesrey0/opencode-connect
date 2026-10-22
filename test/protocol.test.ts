@@ -180,7 +180,7 @@ test("HTTP disconnect cancels the wait observer promptly without interrupting th
     assert.equal(eventSignal?.aborted, true);
     assert.equal(native.requests.every((request) => request.method === "GET"), true);
     assert.equal(native.requests.some((request) => request.path.endsWith("/interrupt")), false);
-    const inspection = await http.send("tools/call", { name: "opencode.inspect", arguments: { sessionId: "s", messageId: "u" } });
+    const inspection = await http.send("tools/call", { name: "opencode.inspectActivity", arguments: { sessionId: "s", messageId: "u" } });
     assert.equal(inspection.reply.result.structuredContent.session.status, "inProgress");
   } finally { request.destroy(); await http.close(); }
 });
@@ -341,7 +341,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     const listing = await http.send("tools/list");
     assert.equal(listing.status, 200);
     const tools = listing.reply.result.tools as any[];
-    assert.equal(tools.length, 65);
+    assert.equal(tools.length, 69);
     const validators = new AjvJsonSchemaValidator();
     for (const tool of tools) {
       assert.equal(tool.inputSchema.$schema, "https://json-schema.org/draft/2020-12/schema");
@@ -350,7 +350,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     }
     assert.equal(tools.find((tool) => tool.name === "opencode.respondPermission").annotations.openWorldHint, true);
     const calls: [string, Record<string, unknown>][] = [
-      ["status", {}], ["host.list", { cwd }],
+      ["status.readiness", {}], ["status.recovery", {}], ["host.list", { cwd }],
       ["host.terminalScreen", { cwd, sessionId: "s" }],
       ["host.terminalSnapshot", { cwd, id: "pty" }],
       ["host.write", { cwd, path: "new", encoding: "utf8", data: "written", overwrite: false }],
@@ -358,10 +358,10 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
       ["command.startShell", { cwd, command: "fixture" }],
       ["command.read", { kind: "shell", cwd, id: "shell" }],
       ["command.remove", { kind: "shell", cwd, id: "shell" }],
-      ["opencode.start", { cwd, model: "openai/a", task: "fixture" }],
+      ["opencode.create", { cwd, model: "openai/a", task: "fixture" }],
       ["opencode.wait", { sessionId: "s", messageId: "u" }],
-      ["opencode.inspect", { sessionId: "s", messageId: "u", detail: "result" }],
-      ["opencode.inspect", { sessionId: "s" }],
+      ["opencode.inspectResult", { sessionId: "s", messageId: "u" }],
+      ["opencode.inspectActivity", { sessionId: "s" }],
       ["opencode.session", { sessionId: "s" }],
       ["opencode.interrupt", { sessionId: "s" }],
     ];
@@ -379,13 +379,13 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
       const schema = tools.find((tool) => tool.name === name).outputSchema;
       assert.equal(validators.getValidator(schema as JsonSchemaType)(value.structuredContent).valid, true, name);
     }
-    const failed = await http.send("tools/call", { name: "opencode.start", arguments: { cwd, task: "fixture", model: "missing/model" } });
+    const failed = await http.send("tools/call", { name: "opencode.create", arguments: { cwd, task: "fixture", model: "missing/model" } });
     assert.equal(failed.reply.result.isError, true);
     assert.deepEqual(failed.reply.result.content, []);
     assert.match(failed.reply.result.structuredContent.error, /readback mismatch/);
     assert.equal(native.requests.filter((request) => request.path === "/api/model").length, 0, "native session admission owns model validation");
-    assert.equal(validators.getValidator(tools.find(tool => tool.name === "opencode.start").outputSchema)(failed.reply.result.structuredContent).valid, true);
-    const invalid = await http.send("tools/call", { name: "status", arguments: { alias: "old" } });
+    assert.equal(validators.getValidator(tools.find(tool => tool.name === "opencode.create").outputSchema)(failed.reply.result.structuredContent).valid, true);
+    const invalid = await http.send("tools/call", { name: "status.readiness", arguments: { alias: "old" } });
     assert.equal(invalid.reply.result.isError, true);
   } finally { await http.close(); await rm(cwd, { recursive: true, force: true }); }
 });
