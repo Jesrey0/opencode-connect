@@ -1,7 +1,7 @@
 import * as z from "zod/v4";
 import type { OpenCodeClient } from "@opencode/client";
 import { AdmissionError, ConnectorError, SessionDeleteError, page, textPage, type PageInput } from "./bounds.js";
-import { pageNextCall } from "./continuation.js";
+import { pageNextCall, queryToolName } from "./continuation.js";
 import { CodexSessionsDefinition } from "./codexRpc.js";
 
 export type Runtime = "opencode" | "codex";
@@ -223,7 +223,7 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
       const m = messages.find(m => m.id === input.messageId);
       if (!m) throw new ConnectorError("Native Codex message was not found in bounded history; no fallback was selected");
       const paged = textPage(m.text, input.textOffset, input.textLimit, input.textFingerprint);
-      return { ...m, ...paged, nextCall: pageNextCall("opencode.query", { runtime: "codex", type: "message", sessionId: input.sessionId, messageId: input.messageId }, paged) };
+      return { ...m, ...paged, nextCall: pageNextCall(queryToolName("message"), { runtime: "codex", sessionId: input.sessionId, messageId: input.messageId }, paged) };
     }
     const ordered = input.order === "asc" ? messages : [...messages].reverse();
     const paged = page(ordered.map(m => ({ ...m, text: m.text.slice(0, 512), previewTruncated: m.text.length > 512 })), input);

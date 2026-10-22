@@ -8,6 +8,13 @@ export function variantsOf(schema: object): readonly z.ZodObject[] {
   return variants;
 }
 
+export function withoutDiscriminator(schema: z.ZodObject, key: string): z.ZodObject {
+  const shape = Object.fromEntries(Object.entries(schema.shape).filter(([field]) => field !== key));
+  const object = z.object(shape).strict();
+  const error = schema.def.error as z.core.$ZodErrorMap | undefined;
+  return object.clone({ ...object.def, error });
+}
+
 // Publish model-visible fields alongside the union's strict variant constraints.
 // Metadata only affects discovery; the discriminated union is the sole parser.
 export function exposedUnion<K extends string, O extends readonly [z.ZodObject, ...z.ZodObject[]]>(key: K, options: O) {

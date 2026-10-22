@@ -98,12 +98,12 @@ test("result selection and full-text continuations are independent reusable cano
   assert.equal(selected.result.selectionComplete, true);
   assert.equal(selected.result.outcome, "completed");
   assert.equal(selected.result.nextCall, null);
-  assert.equal(selected.result.textNextCall?.tool, "opencode.query");
+  assert.equal(selected.result.textNextCall?.tool, "opencode.message");
   let call = selected.result.textNextCall;
   let text = selected.result.text;
   const scanned = native.count();
   while (call) {
-    const response = await backend.query(call.arguments.queries as Parameters<typeof backend.query>[0]);
+    const response = await backend.query([{ ...call.arguments, type: "message" } as Parameters<typeof backend.query>[0][number]]);
     const result = response.results[0].result as { text: string; nextCall: typeof call };
     text += result.text;
     call = result.nextCall;

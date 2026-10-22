@@ -294,10 +294,10 @@ test("HTTP disconnect cancels the Codex quota RPC rather than leaving its reader
     });
   });
   const http = await httpFixture(native);
-  const request = httpRequest(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "opencode.query" } });
+  const request = httpRequest(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "opencode.usage" } });
   request.on("error", () => {});
   try {
-    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: meta, name: "opencode.query", arguments: { queries: [{ runtime: "codex", type: "usage" }] } } }));
+    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: meta, name: "opencode.usage", arguments: { runtime: "codex" } } }));
     await ready;
     request.destroy();
     await stopped;
@@ -341,7 +341,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     const listing = await http.send("tools/list");
     assert.equal(listing.status, 200);
     const tools = listing.reply.result.tools as any[];
-    assert.equal(tools.length, 30);
+    assert.equal(tools.length, 47);
     const validators = new AjvJsonSchemaValidator();
     for (const tool of tools) {
       assert.equal(tool.inputSchema.$schema, "https://json-schema.org/draft/2020-12/schema");
@@ -362,7 +362,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
       ["opencode.wait", { sessionId: "s", messageId: "u" }],
       ["opencode.inspect", { sessionId: "s", messageId: "u", detail: "result" }],
       ["opencode.inspect", { sessionId: "s" }],
-      ["opencode.query", { queries: [{ type: "session", sessionId: "s" }] }],
+      ["opencode.session", { sessionId: "s" }],
       ["opencode.act", { action: "interrupt", sessionId: "s" }],
     ];
     for (const [name, args] of calls) {

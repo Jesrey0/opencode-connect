@@ -146,7 +146,7 @@ export function projectMessage(message: SessionMessageInfo, offset?: number, lim
   // Inventory previews page the remainder at the full on-demand width so a long
   // message recovers in few roundtrips; an explicit type:message textLimit is
   // preserved instead.
-  const continuation = paged && sessionId ? pageNextCall("opencode.query", { type: "message", sessionId, messageId: message.id, ...(preview ? { textLimit: TEXT_LIMIT } : limit === undefined ? {} : { textLimit: limit }) }, paged) : null;
+  const continuation = paged && sessionId ? pageNextCall("opencode.message", { sessionId, messageId: message.id, ...(preview ? { textLimit: TEXT_LIMIT } : limit === undefined ? {} : { textLimit: limit }) }, paged) : null;
   if (message.type === "user") {
     return { id: message.id, type: message.type, createdAtMs: message.time.created, ...paged, nextCall: continuation };
   }
@@ -190,8 +190,8 @@ export function projectMessage(message: SessionMessageInfo, offset?: number, lim
       model: "model" in message && message.model ? modelKey(message.model) : null,
       ...("summary" in message ? { summaryPreview: summary, summaryFingerprint: fingerprint(message.summary), summarySize: message.summary.length } : {}),
       ...("recent" in message ? { recentPreview: recent, recentFingerprint: fingerprint(message.recent), recentSize: message.recent.length } : {}),
-      summaryNextCall: summary && sessionId ? pageNextCall("opencode.query", { type: "message", sessionId, messageId: message.id, field: "summary", textLimit: TEXT_LIMIT }, summary) : null,
-      recentNextCall: recent && sessionId ? pageNextCall("opencode.query", { type: "message", sessionId, messageId: message.id, field: "recent", textLimit: TEXT_LIMIT }, recent) : null,
+      summaryNextCall: summary && sessionId ? pageNextCall("opencode.message", { sessionId, messageId: message.id, field: "summary", textLimit: TEXT_LIMIT }, summary) : null,
+      recentNextCall: recent && sessionId ? pageNextCall("opencode.message", { sessionId, messageId: message.id, field: "recent", textLimit: TEXT_LIMIT }, recent) : null,
       requestTokens: "tokens" in message ? (message.tokens ?? null) : null,
       requestCost: "cost" in message ? (message.cost ?? null) : null,
       requestUsageBasis: ("tokens" in message && message.tokens ? "nativeCompactionRequest" : "unavailable") as "nativeCompactionRequest" | "unavailable",

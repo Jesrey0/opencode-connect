@@ -110,7 +110,7 @@ test("native message text pagination retains backend routing and exact IDs", asy
   const backend = new OpenCodeBackend(f.connect);
   const result = await backend.query([{ runtime: "codex", type: "message", sessionId: "native-thread", messageId: "native-assistant", textLimit: 3 }]);
   const m = result.results[0].result as any;
-  assert.equal(m.text, "abc"); assert.equal(m.nextCall.arguments.queries[0].runtime, "codex");
+  assert.equal(m.text, "abc"); assert.equal(m.nextCall.tool, "opencode.message"); assert.equal(m.nextCall.arguments.runtime, "codex");
   const missing = await backend.query([{ runtime: "codex", type: "message", sessionId: "native-thread", messageId: "absent" }]);
   assert.match((missing.results[0] as any).error, /no fallback/);
 });
@@ -158,7 +158,7 @@ test("installed workspace RPC and connector definitions agree and usage crosses 
   const client = new Client({ name: "workspace-rpc-contract", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
   try {
-    const response = await client.callTool({ name: "opencode.query", arguments: { queries: [{ runtime: "codex", type: "usage" }] } });
+    const response = await client.callTool({ name: "opencode.usage", arguments: { runtime: "codex" } });
     assert.notEqual(response.isError, true);
     const result = (response.structuredContent as any).results[0];
     assert.equal(result.result.buckets[0].primary.usedPercent, 7);
@@ -218,7 +218,7 @@ test("MCP routes exact Codex options and rejects mixing runtime decision formats
     const accepted = await client.callTool({ name: "opencode.act", arguments: { runtime: "codex", action: "respondPermission", sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
     assert.notEqual(accepted.isError, true);
     assert.deepEqual(f.requests.at(-1)?.body, { input: { sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
-    const inventory = await client.callTool({ name: "opencode.query", arguments: { queries: [{ runtime: "codex", type: "sessions" }] } });
+    const inventory = await client.callTool({ name: "opencode.sessions", arguments: { runtime: "codex" } });
     assert.notEqual(inventory.isError, true);
     assert.equal("error" in (inventory.structuredContent as any).results[0], false);
     const before = f.requests.length;

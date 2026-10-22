@@ -12,7 +12,7 @@ import { OPENCODE_RELEASE } from "../native.js";
 // ConnectorError is aliased as Error so thrown validation surfaces sanitize
 // through safeError instead of leaking native/client error messages.
 import { page, textPage, integer, fingerprint, CatalogError, ConnectorError as Error, MESSAGE_PREVIEW_LIMIT, type PageInput } from "../bounds.js";
-import { pageNextCall } from "../continuation.js";
+import { pageNextCall, queryToolName } from "../continuation.js";
 import { compactAgent, contextualPage } from "../catalog.js";
 import {
   modelKey,
@@ -192,7 +192,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
         : query.field === "recent" && "recent" in message ? message.recent : null;
       if (full === null) throw new Error("compaction message has no such native text field");
       const paged = textPage(full, query.textOffset, query.textLimit, query.textFingerprint);
-      return { id: message.id, type: message.type, createdAtMs: message.time.created, status: message.status, reason: message.reason, field: query.field, ...paged, nextCall: pageNextCall("opencode.query", { type: "message", sessionId: query.sessionId, messageId: message.id, field: query.field, ...(query.textLimit === undefined ? {} : { textLimit: query.textLimit }) }, paged) };
+      return { id: message.id, type: message.type, createdAtMs: message.time.created, status: message.status, reason: message.reason, field: query.field, ...paged, nextCall: pageNextCall(queryToolName("message"), { sessionId: query.sessionId, messageId: message.id, field: query.field, ...(query.textLimit === undefined ? {} : { textLimit: query.textLimit }) }, paged) };
     }
     return projectMessage(message, query.textOffset, query.textLimit, query.textFingerprint, query.sessionId);
   }

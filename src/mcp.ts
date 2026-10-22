@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
-import { exposedUnion, variantsOf } from "./schema.js";
+import { exposedUnion, variantsOf, withoutDiscriminator } from "./schema.js";
 import { VERSION } from "./version.js";
 import { loadBuildInfo } from "./buildInfo.js";
 import { safeError, AdmissionError, ConnectorError, SessionDeleteError } from "./bounds.js";
@@ -137,7 +137,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     // Bounds recursive validation work independently of serialized string size.
     // Full permission/attachment sets and 12-step browser workflows fit this budget.
     maxToolInputElements: 4096,
-     instructions: "Host and command operations are separately named purpose-specific tools. Preserve native IDs and canonical cwd. Start commands with command.startShell, command.startPty or command.startPersistentPty, then read the saved handle/cursor with command.read. Follow returned nextCall for paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
+     instructions: "Host, command and OpenCode query operations are separately named purpose-specific tools. Preserve native IDs and canonical cwd. Start commands with command.startShell, command.startPty or command.startPersistentPty, then read the saved handle/cursor with command.read. Follow returned nextCall for paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
   });
   if (events) {
     const authenticated = async (extra: ServerContext) => {
@@ -360,15 +360,42 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async (input) => structuredResult(await backend.inspect(input)));
 
-  registerTool("opencode.query", {
-    title: "Query OpenCode State",
-    description: "Batch read native catalogs, ordered permissions, sessions, messages, inbox and tool evidence. Agents default to compact effective catalog with hidden entries excluded. Message pages return 512-unit previews with canonical IDs and bounded tool counts; recover full text via type:message. Session tokens are cumulative totals, not context occupancy. runtime selects the native session backend; Codex supports session inventories, history, native mode selection, pending permission requests, capabilities, and read-only ChatGPT Codex rate-limit windows via runtime: codex, type: usage. OpenCode usage remains cumulative token activity, not quota. General Chat Plus limits are not exposed. Unsupported operations fail explicitly. Continue using fingerprints/native cursors; selected text may contain secrets.",
-    inputSchema: z.object({
-      queries: z.array(querySchema).min(1).max(10),
-    }).strict(),
-    outputSchema: outputSchemas.query,
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
-  }, async ({ queries }, context) => structuredResult(await backend.query(queries, context.mcpReq.signal)));
+  const queryTools = [
+    ["opencode.sessionDiff", "sessionDiff", "Read a session's native file diff, optionally paged or narrowed to one file patch."],
+    ["opencode.inbox", "inbox", "Read pending session inbox entries, or the bounded text of one exact inbox entry."],
+    ["opencode.skill", "skill", "Read one canonical skill and its bounded content; cwd selects project context."],
+    ["opencode.tools", "tools", "List native tool-call evidence from one canonical assistant message."],
+    ["opencode.tool", "tool", "Read one exact native tool call's input, error summary, or selected content part."],
+    ["opencode.models", "models", "List the native model catalog; compact view omits full specifications."],
+    ["opencode.agents", "agents", "List the effective native agent catalog. Defaults to compact view and excludes hidden entries."],
+    ["opencode.agent", "agent", "Read one canonical agent's description, system instructions, or raw permissions."],
+    ["opencode.messages", "messages", "List native session messages with previews and native cursor or fingerprint pagination."],
+    ["opencode.message", "message", "Read one exact native message or recover its full text/compaction field by fingerprinted pages."],
+    ["opencode.permissions", "permissions", "Read ordered session permission rules or native pending requests. Codex supports pending only."],
+    ["opencode.savedApprovals", "savedApprovals", "List project saved permission approvals for the target session."],
+    ["opencode.runtime", "runtime", "Read native runtime capabilities and plugin/MCP/command inventory for cwd."],
+    ["opencode.skills", "skills", "List canonical native skills, optionally in project context."],
+    ["opencode.providers", "providers", "List native provider identities and activation state for optional cwd context."],
+    ["opencode.usage", "usage", "Read OpenCode cumulative session token activity; Codex returns read-only quota windows, not ChatGPT Plus limits."],
+    ["opencode.sessions", "sessions", "List native sessions with native cursor pagination and optional cwd/search filters. Codex supports its narrower cursor inventory."],
+    ["opencode.session", "session", "Read one exact native session's canonical projected state."],
+  ] as const;
+  const queryTitles = {
+    sessionDiff: "Read Session Diff", inbox: "List Session Inbox", skill: "Read Skill", tools: "List Tool Calls", tool: "Read Tool Call",
+    models: "List Models", agents: "List Agents", agent: "Read Agent", messages: "List Messages", message: "Read Message",
+    permissions: "Read Permissions", savedApprovals: "List Saved Approvals", runtime: "Inspect Runtime", skills: "List Skills",
+    providers: "List Providers", usage: "Read Usage", sessions: "List Sessions", session: "Read Session",
+  } as const;
+  for (const [name, type, description] of queryTools) {
+    const variant = variantsOf(querySchema).find((schema) => (schema.shape as any).type.value === type)!;
+    let inputSchema = withoutDiscriminator(variant, "type");
+    if (type === "messages") inputSchema = inputSchema.refine((input: any) => !input.cursor || !input.order, { message: "native message cursor cannot be combined with order", path: ["order"] }).meta({ not: { required: ["cursor", "order"] } });
+    registerTool(name, {
+      title: queryTitles[type], description,
+      inputSchema, outputSchema: outputSchemas.query,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    }, async (input, context) => structuredResult(await backend.query([{ ...input, type } as any], context.mcpReq.signal)));
+  }
 
   registerTool("opencode.act", {
     title: "Act on OpenCode State",

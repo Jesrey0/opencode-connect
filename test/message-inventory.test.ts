@@ -8,7 +8,7 @@ import { nativeFixture, session, user, assistant } from "./native-fixture.js";
 import type { SessionMessageInfo } from "@opencode/client";
 
 type BackendQuery = Parameters<OpenCodeBackend["query"]>[0];
-type QueryCall = { tool: string; arguments: { queries: BackendQuery } };
+type QueryCall = { tool: string; arguments: Record<string, unknown> };
 
 function pagingFixture(messages: SessionMessageInfo[]) {
   const state = session();
@@ -45,7 +45,7 @@ async function recoverText(backend: OpenCodeBackend, entry: Record<string, any>)
   let text = entry.text;
   let call = entry.nextCall;
   while (call) {
-    const response = await backend.query(call.arguments.queries);
+    const response = await backend.query([{ ...call.arguments, type: call.tool.slice("opencode.".length) } as BackendQuery[number]]);
     assert.equal(response.results.some((r) => "error" in r), false);
     const result = response.results[0].result as { text: string; nextCall: QueryCall | null };
     text += result.text;
@@ -80,8 +80,9 @@ test("default messages page previews long text and recovers it losslessly within
     assert.equal(entry.truncated, true);
     assert.equal(entry.textPaging.size, 12_000);
     assert.equal(entry.textPaging.nextOffset, MESSAGE_PREVIEW_LIMIT);
-    assert.equal(entry.nextCall.tool, "opencode.query");
-    assert.equal(entry.nextCall.arguments.queries[0].textLimit, TEXT_LIMIT);
+    assert.equal(entry.nextCall.tool, "opencode.message");
+    assert.equal(entry.nextCall.tool, "opencode.message");
+    assert.equal(entry.nextCall.arguments.textLimit, TEXT_LIMIT);
     assert.equal(await recoverText(backend, entry), full);
   }
 });
@@ -145,7 +146,8 @@ test("explicit type:message textLimit is preserved while type:message defaults t
   const narrow = exact.results[0].result as unknown as { text: string; truncated: boolean; nextCall: QueryCall };
   assert.equal(narrow.text.length, 512);
   assert.equal(narrow.truncated, true);
-  assert.equal((narrow.nextCall.arguments.queries[0] as unknown as Record<string, unknown>).textLimit, 512);
+  assert.equal(narrow.nextCall.tool, "opencode.message");
+  assert.equal(narrow.nextCall.arguments.textLimit, 512);
   assert.equal(await recoverText(backend, narrow), full);
   const onDemand = await backend.query([{ type: "message", sessionId: "s", messageId: "u" }]);
   const complete = onDemand.results[0].result as unknown as { text: string; truncated: boolean; nextCall: null };
@@ -239,22 +241,22 @@ test("compaction admission preserves the native inbox identity and never claims 
   assert.equal(admitted.completed, false);
   assert.equal(admitted.correlationSupported, true);
   assert.match(admitted.completionNote, /does not prove completion/);
-  assert.equal(admitted.verifyNextCall.tool, "opencode.query");
-  assert.deepEqual(admitted.verifyNextCall.arguments.queries, [{ type: "message", sessionId: "s", messageId: admitted.inboxId }]);
-  const absent = await backend.query(admitted.verifyNextCall.arguments.queries);
+  assert.equal(admitted.verifyNextCall.tool, "opencode.message");
+  assert.deepEqual(admitted.verifyNextCall.arguments, { sessionId: "s", messageId: admitted.inboxId });
+  const absent = await backend.query([{ ...admitted.verifyNextCall.arguments, type: "message" } as BackendQuery[number]]);
   assert.ok("error" in absent.results[0]);
   assert.equal("messageId" in admitted, false);
   inbox = [];
   const pending = await backend.query([{ type: "inbox", sessionId: "s" }]);
   assert.equal((pending.results[0].result as { data: unknown[] }).data.length, 0);
-  const stillAbsent = await backend.query(admitted.verifyNextCall.arguments.queries);
+  const stillAbsent = await backend.query([{ ...admitted.verifyNextCall.arguments, type: "message" } as BackendQuery[number]]);
   assert.ok("error" in stillAbsent.results[0]);
   stage = "running";
-  const running = await backend.query(admitted.verifyNextCall.arguments.queries);
+  const running = await backend.query([{ ...admitted.verifyNextCall.arguments, type: "message" } as BackendQuery[number]]);
   assert.equal((running.results[0].result as Record<string, any>).status, "running");
   assert.equal(admitted.completed, false);
   stage = "completed";
-  const observed = await backend.query(admitted.verifyNextCall.arguments.queries);
+  const observed = await backend.query([{ ...admitted.verifyNextCall.arguments, type: "message" } as BackendQuery[number]]);
   const record = observed.results[0].result as Record<string, any>;
   assert.equal(record.id, admitted.inboxId);
   assert.equal(record.type, "compaction");

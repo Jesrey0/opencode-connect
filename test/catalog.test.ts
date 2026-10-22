@@ -27,8 +27,9 @@ test("model catalog retains native enabled state, pricing, variants, ordering, l
   assert.equal(first.view, "compact");
   assert.deepEqual(first.data[0], { id: "opencode/a", enabled: true, cost: models[0].cost, modalities: ["text", "image"], variants: ["high"] });
   assert.deepEqual(first.location, location);
-  assert.equal(first.nextCall.arguments.queries[0].view, "compact");
-  const second = result(await backend.query(first.nextCall.arguments.queries));
+  assert.equal(first.nextCall.tool, "opencode.models");
+  assert.equal(first.nextCall.arguments.view, "compact");
+  const second = result(await backend.query([{ ...first.nextCall.arguments, type: "models" }] as any));
   assert.equal(second.data[0].id, "opencode/b");
   assert.equal(second.data[0].enabled, false);
   assert.deepEqual(second.data[0].cost, models[1].cost);
@@ -93,8 +94,8 @@ test("catalog continuation detects location, view and hidden-filter changes", as
   const backend = new OpenCodeBackend(fixture.connect);
   const query = { type: "agents" as const, limit: 1 };
   const first = result(await backend.query([query]));
-  assert.deepEqual(first.nextCall, { tool: "opencode.query", arguments: { queries: [{ ...query, cwd: location.directory, offset: first.nextOffset, fingerprint: first.fingerprint }] } });
-  const continued = result(await backend.query(first.nextCall.arguments.queries));
+  assert.deepEqual(first.nextCall, { tool: "opencode.agents", arguments: { limit: 1, cwd: location.directory, offset: first.nextOffset, fingerprint: first.fingerprint } });
+  const continued = result(await backend.query([{ ...first.nextCall.arguments, type: "agents" }] as any));
   assert.equal(continued.data[0].id, "plan");
   assert.equal(continued.nextCall, null);
   const continuation = { ...query, offset: first.nextOffset, fingerprint: first.fingerprint };
@@ -120,7 +121,8 @@ test("model continuation detects resolved location and view changes", async () =
   const first = result(await backend.query([query]));
   // The continuation carries the location the native read actually resolved,
   // so the second page is requested against the same resolved catalog.
-  assert.deepEqual(first.nextCall.arguments.queries[0].cwd, location.directory);
+  assert.equal(first.nextCall.tool, "opencode.models");
+  assert.equal(first.nextCall.arguments.cwd, location.directory);
   const continuation = { ...query, cwd: location.directory, offset: first.nextOffset, fingerprint: first.fingerprint };
   assert.equal(result(await backend.query([continuation])).data[0].id, "opencode/b");
   assert.match(JSON.stringify(await backend.query([{ ...continuation, view: "full" }])), /content changed/);
@@ -158,8 +160,8 @@ test("skill and provider pagination binds to the native resolved location", asyn
     resolved = location;
     const initial = result(await backend.query([{ type, limit: 1 }]));
     assert.deepEqual(initial.location, location);
-    assert.equal(initial.nextCall.arguments.queries[0].cwd, location.directory);
-    const continuation = initial.nextCall.arguments.queries[0];
+    assert.equal(initial.nextCall.arguments.cwd, location.directory);
+    const continuation = { ...initial.nextCall.arguments, type } as any;
     assert.equal(result(await backend.query([continuation])).data.length, 1);
     resolved = { directory: "/tmp/other" };
     assert.match(JSON.stringify(await backend.query([continuation])), /content changed/);

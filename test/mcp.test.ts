@@ -26,7 +26,8 @@ test("MCP discovery uses host/command groups and canonical worker names without 
   try {
     const { tools } = await fixture.client.listTools();
     const focused = ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.read", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"];
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["status", "opencode.start", "opencode.wait", "opencode.inspect", "opencode.query", "opencode.act", "host.write", ...focused].sort());
+    const queries = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
+    assert.deepEqual(tools.map((t) => t.name).sort(), ["status", "opencode.start", "opencode.wait", "opencode.inspect", ...queries, "opencode.act", "host.write", ...focused].sort());
     // OpenAI plugin reference/guidelines reviewed 2026-10-15; see
     // docs/chatgpt-mcp-review.md for sources and behavior justifications.
     for (const [name, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of [
@@ -40,7 +41,7 @@ test("MCP discovery uses host/command groups and canonical worker names without 
       ["opencode.start", false, true, true, false],
       ["opencode.wait", true, false, false, true],
       ["opencode.inspect", true, false, false, true],
-      ["opencode.query", true, false, false, true],
+      ...queries.map(name => [name, true, false, false, true] as const),
       ["opencode.act", false, true, true, false],
     ] as const) {
       const tool = tools.find((t) => t.name === name)!;
@@ -62,7 +63,8 @@ test("focused host and command tools have unique purpose-specific schemas and tr
   try {
     const { tools } = await fixture.client.listTools();
     assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
-    for (const name of ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"]) {
+    const reads = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
+    for (const name of ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD", ...reads]) {
       const tool = tools.find(candidate => candidate.name === name);
       assert.ok(tool, `missing ${name}`);
       assert.ok(tool.description?.trim());
@@ -70,7 +72,7 @@ test("focused host and command tools have unique purpose-specific schemas and tr
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert.ok(tool.outputSchema);
     }
-    for (const [name, absent] of [["host.list", "type"], ["host.worktreeList", "action"], ["command.startShell", "kind"], ["command.remove", "action"]] as const) {
+    for (const [name, absent] of [["host.list", "type"], ["host.worktreeList", "action"], ["command.startShell", "kind"], ["command.remove", "action"], ["opencode.agents", "type"]] as const) {
       assert.equal(absent in tools.find(tool => tool.name === name)!.inputSchema.properties!, false, `${name} has no selector`);
     }
     const refresh = tools.find(tool => tool.name === "host.worktreeRefresh")!.annotations!;
@@ -79,7 +81,7 @@ test("focused host and command tools have unique purpose-specific schemas and tr
     assert.deepEqual([resize.readOnlyHint, resize.destructiveHint, resize.idempotentHint], [false, false, true]);
     const read = tools.find(tool => tool.name === "command.read")!.annotations!;
     assert.deepEqual([read.readOnlyHint, read.destructiveHint], [false, true], "persistent observer may remove an exited handle");
-    for (const name of ["host.inspect", "host.worktree", "command.start", "command.control"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
+    for (const name of ["host.inspect", "host.worktree", "command.start", "command.control", "opencode.query"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
   } finally { await fixture.close(); }
 });
 
@@ -109,6 +111,40 @@ test("host.read dispatch and fingerprint continuation target the selector-free h
       assert.equal(native.requests.filter(request => request.path.startsWith("/api/fs/read/")).length, 2);
     } finally { await fixture.close(); }
   } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test("focused query dispatch and fingerprint paging target selector-free opencode tool identities", async () => {
+  const cwd = "/workspace";
+  const agents = ["one", "two"].map(id => ({ id, name: id, mode: "primary", hidden: false, description: `${id} agent`, system: "system", permissions: [], request: {} }));
+  const native = nativeFixture(request => {
+    if (request.path === "/api/agent") return { location: { directory: cwd }, data: agents };
+    throw new Error(`unexpected native request ${request.path}`);
+  });
+  const fixture = await mcpFixture(native);
+  try {
+    const { tools } = await fixture.client.listTools();
+    const names = ["sessionDiff", "inbox", "skill", "tools", "tool", "models", "agents", "agent", "messages", "message", "permissions", "savedApprovals", "runtime", "skills", "providers", "usage", "sessions", "session"].map(type => `opencode.${type}`);
+    for (const name of names) {
+      const tool = tools.find(candidate => candidate.name === name)!;
+      assert.ok(tool.description?.trim(), name);
+      assert.ok(tool.outputSchema, name);
+      assert.equal("type" in tool.inputSchema.properties!, false, `${name} has no query discriminator`);
+      assert.deepEqual(tool.annotations, { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true });
+    }
+    const first = await fixture.client.callTool({ name: "opencode.agents", arguments: { cwd, limit: 1 } });
+    assert.equal(first.isError, undefined);
+    const entry = (first.structuredContent as any).results[0];
+    assert.equal(entry.type, "agents");
+    assert.equal(entry.result.data[0].id, "one");
+    const nextCall = entry.result.nextCall;
+    assert.deepEqual(nextCall, { tool: "opencode.agents", arguments: { cwd, limit: 1, offset: 1, fingerprint: entry.result.fingerprint } });
+    assert.equal("type" in nextCall.arguments, false);
+    const schema = tools.find(tool => tool.name === nextCall.tool)!.inputSchema as JsonSchemaType;
+    assert.equal(new AjvJsonSchemaValidator().getValidator(schema)(nextCall.arguments).valid, true);
+    const second = await fixture.client.callTool({ name: nextCall.tool, arguments: nextCall.arguments });
+    assert.equal((second.structuredContent as any).results[0].result.data[0].id, "two");
+    assert.equal((second.structuredContent as any).results[0].result.nextCall, null);
+  } finally { await fixture.close(); }
 });
 
 test("MCP image response contains safe metadata and one bounded image block, never duplicate base64 text", async () => {
@@ -160,7 +196,7 @@ test("strict union errors omit arbitrary unknown keys and reject wrong selectors
     for (const [name, args] of [
       ["host.list", { cwd: "/workspace", ...keys }],
       ["command.startShell", { cwd: "/workspace", command: "pwd", args: [], ...keys }],
-      ["opencode.query", { queries: [{ type: "agents", ...keys }] }],
+      ["opencode.agents", { includeHidden: true, ...keys }],
     ] as const) {
       const result = await fixture.client.callTool({ name, arguments: args });
       assert.equal(result.isError, true);
@@ -192,19 +228,14 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       for (const field of fields) assert.ok(field in schema.properties!, `${name}.${field}`);
       assert.ok(schema.required?.length, `${name} exposes required fields`);
     }
-    const query = schemas.get("opencode.query")!;
-    const items = (query.properties!.queries as { items: { type: string; properties: Record<string, Record<string, unknown>>; required: string[]; oneOf: Record<string, unknown>[] } }).items;
-    assert.equal(items.type, "object");
-    assert.ok(items.required.includes("type"));
-    for (const field of ["type", "agentId", "view", "includeHidden", "sessionId", "messageId", "toolId", "field", "textOffset", "cursor", "limit"]) assert.ok(field in items.properties, field);
-    assert.equal("includePermissionsSummary" in items.properties, false);
-    assert.equal(items.properties.type.type, "string");
-    assert.equal(items.properties.limit.type, "integer");
-    assert.equal(items.properties.field.type, "string");
-    assert.deepEqual(items.properties.view.enum, ["compact", "full"]);
-    const sessions = items.oneOf.find((variant) => (variant.properties as Record<string, { const?: string }>).type.const === "sessions")!;
-    assert.equal((sessions.properties as Record<string, { default?: number }>).limit.default, 25);
-    assert.equal(items.properties.textLimit.default, 12000);
+    const agentsTool = schemas.get("opencode.agents")!;
+    for (const field of ["cwd", "runtime", "view", "includeHidden", "offset", "limit", "fingerprint"]) assert.ok(field in agentsTool.properties!, `agents.${field}`);
+    assert.deepEqual((agentsTool.properties!.view as { enum: string[] }).enum, ["compact", "full"]);
+    assert.equal("includePermissionsSummary" in agentsTool.properties!, false);
+    const sessionsTool = schemas.get("opencode.sessions")!;
+    for (const field of ["cursor", "limit", "cwd", "searchTerm", "runtime"]) assert.ok(field in sessionsTool.properties!, `sessions.${field}`);
+    assert.equal((sessionsTool.properties!.limit as { default?: number }).default, 25);
+    assert.equal((schemas.get("opencode.message")!.properties!.textLimit as { default?: number }).default, 12000);
     const start = schemas.get("opencode.start")!;
     assert.equal((start.properties!.agent as { type: string }).type, "string");
     const contextAgents = start.properties!.agents as { type: string; maxItems: number; items: { type: string; properties: Record<string, { type: string }>; required: string[]; additionalProperties: boolean } };
@@ -232,9 +263,11 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
       ["command.resize", { kind: "pty", cwd: "/tmp", id: "pty", rows: 1, cols: 1000 }, [
         { kind: "shell", cwd: "/tmp", id: "shell", rows: 24, cols: 80 }, { kind: "pty", cwd: "/tmp", id: "pty", rows: 0, cols: 80 },
       ]],
-      ["opencode.query", { queries: [{ type: "agents", includeHidden: true, limit: 50 }, { type: "sessions" }] }, [
-        { queries: [{ type: "agents", limit: 51 }] }, { queries: [{ type: "usage", agentId: "build" }] }, { queries: [{ type: "message", sessionId: "s" }] }, { queries: [{ type: "messages", sessionId: "s", cursor: "native", order: "desc" }] }, { queries: [{ type: "agent", agentId: "build", textLimit: 12001 }] }, { queries: [{ type: "agents", limit: 0 }] }, { queries: Array.from({ length: 11 }, () => ({ type: "usage" })) },
-      ]],
+      ["opencode.agents", { includeHidden: true, limit: 50 }, [{ includeHidden: true, limit: 51 }, { view: "unknown" }, { limit: 0 }]],
+      ["opencode.usage", {}, [{ sessionId: "s" }, { type: "usage" }]],
+      ["opencode.message", { sessionId: "s", messageId: "m", textLimit: 12000 }, [{ sessionId: "s" }, { sessionId: "s", messageId: "m", textLimit: 12001 }]],
+      ["opencode.messages", { sessionId: "s", cursor: "native" }, [{ sessionId: "s", cursor: "native", order: "desc" }, { sessionId: "s", limit: 51 }]],
+      ["opencode.agent", { agentId: "build", textLimit: 12000 }, [{ agentId: "build", textLimit: 12001 }]],
       ["opencode.act", { action: "switchAgent", sessionId: "s", agent: "build" }, [
         { action: "switchAgent", sessionId: "s", agents: [{ name: "build" }] }, { action: "interrupt", sessionId: "s", text: "x" }, { action: "steer", sessionId: "s", instruction: "x", agent: "build" },
       ]],
@@ -439,15 +472,15 @@ test("MCP catalog advertises compact options and reports field-specific bounds b
   const fixture = await mcpFixture(native, new OpenCodeBackend(native.connect));
   try {
     const { tools } = await fixture.client.listTools();
-    const schema = JSON.stringify(tools.find((tool) => tool.name === "opencode.query")!.inputSchema);
+    const schema = JSON.stringify(tools.find((tool) => tool.name === "opencode.agents")!.inputSchema);
     for (const option of ["includeHidden", "compact"]) assert.ok(schema.includes(option));
     for (const removed of ["includePermissionsSummary", "permissionSummary"]) assert.equal(schema.includes(removed), false);
-    const rejected = await fixture.client.callTool({ name: "opencode.query", arguments: { queries: [{ type: "agents", limit: 100 }] } });
+    const rejected = await fixture.client.callTool({ name: "opencode.agents", arguments: { limit: 100 } });
     assert.equal(rejected.isError, true); assert.equal(calls, 0);
     assert.match(JSON.stringify(rejected.content), /limit/); assert.match(JSON.stringify(rejected.content), /50/);
-    const unknown = await fixture.client.callTool({ name: "opencode.query", arguments: { queries: [{ type: "agents", includeBuiltins: false }] } });
+    const unknown = await fixture.client.callTool({ name: "opencode.agents", arguments: { includeBuiltins: false } });
     assert.equal(unknown.isError, true); assert.equal(calls, 0);
-    const accepted = await fixture.client.callTool({ name: "opencode.query", arguments: { queries: [{ type: "agents", includeHidden: true }] } });
+    const accepted = await fixture.client.callTool({ name: "opencode.agents", arguments: { includeHidden: true } });
     assert.notEqual(accepted.isError, true); assert.equal(calls, 1);
     assert.deepEqual(accepted.content, []);
     assert.match(JSON.stringify(accepted.structuredContent), /effective/);
@@ -483,7 +516,7 @@ test("semantic and action-required recovery stay transport-bounded with long Uni
     let recovered = preview.text;
     let offset = preview.textPaging.nextOffset;
     while (offset !== null) {
-      const query = await call("opencode.query", { queries: [{ type: "message", sessionId: "s", messageId: preview.id, textOffset: offset, textFingerprint: preview.textPaging.fingerprint }] });
+      const query = await call("opencode.message", { sessionId: "s", messageId: preview.id, textOffset: offset, textFingerprint: preview.textPaging.fingerprint });
       const result = query.results[0].result;
       recovered += result.text; offset = result.textPaging.nextOffset;
     }

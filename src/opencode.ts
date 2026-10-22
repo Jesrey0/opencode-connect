@@ -423,7 +423,7 @@ export class OpenCodeBackend {
         completed: false,
         correlationSupported: true,
         completionNote: "read the exact native compaction message by inbox ID; a missing message or inbox absence does not prove completion",
-        verifyNextCall: nextCall("opencode.query", { queries: [{ type: "message", sessionId: session.id, messageId: admitted.id }] }),
+        verifyNextCall: nextCall("opencode.message", { sessionId: session.id, messageId: admitted.id }),
       };
     }
     if (input.action === "revertStage") {

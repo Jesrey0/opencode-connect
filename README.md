@@ -40,7 +40,7 @@ session tools select the backend with `runtime` (`opencode` by default, or `code
 Codex calls use the workspace-owned `codex-sessions` plugin RPC directly;
 no intermediary OpenCode model turn or OpenCode transcript is created.
 
-Codex quota: call opencode.query with queries: [{runtime: "codex", type: "usage"}].
+Codex quota: call `opencode.usage` with `runtime: "codex"`.
 This reads a sanitized, read-only App Server quota snapshot via the Codex plugin RPC;
 it does not admit a model turn. Codex quota windows and reset timestamps are
 separate from OpenCode token activity and General Chat Plus message limits. Native
@@ -203,8 +203,8 @@ at 5 s. Shell timeout defaults to 120 s and caps at 24 hours.
 
 ## WorkerPlane
 
-`status`, `opencode.start`, `opencode.wait`, `opencode.inspect`,
-`opencode.query`, and `opencode.act` retain OpenCode's native worker identities.
+`status`, `opencode.start`, `opencode.wait`, `opencode.inspect`, the individually
+named `opencode.*` query tools, and `opencode.act` retain OpenCode's native worker identities.
 Set `runtime: "codex"` to operate native Codex sessions through the same tools.
 Codex has its own session IDs and a narrower capability contract, described below.
 Events wake bounded waits; persisted session/message state remains authoritative.
@@ -370,10 +370,12 @@ operator-chosen prompts are not confidentiality boundaries. Native prompt/sessio
 endpoints validate agent and skill identities. User prompts retain
 their canonical user message identity, not a synthetic admission identity.
 
-`query` supports models, agents, one agent, skills, providers, usage, native session
-pages, one session, native message pages, one message, session diffs, inbox,
-tool inventories, one tool, permissions, project saved
-approvals, native Codex sessions and history, and sanitized runtime inventory. Catalog/inventory pages use
+Purpose-specific query tools include `opencode.models`, `opencode.agents`,
+`opencode.agent`, `opencode.skills`, `opencode.skill`, `opencode.providers`,
+`opencode.usage`, `opencode.sessions`, `opencode.session`, `opencode.messages`,
+`opencode.message`, `opencode.sessionDiff`, `opencode.inbox`, `opencode.tools`,
+`opencode.tool`, `opencode.permissions`, `opencode.savedApprovals`, and
+`opencode.runtime`. There is no batch query executor. Catalog/inventory pages use
 `offset`, `limit`, `fingerprint`; native session/message pages use opaque
 native cursors instead. Agent details include description, system,
 steps, paged permissions, mode, hidden status and model, excluding `request`.

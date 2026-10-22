@@ -78,8 +78,8 @@ export async function latestResult(client: Client, input: ResultSelectionInput, 
     : assistant.time.completed === undefined || assistant.finish !== "stop" ? "incomplete" : "completed";
   const paged = textPage(text, input.textOffset, input.textLimit, input.textFingerprint);
   const continuation = cursor && messageId ? nextCall("opencode.inspect", { sessionId, messageId, detail: "result", selectionCursor: cursor, selectionFingerprint, ...(assistant ? { candidateAssistantMessageId: assistant.id } : {}), ...(input.textLimit === undefined ? {} : { textLimit: input.textLimit }) })
-    : cursor ? nextCall("opencode.query", { queries: [{ type: "messages", sessionId, cursor, limit: 50 }] }) : null;
-  const textNextCall = selectionComplete && assistant ? pageNextCall("opencode.query", { type: "message", sessionId, messageId: assistant.id, ...(input.textLimit === undefined ? {} : { textLimit: input.textLimit }) }, paged) : null;
+    : cursor ? nextCall("opencode.messages", { sessionId, cursor, limit: 50 }) : null;
+  const textNextCall = selectionComplete && assistant ? pageNextCall("opencode.message", { sessionId, messageId: assistant.id, ...(input.textLimit === undefined ? {} : { textLimit: input.textLimit }) }, paged) : null;
   return {
     outcomeBasis: "selectedAssistantMessage" as const,
     outcome,
