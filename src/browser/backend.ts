@@ -276,10 +276,17 @@ export class BrowserBackend {
       if (method === "status") {
         const validated = browserOutputs.status.safeParse({ ...result, enabled: true, worker: "running", lastIncident: this.lastIncident });
         if (!validated.success) throw resultError("invalid_response", "Browser status result failed validation");
-        const { browser, currentIssue } = validated.data;
+        const { browser } = validated.data;
+        const processes = await linuxProcesses();
+        // Linux Chrome is an optional on-demand capability. A closed browser
+        // with no debugging process is not a connector incident.
+        const normallyClosed = browser === "linux" && !validated.data.reachable
+          && !validated.data.attached && !processes.some(item => item.debugging)
+          && validated.data.currentIssue === "Chrome debugging endpoint unavailable; inspect the selected browser connection";
+        const currentIssue = normallyClosed ? null : validated.data.currentIssue;
         if (currentIssue && this.browserIssues.get(browser) !== currentIssue) this.recordIncident(currentIssue);
         this.browserIssues.set(browser, currentIssue);
-        return { ...validated.data, lastIncident: this.lastIncident, linuxProcesses: await linuxProcesses() };
+        return { ...validated.data, currentIssue, lastIncident: this.lastIncident, linuxProcesses: processes };
       }
       const { image, ...metadata } = result;
       if (Buffer.byteLength(JSON.stringify(metadata)) > 262144) throw resultError("too_large", "Browser result exceeds 256 KiB; request a smaller observation");

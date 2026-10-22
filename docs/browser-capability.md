@@ -50,7 +50,8 @@ accept only `/devtools/browser` paths. Never expose or proxy CDP publicly.
 Call `browser.status` first. It reports configured endpoint reachability, worker
 state, version, attachment state, bounded Linux Chrome process IDs/debug-port
 availability, `currentIssue`, and a timestamped `lastIncident`. Running Chrome without a debug port is
-visible but cannot be converted into an attachable instance. Pipe-only automation
+visible but cannot be converted into an attachable instance. A closed Linux
+browser with no debugging process is reported as unreachable, not as an incident. Pipe-only automation
 instances are not CDP endpoint candidates.
 
 `browser.launch` checks the Linux endpoint before launching. It reuses a supported

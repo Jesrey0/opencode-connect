@@ -19,7 +19,7 @@ for line in sys.stdin:
   trace.write(request['method']+'\\n')
  mode=os.environ['BROWSER_RESULT_MODE']
  if mode=='worker-exit' and request['method']=='tabs': sys.exit(1)
- if mode in ('idle-expiry','slow-wait','status-diagnostics','stderr-diagnostic','worker-exit'):
+ if mode in ('idle-expiry','slow-wait','status-diagnostics','status-closed','stderr-diagnostic','worker-exit'):
   if mode=='stderr-diagnostic' and not diagnostic_emitted:
    print('private-url private-page-content private-value',file=sys.stderr,flush=True)
    diagnostic_emitted=True
@@ -31,7 +31,9 @@ for line in sys.stdin:
    status_calls+=1
    result={'browser':'linux','reachable':True,'attached':lease is not None,'version':'Chrome/fixture','connectionState':'ready','linuxProcesses':[],'currentIssue':None}
    if mode=='status-diagnostics' and (status_calls<=2 or status_calls==4):
-    result.update(reachable=False,connectionState='unreachable',currentIssue='Chrome debugging endpoint unavailable; inspect the selected browser connection')
+    result.update(reachable=False,attached=True,connectionState='unreachable',currentIssue='Chrome debugging endpoint unavailable; inspect the selected browser connection')
+   if mode=='status-closed':
+    result.update(reachable=False,attached=False,connectionState='unreachable',currentIssue='Chrome debugging endpoint unavailable; inspect the selected browser connection')
   elif request['method']=='wait':
    time.sleep(.2)
    result={'verification':'timed_out','url':'https://example.test/','evidence':'Condition not met'}
@@ -146,6 +148,17 @@ test("idle expiry reports why the attachment was lost and never revives or repla
   assert.equal(recovered.currentIssue, null);
   assert.deepEqual(recovered.lastIncident, incident);
   assert.deepEqual(await requests(), ["attach", "action", "status", "attach", "status"]);
+});
+
+test("a closed on-demand Linux browser is unreachable without a current incident", async t => {
+  const { backend, requests } = await backendFixture(t, "status-closed");
+  const status = await backend.call("status", {});
+  assert.equal(status.reachable, false);
+  assert.equal(status.connectionState, "unreachable");
+  assert.equal(status.attached, false);
+  assert.equal(status.currentIssue, null);
+  assert.equal(status.lastIncident, null);
+  assert.deepEqual(await requests(), ["status"]);
 });
 
 test("current endpoint faults clear after readiness recovers while incident time stays stable", async t => {
