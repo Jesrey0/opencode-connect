@@ -56,6 +56,7 @@ export const browserInputs = {
   media_download: z.object({ ...lease, ...ref, ...timeout, authorized: action.authorized, maxBytes: z.number().int().min(1024).max(33554432).default(33554432) }).strict(),
   screenshot: z.object({ ...lease, width: z.number().int().min(100).max(1920).default(1280), height: z.number().int().min(100).max(1080).default(720) }).strict(),
   detach: z.union([z.object(lease).strict(), z.object({ connectionId: id }).strict()]),
+  close: z.object({}).strict(),
 };
 const target = z.object({ targetId: id, title: z.string(), url: z.string(), type: z.literal("page"), leased: z.boolean() }).strict();
 const verification = z.enum(["confirmed", "failed", "inconclusive", "rejected", "timed_out"]);
@@ -74,5 +75,6 @@ export const browserOutputs = {
   media_download: z.object({ path: z.string(), mimeType: z.string(), bytes: z.number().int(), sha256: z.string(), untrustedPageContent: z.literal(true) }).strict(),
   screenshot: z.object({ targetId: id, mimeType: z.literal("image/jpeg"), bytes: z.number(), width: z.number(), height: z.number() }).strict(),
   detach: z.object({ detached: z.literal(true), chromePreserved: z.literal(true) }).strict(),
+  close: z.object({ browser: z.literal("linux"), closed: z.literal(true), alreadyClosed: z.boolean(), reachable: z.literal(false) }).strict(),
 };
 export type BrowserMethod = keyof typeof browserInputs;

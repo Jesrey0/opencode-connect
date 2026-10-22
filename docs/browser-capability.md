@@ -62,6 +62,10 @@ headed Chrome on the configured display (`DISPLAY=:0` fallback for WSLg);
 The launcher passes `--hide-crash-restore-bubble` to suppress the startup recovery
 popup without rewriting profile state or disabling session recovery.
 0xOperator operates the persistent Linux browser within the authorized objective.
+An explicit `browser.close` stops only the ownership-verified dedicated Linux
+systemd unit and its profile. An absent browser is an ordinary already-closed
+result; an unrelated endpoint or uncertain process identity is refused.
+It never closes Windows Chrome or an independently launched Linux Chrome.
 Shutdown or restart is a deliberate lifecycle operation; detach, worker cleanup
 and connector termination preserve the browser, tabs and profile. Launch is on
 demand and does not explicitly request restoration of prior tabs.
@@ -121,6 +125,7 @@ Names below are the native MCP names; ChatGPT may project punctuation differentl
 | `browser.connect` | Explicit `browser:"windows"`, `authorized:true`, optional `timeoutMs` (1000–120000, default 60000); request Chrome consent and return private `connectionId` plus version. |
 | `browser.tabs` | Optional `browser`, `connectionId`, `filter` and `maxTabs` (1–100, default 50); exact target IDs, sanitized URLs/titles, lease flags and honest truncation. Narrow a truncated list with a title/URL filter. |
 | `browser.launch` | Optional `headless` (default false); `reused`, reachability and new process ID when applicable. Linux only. |
+| `browser.close` | No arguments; explicitly stop only verified connector-managed Linux Chrome. Reports `alreadyClosed` and `reachable:false`; refuses unrelated instances. |
 | `browser.attach` | Exact `targetId`, `controlMode:observe|control`, optional `browser` and `connectionId`; opaque `leaseId`, generation and target summary. |
 | `browser.snapshot` | `leaseId`, optional `maxNodes` (1–300, default 100), `frameId`, container `scopeRef`, name/role substring `filter`; compact AX roles, names, states, references, document generation, frame summaries, truncation and observation errors. |
 | `browser.click`, `browser.right_click`, `browser.double_click`, `browser.hover` | `leaseId`, `elementRef`, `authorized:true`; native Chrome mouse input on the observed element. |

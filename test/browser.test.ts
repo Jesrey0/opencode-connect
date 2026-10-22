@@ -7,7 +7,7 @@ import { join, resolve } from "node:path";
 import { createServer as httpServer } from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { BrowserBackend, BrowserError, browserPython, endpoint } from "../src/browser/backend.js";
+import { BrowserBackend, BrowserError, browserPython, endpoint, isManagedChromeProcess } from "../src/browser/backend.js";
 import { browserInputs } from "../src/browser/schemas.js";
 import { createHttpHandler } from "../src/http.js";
 import { Events } from "../src/events.js";
@@ -57,6 +57,88 @@ test("browser is disabled by default and invalid actions never start a worker", 
   assert.equal((cancelled as any).worker, undefined);
 });
 
+test("browser close accepts no browser selector and enforces managed Linux ownership", () => {
+  assert.equal(browserInputs.close.safeParse({}).success, true);
+  for (const input of [{ browser: "windows" }, { pid: 5 }, { force: true }])
+    assert.equal(browserInputs.close.safeParse(input).success, false);
+  const valid = { pid: 123, executable: "/opt/google/chrome/chrome",
+    argv: ["/opt/google/chrome/chrome", "--user-data-dir=/tmp/opencode-connect/chrome-linux",
+      "--remote-debugging-port=9222", "--remote-debugging-address=127.0.0.1"],
+    cgroup: "0::/user.slice/user-1000.slice/user@1000.service/app.slice/opencode-connect-chrome.service\n",
+    profile: "/tmp/opencode-connect/chrome-linux", port: "9222" };
+  assert.equal(isManagedChromeProcess(valid), true);
+  assert.equal(isManagedChromeProcess({ ...valid,
+    argv: [valid.argv.join(" ")],
+    cgroup: "0::/user.slice/app.slice/app-com.google.Chrome-123.scope\n",
+  }), true);
+  for (const changed of [
+    { pid: 0 }, { executable: "/usr/bin/node" },
+    { argv: valid.argv.filter(arg => !arg.startsWith("--user-data-dir=")) },
+    { argv: [...valid.argv.filter(arg => !arg.startsWith("--user-data-dir=")), "--user-data-dir=/tmp/other"] },
+    { argv: valid.argv.filter(arg => !arg.startsWith("--remote-debugging-port=")) },
+    { argv: [...valid.argv.filter(arg => !arg.startsWith("--remote-debugging-port=")), "--remote-debugging-port=9223"] },
+    { argv: valid.argv.filter(arg => !arg.startsWith("--remote-debugging-address=")) },
+    { cgroup: "0::/user.slice/other.service\n" },
+    { cgroup: "0::/user.slice/opencode-connect-chrome.service-other\n" },
+  ]) assert.equal(isManagedChromeProcess({ ...valid, ...changed }), false);
+});
+
+test("closed Linux browser is normal and close does not start a worker", async t => {
+  const temp = await mkdtemp(join(tmpdir(), "browser-close-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const script = join(temp, "systemctl");
+  const log = join(temp, "calls.txt");
+  await writeFile(script, `#!/bin/sh
+echo "$@" >> ${JSON.stringify(log)}
+if [ "$2" = show ]; then printf 'MainPID=0\nActiveState=inactive\n'; exit 0; fi
+exit 17
+`, { mode: 0o755 });
+  const backend = new BrowserBackend({ enabled: true,
+    env: { ...process.env, PATH: temp + ":" + process.env.PATH,
+      OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT: "http://127.0.0.1:29999" } });
+  t.after(() => backend.close());
+  const result = await backend.call("close", {});
+  assert.deepEqual(result, { browser: "linux", closed: true, alreadyClosed: true, reachable: false });
+  assert.equal(backend.snapshot().worker, "stopped");
+  assert.equal(backend.snapshot().currentIssue, null);
+  const trace = await readFile(log, "utf8");
+  assert.match(trace, /--user show opencode-connect-chrome\.service/);
+  assert.doesNotMatch(trace, /--user stop/);
+});
+
+test("close refuses a foreign endpoint and an unrelated running process without stopping either", async t => {
+  const temp = await mkdtemp(join(tmpdir(), "browser-close-guard-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const script = join(temp, "systemctl");
+  const trace = join(temp, "trace.txt");
+  const server = httpServer((_req, res) => {
+    res.setHeader("Content-Type", "application/json");
+    res.end(JSON.stringify({ Browser: "Chrome/155.0", webSocketDebuggerUrl: "ws://127.0.0.1/devtools/browser/foreign" }));
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => new Promise<void>(resolve => server.close(() => resolve())));
+  const addr = server.address(); assert.ok(addr && typeof addr !== "string");
+  await writeFile(script, `#!/bin/sh
+echo "$@" >> ${JSON.stringify(trace)}
+if [ "$2" = show ]; then
+  if [ "$BROWSER_TEST_UNIT_ACTIVE" = 1 ]; then printf 'MainPID=${process.pid}\nActiveState=active\n';
+  else printf 'MainPID=0\nActiveState=inactive\n'; fi
+  exit 0
+fi
+exit 9
+`, { mode: 0o755 });
+  const env = { ...process.env, PATH: temp + ":" + process.env.PATH,
+    OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT: `http://127.0.0.1:${addr.port}` };
+  const inactive = new BrowserBackend({ enabled: true, env });
+  t.after(() => inactive.close());
+  await assert.rejects(inactive.call("close", {}), errorCode("unowned_browser"));
+  assert.equal(inactive.snapshot().worker, "stopped");
+  const active = new BrowserBackend({ enabled: true, env: { ...env, BROWSER_TEST_UNIT_ACTIVE: "1" } });
+  t.after(() => active.close());
+  await assert.rejects(active.call("close", {}), errorCode("unowned_browser"));
+  const calls = await readFile(trace, "utf8");
+  assert.doesNotMatch(calls, /--user stop/);
+});
 test("Python worker and dependency lock participate in immutable build identity", async () => {
   const tree = await hashSourceTree(root);
   for (const name of ["src/browser/worker.py", "src/browser/requirements.lock", "scripts/setup-browser.mjs"]) assert.ok(tree.files.includes(name));

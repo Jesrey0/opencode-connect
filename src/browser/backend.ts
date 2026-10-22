@@ -1,4 +1,5 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, readlink, readdir, mkdir, access } from "node:fs/promises";
 import { constants } from "node:fs";
@@ -22,6 +23,54 @@ export function endpoint(value: string): string {
   const url = new URL(value);
   if (url.protocol !== "http:" || !["127.0.0.1", "[::1]"].includes(url.hostname) || url.username || url.password || url.search || url.hash || url.pathname !== "/" || !url.port) throw new Error("Browser endpoint must be an HTTP loopback IP with an explicit port and no path or credentials");
   return url.origin;
+}
+const exec = promisify(execFile);
+const CHROME_UNIT = "opencode-connect-chrome.service";
+
+export async function browserEndpointReachable(env: NodeJS.ProcessEnv = process.env): Promise<boolean> {
+  const url = endpoint(env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
+  if (new URL(url).hostname !== "127.0.0.1") return false;
+  try {
+    const response = await fetch(`${url}/json/version`, { signal: AbortSignal.timeout(1000), redirect: "error" });
+    const value = await response.json() as { Browser?: string; webSocketDebuggerUrl?: string };
+    return response.ok && /^(Chrome|Chromium)\//.test(value.Browser ?? "") && !!value.webSocketDebuggerUrl;
+  } catch { return false; }
+}
+
+// Only the root Chrome process in our dedicated systemd unit/profile is owned.
+// An arbitrary Chrome on the same loopback endpoint is never sufficient proof.
+export function isManagedChromeProcess(identity: {
+  pid: number; executable: string; argv: string[]; cgroup: string; profile: string; port: string;
+}): boolean {
+  const executable = identity.executable.split("/").pop() ?? "";
+  // Chrome may rewrite /proc/PID/cmdline into a single space-separated
+  // process title; match complete flag tokens, not arbitrary substrings.
+  const args = identity.argv.join(" ").split(/\s+/);
+  return identity.pid > 1
+    && /^(?:chrome|google-chrome(?:-stable)?|chromium(?:-browser)?)$/.test(executable)
+    && identity.cgroup.split("\n").some(line =>
+      line.endsWith("/" + CHROME_UNIT) ||
+      // WSLg/Chrome may move the launched process into its own app scope;
+      // systemd MainPID still binds it to the dedicated launcher unit.
+      line.endsWith("/app-com.google.Chrome-" + identity.pid + ".scope"))
+    && args.includes("--user-data-dir=" + identity.profile)
+    && args.includes("--remote-debugging-port=" + identity.port)
+    && args.includes("--remote-debugging-address=127.0.0.1");
+}
+
+async function managedUnit(env: NodeJS.ProcessEnv): Promise<{ state: string; pid: number }> {
+  try {
+    const { stdout } = await exec("systemctl", ["--user", "show", CHROME_UNIT,
+      "--property=ActiveState", "--property=MainPID", "--no-pager"],
+      { env, timeout: 3000, maxBuffer: 4096 });
+    const values = Object.fromEntries(stdout.trim().split("\n").map(line => line.split("=", 2)));
+    const pid = Number(values.MainPID);
+    if (!["active", "inactive", "failed", "activating", "deactivating"].includes(values.ActiveState)
+      || !Number.isSafeInteger(pid) || pid < 0) throw new Error("Invalid unit state");
+    return { state: values.ActiveState, pid };
+  } catch {
+    throw new BrowserError("close_unavailable", "Cannot verify the dedicated Linux Chrome unit; nothing was stopped");
+  }
 }
 export function browserErrorLayer(code: string) {
   if (["invalid_arguments", "invalid_browser", "invalid_operation", "unsafe_url", "authorization_denied"].includes(code)) return "validation";
@@ -69,6 +118,7 @@ export class BrowserBackend {
   private nextStart = 0;
   private closed = false;
   private launchPromise?: Promise<Record<string, unknown>>;
+  private closingChrome = false;
   private consentPending = false;
   constructor(private readonly options: Options = {}) {
     this.env = options.env ?? process.env;
@@ -86,8 +136,8 @@ export class BrowserBackend {
       this.idle.unref();
     }
   }
-  private stop(message: string, code = "worker_unavailable", currentIssue: string | null = message) {
-    if (this.worker) { this.currentIssue = currentIssue; this.recordIncident(message); }
+  private stop(message: string, code = "worker_unavailable", currentIssue: string | null = message, incident = true) {
+    if (this.worker) { this.currentIssue = currentIssue; if (incident) this.recordIncident(message); }
     const worker = this.worker; this.worker = undefined;
     clearTimeout(this.idle); this.buffer = Buffer.alloc(0);
     for (const item of this.pending.values()) {
@@ -196,6 +246,7 @@ export class BrowserBackend {
     if (signal?.aborted) throw new BrowserError("cancelled", "Browser request cancelled");
     const parsed = browserInputs[method].safeParse(input);
     if (!parsed.success) throw new BrowserError("invalid_arguments", argumentError(parsed.error.issues));
+    if (this.closingChrome) throw new BrowserError("busy", "Linux Chrome shutdown is in progress");
     if (this.consentPending || (method === "connect" && this.pending.size)) throw new BrowserError("busy", "Browser request in progress; wait for the explicit connection result");
     const consent = method === "connect";
     if (consent) this.consentPending = true;
@@ -203,6 +254,12 @@ export class BrowserBackend {
       if (method === "launch") {
         this.launchPromise ??= this.launch(parsed.data as { headless: boolean }, signal);
         try { return await this.launchPromise; } finally { this.launchPromise = undefined; }
+      }
+      if (method === "close") {
+        if (this.launchPromise || this.pending.size) throw new BrowserError("busy", "Browser activity in progress; retry explicit close later");
+        this.closingChrome = true;
+        try { return await this.closeManagedChrome(signal); }
+        finally { this.closingChrome = false; }
       }
       await this.start();
       // The adapter serializes requests. Queuing a short request behind a long
@@ -237,18 +294,60 @@ export class BrowserBackend {
       return validated.data;
     } finally { if (consent) this.consentPending = false; this.resetIdle(); }
   }
+  private async closeManagedChrome(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    const check = () => {
+      if (this.closed || signal?.aborted) throw new BrowserError("cancelled", "Linux Chrome shutdown cancelled before dispatch");
+    };
+    check();
+    const url = endpoint(this.env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
+    if (new URL(url).hostname !== "127.0.0.1") throw new BrowserError("close_unavailable", "Managed Chrome requires an IPv4 loopback endpoint");
+    const profile = join(this.env.XDG_DATA_HOME ?? join(homedir(), ".local/share"), "opencode-connect/chrome-linux");
+    const port = new URL(url).port;
+    const unit = await managedUnit(this.env);
+    check();
+    if (unit.state === "inactive" || unit.state === "failed") {
+      if (await browserEndpointReachable(this.env) || await chromeProfileRunning(profile))
+        throw new BrowserError("unowned_browser", "An unowned Chrome endpoint or profile process exists; nothing was stopped");
+      return { browser: "linux", closed: true, alreadyClosed: true, reachable: false };
+    }
+    if (unit.state !== "active" || unit.pid <= 1) throw new BrowserError("unowned_browser", "Managed Chrome ownership is uncertain; nothing was stopped");
+    try {
+      const [executable, argv, cgroup] = await Promise.all([
+        readlink(`/proc/${unit.pid}/exe`),
+        readFile(`/proc/${unit.pid}/cmdline`, "utf8"),
+        readFile(`/proc/${unit.pid}/cgroup`, "utf8"),
+      ]);
+      if (!isManagedChromeProcess({ pid: unit.pid, executable, argv: argv.split("\0").filter(Boolean), cgroup, profile, port }))
+        throw new Error("Unowned process");
+    } catch {
+      throw new BrowserError("unowned_browser", "Linux Chrome unit does not own the expected process/profile/port; nothing was stopped");
+    }
+    check();
+    // A systemd unit is the authority for its own process group; never send
+    // signals to inferred PIDs or any Windows/unmanaged Chrome instance.
+    try {
+      await exec("systemctl", ["--user", "stop", CHROME_UNIT], { env: this.env, timeout: 12000, maxBuffer: 4096 });
+    } catch {
+      throw new BrowserError("close_failed", "Managed Chrome shutdown failed; inspect the dedicated unit");
+    }
+    const deadline = Date.now() + 4000;
+    do {
+      const after = await managedUnit(this.env);
+      if ((after.state === "inactive" || after.state === "failed")
+        && !await browserEndpointReachable(this.env) && !await chromeProfileRunning(profile)) {
+        this.stop("Linux Chrome closed on explicit request; reattach after launch", "worker_unavailable", null, false);
+        return { browser: "linux", closed: true, alreadyClosed: false, reachable: false };
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } while (Date.now() < deadline);
+    throw new BrowserError("close_unverified", "Linux Chrome shutdown outcome could not be verified; inspect status before retrying");
+  }
   private async launch(input: { headless: boolean }, signal?: AbortSignal): Promise<Record<string, unknown>> {
     const check = () => {
       if (this.closed || signal?.aborted) throw new BrowserError("cancelled", "Chrome launch cancelled; any already launched Chrome is preserved");
     };
     const url = endpoint(this.env.OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT ?? "http://127.0.0.1:9222");
-    const reachable = async () => {
-      try {
-        const response = await fetch(`${url}/json/version`, { signal: AbortSignal.timeout(1000), redirect: "error" });
-        const value = await response.json() as { Browser?: string; webSocketDebuggerUrl?: string };
-        return response.ok && /^(Chrome|Chromium)\//.test(value.Browser ?? "") && !!value.webSocketDebuggerUrl;
-      } catch { return false; }
-    };
+    const reachable = () => browserEndpointReachable(this.env);
     const existing = await reachable(); check();
     if (existing) return { browser: "linux", reused: true, reachable: true, pid: null };
     if (new URL(url).hostname !== "127.0.0.1") throw new BrowserError("launch_unavailable", "Linux launch requires the IPv4 loopback endpoint");
@@ -312,4 +411,20 @@ async function linuxProcesses() {
     if (found.length >= 20) break;
   }
   return found;
+}
+
+
+// An inactive unit plus a closed CDP port is not sufficient if Chrome migrated
+// to another cgroup or restarted without a debugging endpoint.
+async function chromeProfileRunning(profile: string): Promise<boolean> {
+  for (const name of await readdir("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    try {
+      const exe = (await readlink(`/proc/${name}/exe`)).split("/").pop() ?? "";
+      if (!/^(?:chrome|google-chrome(?:-stable)?|chromium(?:-browser)?)$/.test(exe)) continue;
+      const args = (await readFile(`/proc/${name}/cmdline`, "utf8")).replace(/\0/g, " ").split(/\s+/);
+      if (args.includes("--user-data-dir=" + profile)) return true;
+    } catch {}
+  }
+  return false;
 }
