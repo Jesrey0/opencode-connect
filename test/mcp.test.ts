@@ -25,17 +25,18 @@ test("MCP discovery uses host/command groups and canonical worker names without 
   const fixture = await mcpFixture(nativeFixture(() => { throw new Error("discovery must not access runtime"); }));
   try {
     const { tools } = await fixture.client.listTools();
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["status", "opencode.start", "opencode.wait", "opencode.inspect", "opencode.query", "opencode.act", "host.inspect", "host.write", "host.worktree", "command.start", "command.read", "command.control"].sort());
+    const focused = ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.read", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"];
+    assert.deepEqual(tools.map((t) => t.name).sort(), ["status", "opencode.start", "opencode.wait", "opencode.inspect", "opencode.query", "opencode.act", "host.write", ...focused].sort());
     // OpenAI plugin reference/guidelines reviewed 2026-10-15; see
     // docs/chatgpt-mcp-review.md for sources and behavior justifications.
     for (const [name, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of [
       ["status", true, false, false, true],
-      ["host.inspect", true, false, false, true],
       ["host.write", false, true, false, false],
-      ["host.worktree", false, true, false, false],
-      ["command.start", false, true, true, false],
       ["command.read", false, true, false, false],
-      ["command.control", false, true, true, false],
+      ...["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList"].map(name => [name, true, false, false, true] as const),
+      ...["host.worktreeCreate", "host.worktreeRemove", "command.startShell", "command.startPty", "command.startPersistentPty", "command.remove", "command.input", "command.interrupt", "command.ctrlD"].map(name => [name, false, true, name.startsWith("command."), false] as const),
+      ["host.worktreeRefresh", false, false, false, true],
+      ["command.resize", false, false, false, true],
       ["opencode.start", false, true, true, false],
       ["opencode.wait", true, false, false, true],
       ["opencode.inspect", true, false, false, true],
@@ -56,13 +57,67 @@ test("MCP discovery uses host/command groups and canonical worker names without 
   } finally { await fixture.close(); }
 });
 
+test("focused host and command tools have unique purpose-specific schemas and truthful mutation annotations", async () => {
+  const fixture = await mcpFixture(nativeFixture(() => { throw new Error("schema discovery must not access runtime"); }));
+  try {
+    const { tools } = await fixture.client.listTools();
+    assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
+    for (const name of ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"]) {
+      const tool = tools.find(candidate => candidate.name === name);
+      assert.ok(tool, `missing ${name}`);
+      assert.ok(tool.description?.trim());
+      assert.equal(tool.inputSchema.type, "object");
+      assert.equal(tool.inputSchema.additionalProperties, false);
+      assert.ok(tool.outputSchema);
+    }
+    for (const [name, absent] of [["host.list", "type"], ["host.worktreeList", "action"], ["command.startShell", "kind"], ["command.remove", "action"]] as const) {
+      assert.equal(absent in tools.find(tool => tool.name === name)!.inputSchema.properties!, false, `${name} has no selector`);
+    }
+    const refresh = tools.find(tool => tool.name === "host.worktreeRefresh")!.annotations!;
+    assert.deepEqual([refresh.readOnlyHint, refresh.destructiveHint, refresh.idempotentHint], [false, false, true]);
+    const resize = tools.find(tool => tool.name === "command.resize")!.annotations!;
+    assert.deepEqual([resize.readOnlyHint, resize.destructiveHint, resize.idempotentHint], [false, false, true]);
+    const read = tools.find(tool => tool.name === "command.read")!.annotations!;
+    assert.deepEqual([read.readOnlyHint, read.destructiveHint], [false, true], "persistent observer may remove an exited handle");
+    for (const name of ["host.inspect", "host.worktree", "command.start", "command.control"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
+  } finally { await fixture.close(); }
+});
+
+test("host.read dispatch and fingerprint continuation target the selector-free host.read tool schema", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencode-focused-read-"));
+  try {
+    await writeFile(join(cwd, "data.txt"), "abcdef");
+    const bytes = Buffer.from("abcdef");
+    const native = nativeFixture(request => {
+      if (request.path === "/api/location") return { directory: cwd, project: { id: "p", directory: cwd, canonical: cwd } };
+      if (request.path.startsWith("/api/fs/read/")) return new Response(bytes, { headers: { "content-type": "application/octet-stream" } });
+      throw new Error(`unexpected native request ${request.path}`);
+    });
+    const fixture = await mcpFixture(native);
+    try {
+      const { tools } = await fixture.client.listTools();
+      const read = tools.find(tool => tool.name === "host.read")!;
+      const validate = new AjvJsonSchemaValidator().getValidator(read.inputSchema as JsonSchemaType);
+      const first = await fixture.client.callTool({ name: "host.read", arguments: { cwd, path: "data.txt", limit: 2 } });
+      assert.equal(first.isError, undefined);
+      const content = first.structuredContent as { nextCall: { tool: string; arguments: Record<string, unknown> } };
+      assert.deepEqual(content.nextCall, { tool: "host.read", arguments: { cwd, path: join(cwd, "data.txt"), limit: 2, offset: 2, fingerprint: (first.structuredContent as any).fingerprint } });
+      assert.equal(validate(content.nextCall.arguments).valid, true);
+      const next = await fixture.client.callTool({ name: content.nextCall.tool, arguments: content.nextCall.arguments });
+      assert.equal(next.isError, undefined);
+      assert.equal((next.structuredContent as any).text, "cd");
+      assert.equal(native.requests.filter(request => request.path.startsWith("/api/fs/read/")).length, 2);
+    } finally { await fixture.close(); }
+  } finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
 test("MCP image response contains safe metadata and one bounded image block, never duplicate base64 text", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "opencode-mcp-image-"));
   await writeFile(`${cwd}/image`, "fixture");
   const png = Buffer.from([137,80,78,71,13,10,26,10]);
   const fixture = await mcpFixture(nativeFixture((r) => r.path === "/api/location" ? { directory: cwd } : new Response(png)));
   try {
-    const response = await fixture.client.callTool({ name: "host.inspect", arguments: { type: "read", cwd, path: "image", image: true } });
+    const response = await fixture.client.callTool({ name: "host.read", arguments: { cwd, path: "image", image: true } });
     assert.equal(response.isError, undefined);
     const content = response.content as {type:string;text?:string;mimeType?:string;data?:string}[];
     assert.equal(content.length, 1); assert.equal(content[0].type, "image"); assert.equal(content[0].mimeType, "image/png");
@@ -71,26 +126,23 @@ test("MCP image response contains safe metadata and one bounded image block, nev
   } finally { await fixture.close(); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test("host discovery names selectors and publishes valid minimal examples without native access", async () => {
+test("host discovery publishes purpose-specific examples without operation selectors", async () => {
   const native = nativeFixture(() => { throw new Error("discovery must not access runtime"); });
   const fixture = await mcpFixture(native);
   try {
     const { tools } = await fixture.client.listTools();
     const provider = new AjvJsonSchemaValidator();
-    for (const [name, selector, examples] of [
-      ["host.inspect", "type", [{ type: "list", cwd: "/workspace" }, { type: "read", cwd: "/workspace", path: "README.md", limit: 2000 }]],
-      ["command.start", "kind", [{ kind: "shell", cwd: "/workspace", command: "pwd" }]],
+    for (const [name, example] of [
+      ["host.list", { cwd: "/workspace" }],
+      ["host.read", { cwd: "/workspace", path: "README.md", limit: 2000 }],
+      ["command.startShell", { cwd: "/workspace", command: "pwd" }],
     ] as const) {
       const tool = tools.find(tool => tool.name === name)!;
-      assert.match(tool.description!, new RegExp(`Use ${selector}`));
       const validate = provider.getValidator(tool.inputSchema as JsonSchemaType);
-      for (const example of examples) {
-        assert.ok(tool.description!.includes(JSON.stringify(example)), `${name} example is discoverable`);
-        assert.equal(validate(example).valid, true, `${name} example passes its published contract`);
-      }
+      assert.ok(tool.description!.trim());
+      assert.equal(validate(example).valid, true, `${name} example passes its published contract`);
     }
-    assert.match(tools.find(tool => tool.name === "host.inspect")!.description!, /not action/);
-    assert.match(tools.find(tool => tool.name === "command.start")!.description!, /command.read/);
+    assert.match(tools.find(tool => tool.name === "command.startShell")!.description!, /command.read/);
     assert.equal(native.requests.length, 0);
   } finally { await fixture.close(); }
 });
@@ -99,15 +151,15 @@ test("strict union errors omit arbitrary unknown keys and reject wrong selectors
   const native = nativeFixture(() => { throw new Error("invalid arguments must not reach runtime"); });
   const fixture = await mcpFixture(native);
   try {
-    for (const args of [{ action: "list", cwd: "/workspace" }, { type: "unknown", cwd: "/workspace" }]) {
-      const result = await fixture.client.callTool({ name: "host.inspect", arguments: args });
+    for (const [name, args] of [["host.list", { type: "list", cwd: "/workspace" }], ["host.read", { cwd: "/workspace", path: "file", unknownAction: true }]] as const) {
+      const result = await fixture.client.callTool({ name, arguments: args });
       assert.equal(result.isError, true);
-      assert.match(JSON.stringify(result.content), /type/);
+      assert.match(JSON.stringify(result.content), /Unrecognized field/);
     }
     const keys = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`PRIVATE-KEY-${i}-${"x".repeat(1000)}`, "PRIVATE-VALUE"]));
     for (const [name, args] of [
-      ["host.inspect", { type: "list", cwd: "/workspace", ...keys }],
-      ["command.start", { kind: "shell", cwd: "/workspace", command: "pwd", args: [], ...keys }],
+      ["host.list", { cwd: "/workspace", ...keys }],
+      ["command.startShell", { cwd: "/workspace", command: "pwd", args: [], ...keys }],
       ["opencode.query", { queries: [{ type: "agents", ...keys }] }],
     ] as const) {
       const result = await fixture.client.callTool({ name, arguments: args });
@@ -128,19 +180,17 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
     const { tools } = await fixture.client.listTools();
     const provider = new AjvJsonSchemaValidator();
     const schemas = new Map(tools.map((tool) => [tool.name, tool.inputSchema]));
-    for (const [name, discriminator, fields] of [
-      ["host.inspect", "type", ["cwd", "path", "textFingerprint", "sessionId"]],
-      ["host.worktree", "action", ["cwd", "directory", "force"]],
-      ["command.start", "kind", ["cwd", "command", "sessionId", "timeoutMs", "args"]],
-      ["command.control", "action", ["kind", "id", "text", "takeover", "rows"]],
-      ["opencode.act", "action", ["sessionId", "agent", "agents", "permissions"]],
+    for (const [name, fields] of [
+      ["host.read", ["cwd", "path", "fingerprint"]],
+      ["host.worktreeRemove", ["cwd", "directory", "force"]],
+      ["command.startShell", ["cwd", "command", "timeoutMs"]],
+      ["command.resize", ["kind", "cwd", "id", "rows", "cols"]],
+      ["opencode.act", ["action", "sessionId", "agent", "agents", "permissions"]],
     ] as const) {
       const schema = schemas.get(name)!;
       assert.equal(schema.type, "object");
-      assert.ok(schema.required?.includes(discriminator));
-      assert.ok(Array.isArray((schema.properties![discriminator] as { enum: unknown[] }).enum));
       for (const field of fields) assert.ok(field in schema.properties!, `${name}.${field}`);
-      assert.ok(Array.isArray(schema.oneOf), "variant constraints remain published alongside properties");
+      assert.ok(schema.required?.length, `${name} exposes required fields`);
     }
     const query = schemas.get("opencode.query")!;
     const items = (query.properties!.queries as { items: { type: string; properties: Record<string, Record<string, unknown>>; required: string[]; oneOf: Record<string, unknown>[] } }).items;
@@ -170,17 +220,17 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
     assert.equal(validateStart({ task: "task", cwd: "/tmp", model: "openai/a", agent: [{ name: "build" }] }).valid, false);
     assert.equal(validateStart({ task: "task", cwd: "/tmp", model: "openai/a", agents: ["explore"] }).valid, false);
     const cases: [string, Record<string, unknown>, Record<string, unknown>[]][] = [
-      ["host.inspect", { type: "read", cwd: "/tmp", path: "file", limit: 65536 }, [
-        { type: "read", cwd: "/tmp", limit: 1 }, { type: "list", cwd: "/tmp", image: true }, { type: "find", cwd: "/tmp", query: "x", limit: 51 }, { type: "read", cwd: "/tmp", path: "x", limit: 65537 }, { type: "terminalScreen", cwd: "/tmp", sessionId: "s", lines: 1001 },
+      ["host.read", { cwd: "/tmp", path: "file", limit: 65536 }, [
+        { cwd: "/tmp", limit: 1 }, { cwd: "/tmp", path: "file", limit: 65537 },
       ]],
-      ["host.worktree", { action: "remove", cwd: "/tmp", directory: "/tmp/tree", force: false }, [
-        { action: "remove", cwd: "/tmp", directory: "/tmp/tree" }, { action: "list", cwd: "/tmp", force: true },
+      ["host.worktreeRemove", { cwd: "/tmp", directory: "/tmp/tree", force: false }, [
+        { cwd: "/tmp", directory: "/tmp/tree" }, { cwd: "/tmp", directory: "/tmp/tree", force: true, action: "remove" },
       ]],
-      ["command.start", { kind: "shell", cwd: "/tmp", command: "true", timeoutMs: 86400000 }, [
-        { kind: "shell", cwd: "/tmp", command: "true", args: [] }, { kind: "pty", cwd: "/tmp", command: "sh", timeoutMs: 1 }, { kind: "persistentPty", cwd: "/tmp", command: "sh" }, { kind: "shell", cwd: "/tmp", command: "true", timeoutMs: 86400001 },
+      ["command.startShell", { cwd: "/tmp", command: "true", timeoutMs: 86400000 }, [
+        { cwd: "/tmp", command: "true", args: [] }, { cwd: "/tmp", command: "true", timeoutMs: 86400001 },
       ]],
-      ["command.control", { action: "resize", kind: "pty", cwd: "/tmp", id: "pty", rows: 1, cols: 1000 }, [
-        { action: "input", kind: "shell", cwd: "/tmp", id: "shell", text: "x" }, { action: "remove", kind: "pty", cwd: "/tmp", id: "pty", text: "x" }, { action: "resize", kind: "pty", cwd: "/tmp", id: "pty", rows: 0, cols: 80 },
+      ["command.resize", { kind: "pty", cwd: "/tmp", id: "pty", rows: 1, cols: 1000 }, [
+        { kind: "shell", cwd: "/tmp", id: "shell", rows: 24, cols: 80 }, { kind: "pty", cwd: "/tmp", id: "pty", rows: 0, cols: 80 },
       ]],
       ["opencode.query", { queries: [{ type: "agents", includeHidden: true, limit: 50 }, { type: "sessions" }] }, [
         { queries: [{ type: "agents", limit: 51 }] }, { queries: [{ type: "usage", agentId: "build" }] }, { queries: [{ type: "message", sessionId: "s" }] }, { queries: [{ type: "messages", sessionId: "s", cursor: "native", order: "desc" }] }, { queries: [{ type: "agent", agentId: "build", textLimit: 12001 }] }, { queries: [{ type: "agents", limit: 0 }] }, { queries: Array.from({ length: 11 }, () => ({ type: "usage" })) },
@@ -214,7 +264,7 @@ test("discovered output schemas accept existing safe structured errors, includin
   try {
     const { tools } = await fixture.client.listTools();
     for (const [name, args] of [
-      ["host.inspect", { type: "vcs", cwd: "/workspace" }],
+       ["host.vcs", { cwd: "/workspace" }],
       ["opencode.start", { cwd: "/workspace", model: "openai/a", task: "test" }],
       ["opencode.act", { action: "delete", runtime: "opencode", sessionId: "s" }],
     ] as const) {
@@ -242,7 +292,7 @@ test("MCP shell example retains separate native create, get and output calls wit
   });
   const fixture = await mcpFixture(native);
   try {
-    const started = await fixture.client.callTool({ name: "command.start", arguments: { kind: "shell", cwd: location.directory, command: "pwd" } });
+    const started = await fixture.client.callTool({ name: "command.startShell", arguments: { cwd: location.directory, command: "pwd" } });
     assert.notEqual(started.isError, true);
     assert.deepEqual(native.requests.map(r => [r.method, r.path]), [["GET", "/api/location"], ["POST", "/api/shell"]]);
     assert.deepEqual(native.requests[1].body, { cwd: location.directory, command: "pwd", timeout: 120000 });

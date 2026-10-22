@@ -1,5 +1,13 @@
 import * as z from "zod/v4";
 
+const unionVariants = new WeakMap<object, z.ZodObject[]>();
+
+export function variantsOf(schema: object): readonly z.ZodObject[] {
+  const variants = unionVariants.get(schema);
+  if (!variants) throw new Error("schema is not an exposed union");
+  return variants;
+}
+
 // Publish model-visible fields alongside the union's strict variant constraints.
 // Metadata only affects discovery; the discriminated union is the sole parser.
 export function exposedUnion<K extends string, O extends readonly [z.ZodObject, ...z.ZodObject[]]>(key: K, options: O) {
@@ -32,5 +40,7 @@ export function exposedUnion<K extends string, O extends readonly [z.ZodObject, 
     properties[name] = property;
   }
   const required = (oneOf[0].required ?? []).filter((name) => oneOf.every((variant) => variant.required?.includes(name)));
-  return union.meta({ type: "object", properties, required });
+  const exposed = union.meta({ type: "object", properties, required });
+  unionVariants.set(exposed, [...variants]);
+  return exposed;
 }

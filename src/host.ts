@@ -75,7 +75,10 @@ export class HostBackend {
   }
   async inspect(input: HostInspectInput) {
     const result = await this.inspectNative(input);
-    return { ...result, nextCall: pageNextCall("host.inspect", input, result) };
+    const tool = ({ list: "host.list", read: "host.read", find: "host.find", vcs: "host.vcs", vcsStatus: "host.vcsStatus", vcsBranch: "host.vcsBranch", vcsDiff: "host.vcsDiff", commands: "host.commands", terminalScreen: "host.terminalScreen", terminalSnapshot: "host.terminalSnapshot" } as const)[input.type];
+    const call = pageNextCall(tool, input, result);
+    if (call) { const { type: _type, ...args } = call.arguments; return { ...result, nextCall: { ...call, arguments: args } }; }
+    return { ...result, nextCall: null };
   }
   private async inspectNative(input: HostInspectInput) {
     const { client } = await this.connect();
@@ -193,7 +196,9 @@ export class HostBackend {
     const list = await client.worktree.list({ projectID: projectId });
     if (input.action === "list") {
       const result = { projectId, location: { directory: location.directory }, ...page(list, input) };
-      return { ...result, nextCall: pageNextCall("host.worktree", { ...input, cwd: location.directory, projectId }, result) };
+      const call = pageNextCall("host.worktreeList", { ...input, cwd: location.directory, projectId }, result);
+      if (call) { const { action: _action, ...args } = call.arguments; return { ...result, nextCall: { ...call, arguments: args } }; }
+      return { ...result, nextCall: null };
     }
     if (input.action === "refresh") await client.worktree.refresh({ projectID: projectId });
     else {

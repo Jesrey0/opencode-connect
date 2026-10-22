@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { OpenCodeBackend } from "./opencode.js";
 import { HostBackend } from "./host.js";
-import { exposedUnion } from "./schema.js";
+import { exposedUnion, variantsOf } from "./schema.js";
 import { VERSION } from "./version.js";
 import { loadBuildInfo } from "./buildInfo.js";
 import { safeError, AdmissionError, ConnectorError, SessionDeleteError } from "./bounds.js";
@@ -137,7 +137,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     // Bounds recursive validation work independently of serialized string size.
     // Full permission/attachment sets and 12-step browser workflows fit this budget.
     maxToolInputElements: 4096,
-    instructions: "host.inspect uses type; command.start uses kind; host.worktree, command.control and opencode.act use action. Preserve native IDs and canonical cwd. Start commands with command.start, then read the saved handle/cursor with command.read. Use returned nextCall for read-only paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
+     instructions: "Host and command operations are separately named purpose-specific tools. Preserve native IDs and canonical cwd. Start commands with command.startShell, command.startPty or command.startPersistentPty, then read the saved handle/cursor with command.read. Follow returned nextCall for paging. Reconcile persisted state before retrying uncertain mutations. Worker termination is not proof of assistant success; inspect result evidence.",
   });
   if (events) {
     const authenticated = async (extra: ServerContext) => {
@@ -202,20 +202,30 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     }), ...(opencode.ready ? {} : { isError: true }) };
   });
 
-  registerTool("host.inspect", {
-    title: "Inspect OpenCode Host",
-    description: 'Use type (not action) to select a native read: {"type":"list","cwd":"/workspace"} or {"type":"read","cwd":"/workspace","path":"README.md","limit":2000}. Also filename search, VCS, command inventory and rendered screens. Follow returned nextCall for paging. Direct host authority is independent of worker permissions.',
-    inputSchema: hostInspectSchema,
-    outputSchema: outputSchemas.hostInspect,
-    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
-  }, async (input) => {
-    const result = await host.inspect(input);
-    if ("image" in result && result.image) {
-      const { image, ...metadata } = result;
-      return structuredResult(metadata, [{ type: "image", mimeType: image.mimeType, data: image.data }]);
-    }
-    return structuredResult(result);
-  });
+  const hostTools = [
+    ["host.list", "list", "List directory entries beneath canonical cwd. Continue with the returned fingerprint-bound nextCall.", true],
+    ["host.read", "read", "Read bounded file bytes beneath canonical cwd. Offset continuation requires its fingerprint; image mode returns one signature-checked image.", true],
+    ["host.find", "find", "Search native filenames only (not file contents); results cap at 50.", true],
+    ["host.vcs", "vcs", "Read native VCS repository information and base branch.", true],
+    ["host.vcsStatus", "vcsStatus", "Read paginated native VCS status; continue with nextCall.", true],
+    ["host.vcsBranch", "vcsBranch", "List native branch names, optionally filtered; continue with nextCall.", true],
+    ["host.vcsDiff", "vcsDiff", "Read native VCS diff metadata or one file patch; continue with nextCall.", true],
+    ["host.commands", "commands", "List native shell and PTY handles, optionally scoped to a session; continue with nextCall.", true],
+    ["host.terminalScreen", "terminalScreen", "Read a rendered screen owned by the session; this is not byte replay or proof of process success.", true],
+    ["host.terminalSnapshot", "terminalSnapshot", "Read a rendered persistent-PTY snapshot by canonical handle; checkpoint bytes are excluded.", true],
+  ] as const;
+  for (const [name, type, description] of hostTools) {
+    const variant = variantsOf(hostInspectSchema).find((schema) => (schema.shape as any).type.value === type)!;
+    registerTool(name, {
+      title: `Host ${type} inspection`, description,
+      inputSchema: variant.omit({ type: true } as never), outputSchema: outputSchemas.hostInspect,
+      annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+    }, async (input) => {
+      const result = await host.inspect({ ...input, type } as any);
+      if ("image" in result && result.image) { const { image, ...metadata } = result; return structuredResult(metadata, [{ type: "image", mimeType: image.mimeType, data: image.data }]); }
+      return structuredResult(result);
+    });
+  }
   registerTool("host.write", {
     title: "Write Native OpenCode Host File",
     description: "Write a native file with explicit overwrite, fingerprint and persisted readback. Preflight is not atomic CAS; never retry uncertain writes automatically.",
@@ -223,20 +233,27 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     outputSchema: outputSchemas.hostWrite,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
   }, async (input) => structuredResult(await host.write(input)));
-  registerTool("host.worktree", {
-    title: "Manage Native OpenCode Worktrees",
-    description: "List/create/remove/refresh native project worktrees. Remove requires an explicit force decision (false allowed); mutations require readback and must not be retried automatically.",
-    inputSchema: worktreeSchema,
-    outputSchema: outputSchemas.hostWorktree,
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
-  }, async (input) => structuredResult(await host.worktree(input)));
-  registerTool("command.start", {
-    title: "Start Native OpenCode Command",
-    description: 'Use kind to start a native command: {"kind":"shell","cwd":"/workspace","command":"pwd"}. Then command.read with returned kind, id, canonical cwd and cursor. Handles can expire; ordinary PTYs cannot replay after exit. Direct host authority.',
-    inputSchema: commandStartSchema,
-    outputSchema: outputSchemas.commandStart,
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
-  }, async (input) => structuredResult(await host.start(input)));
+  for (const [name, action, description, readOnly, destructive] of [
+    ["host.worktreeList", "list", "List project worktrees; continue with the returned fingerprint-bound nextCall.", true, false],
+    ["host.worktreeCreate", "create", "Create a native worktree at an explicit absolute destination. Read back the created inventory; do not retry uncertain mutations.", false, true],
+    ["host.worktreeRemove", "remove", "Remove an inventoried project worktree with an explicit force decision. This is destructive; never retry uncertain removal.", false, true],
+    ["host.worktreeRefresh", "refresh", "Refresh native project worktree inventory. This updates cached inventory but does not create or remove worktrees.", false, false],
+  ] as const) {
+    const variant = variantsOf(worktreeSchema).find((schema) => (schema.shape as any).action.value === action)!;
+    registerTool(name, { title: `Native worktree ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: outputSchemas.hostWorktree,
+      annotations: { readOnlyHint: readOnly, destructiveHint: destructive, openWorldHint: false, idempotentHint: readOnly || action === "refresh" },
+    }, async (input) => structuredResult(await host.worktree({ ...input, action } as any)));
+  }
+  for (const [name, kind, description] of [
+    ["command.startShell", "shell", "Run a shell command string with a timeout. Then use command.read with the returned handle and cursor."],
+    ["command.startPty", "pty", "Run an executable with separate args in an ordinary PTY. Replay attachment ends at exit; then use command.read."],
+    ["command.startPersistentPty", "persistentPty", "Start an experimental session-bound PTY. cwd must match the session; native retention and observer cleanup apply."],
+  ] as const) {
+    const variant = variantsOf(commandStartSchema).find((schema) => (schema.shape as any).kind.value === kind)!;
+    registerTool(name, { title: `Start ${kind} command`, description, inputSchema: variant.omit({ kind: true } as never), outputSchema: outputSchemas.commandStart,
+      annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
+    }, async (input) => structuredResult(await host.start({ ...input, kind } as any)));
+  }
   registerTool("command.read", {
     title: "Read Native OpenCode Command",
     description: "Read bounded native command replay by saved handle/cursor. Persistent observers may remove exited handles; detach or unverified metadata never proves exit or drain.",
@@ -244,13 +261,18 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     outputSchema: outputSchemas.commandRead,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
   }, async (input) => structuredResult(await host.read(input)));
-  registerTool("command.control", {
-    title: "Control Native OpenCode Command",
-    description: "Remove a command or resize/send input to a PTY. Shell supports remove only; persistent input may require takeover. Input has no durable acknowledgement; never retry uncertain input.",
-    inputSchema: commandControlSchema,
-    outputSchema: outputSchemas.commandControl,
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
-  }, async (input) => structuredResult(await host.control(input)));
+  for (const [name, action, description] of [
+    ["command.remove", "remove", "Terminate and forget a native command handle; removal is destructive and cannot be retried when uncertain."],
+    ["command.resize", "resize", "Set the dimensions of an ordinary or persistent PTY; repeating the same dimensions is safe."],
+    ["command.input", "input", "Send input to a PTY without durable acknowledgement; do not retry uncertain input."],
+    ["command.interrupt", "interrupt", "Send Ctrl-C to a PTY without durable acknowledgement."],
+    ["command.ctrlD", "ctrlD", "Send Ctrl-D as a terminal character; it is not pipe EOF and has no durable acknowledgement."],
+  ] as const) {
+    const variant = variantsOf(commandControlSchema).find((schema) => (schema.shape as any).action.value === action)!;
+    registerTool(name, { title: `Command ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: outputSchemas.commandControl,
+      annotations: { readOnlyHint: false, destructiveHint: action === "remove" || action === "input" || action === "interrupt" || action === "ctrlD", openWorldHint: action !== "resize", idempotentHint: action === "resize" },
+    }, async (input) => structuredResult(await host.control({ ...input, action } as any)));
+  }
 
   registerTool("opencode.start", {
     title: "Start OpenCode Work",

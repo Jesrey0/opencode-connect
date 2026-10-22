@@ -65,12 +65,12 @@ for coordinated acceptance, rollback, and standalone-checkout retirement.
 
 | Tool | Native surface |
 | --- | --- |
-| `host.inspect` | `list`, `read`, `find`, `vcs`, `vcsStatus`, `vcsBranch`, `vcsDiff`, `commands`, `terminalScreen`, `terminalSnapshot` |
+| `host.list`, `host.read`, `host.find`, `host.vcs`, `host.vcsStatus`, `host.vcsBranch`, `host.vcsDiff`, `host.commands`, `host.terminalScreen`, `host.terminalSnapshot` | One purpose-specific native host read each |
 | `host.write` | Native bounded UTF-8/base64 file write, explicit overwrite/fingerprint, persisted readback |
-| `host.worktree` | Native project-owned `list`, `create`, `remove`, `refresh` |
-| `command.start` | `shell`, `pty`, or experimental session-bound `persistentPty` |
+| `host.worktreeList`, `host.worktreeCreate`, `host.worktreeRemove`, `host.worktreeRefresh` | One purpose-specific native project worktree operation each |
+| `command.startShell`, `command.startPty`, `command.startPersistentPty` | Start one native command kind |
 | `command.read` | Native handle + canonical cwd/location + saved cursor; bounded output |
-| `command.control` | Remove; PTY input, resize, Ctrl-C (`interrupt`), Ctrl-D (`ctrlD`) |
+| `command.remove`, `command.resize`, `command.input`, `command.interrupt`, `command.ctrlD` | One purpose-specific native command control each |
 
 Each operation supplies an absolute `cwd`; responses return the native canonical
 `location` and `cwd` where applicable. Save `kind`, `id`, canonical location,
@@ -82,12 +82,12 @@ connect ticket is exported. Inventory uses explicit safe fields and excludes
 auth, environment, provider request objects, config, and raw plugin/MCP errors.
 Operator-chosen file contents and command output still require secret hygiene.
 
-`host.inspect` selects an operation with **`type`, not `action`**. For example:
-`{"type":"list","cwd":"/workspace"}` or
-`{"type":"read","cwd":"/workspace","path":"README.md","limit":2000}`.
-Replace `/workspace` with the authorized absolute directory. `command.start`
-instead uses `kind`; `host.worktree`, `command.control`, and `opencode.act` use
-`action`. Unknown fields remain rejected; they are not aliases.
+Host and command operations are distinct purpose-specific tools; no generic
+operation-selector executor or compatibility alias is exposed. For example,
+`host.list` accepts `{"cwd":"/workspace"}` and `host.read` accepts
+`{"cwd":"/workspace","path":"README.md","limit":2000}`. Replace
+`/workspace` with the authorized absolute directory. `command.startShell` starts
+a shell process. Unknown fields remain rejected.
 
 `find` is native filename search, bounded to 50 hits; `possiblyTruncated` is
 conservative because the API has no continuation. For content search, use a
@@ -183,7 +183,7 @@ availability unknown (`null`). Socket detach does not confirm terminal state.
 Persistent observer exit cleanup makes `command.read` destructive and
 non-idempotent, not read-only. No retained-exit promise is made.
 
-`host.inspect terminalScreen` uses native session terminal `read` with bounded
+`host.terminalScreen` uses native session terminal `read` with bounded
 `lines` (1–1,000); `terminalSnapshot` selects a canonical persistent PTY `id`.
 Both validate the owning session against `cwd`, return rendered text with native
 screen cursor/size, and use fingerprinted text pages. Snapshots exclude the native
@@ -525,7 +525,7 @@ cursor, including canonical location when available. If an untargeted bounded
 scan has no user identity yet, continuation reads native message pages to recover
 it rather than guessing a target. These are argument objects, not callbacks or
 automatic replay. Mutations and persistent observer command reads have no
-automatic continuation. `host.worktree` continuation is list-only despite the
+automatic continuation. `host.worktreeList` continuation is list-only despite the
 combined tool's conservative lifecycle annotations.
 
 `act switchModel` and `act switchAgent` delegate validation to their native

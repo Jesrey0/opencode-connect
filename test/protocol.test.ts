@@ -53,7 +53,7 @@ test("SDK rejects old sessions, versions, missing metadata, header mismatches an
     const instructions = discovery.reply.result.instructions;
     assert.equal(typeof instructions, "string");
     assert.ok(instructions.length <= 512, "OpenAI recommends important cross-tool guidance in the first 512 characters");
-    for (const guidance of ["type", "kind", "action", "command.start", "command.read", "nextCall", "uncertain mutations"]) assert.ok(instructions.includes(guidance), guidance);
+    for (const guidance of ["purpose-specific tools", "command.startShell", "command.read", "nextCall", "uncertain mutations"]) assert.ok(instructions.includes(guidance), guidance);
     assert.equal(discovery.headers.has("mcp-session-id"), false);
     for (const old of ["2025-06-18", "2025-11-25"]) {
       for (const method of ["server/discover", "tools/list", "initialize"]) {
@@ -266,7 +266,7 @@ test("overlapping HTTP requests with the same JSON-RPC id keep their own results
   });
   const http = await httpFixture(native);
   const send = async (command: string) => {
-    const response = await fetch(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "command.start" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { _meta: meta, name: "command.start", arguments: { kind: "shell", cwd: "/tmp", command } } }) });
+    const response = await fetch(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "command.startShell" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { _meta: meta, name: "command.startShell", arguments: { cwd: "/tmp", command } } }) });
     return response.json() as Promise<any>;
   };
   try {
@@ -341,7 +341,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     const listing = await http.send("tools/list");
     assert.equal(listing.status, 200);
     const tools = listing.reply.result.tools as any[];
-    assert.equal(tools.length, 12);
+    assert.equal(tools.length, 30);
     const validators = new AjvJsonSchemaValidator();
     for (const tool of tools) {
       assert.equal(tool.inputSchema.$schema, "https://json-schema.org/draft/2020-12/schema");
@@ -350,14 +350,14 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     }
     assert.equal(tools.find((tool) => tool.name === "opencode.act").annotations.openWorldHint, true);
     const calls: [string, Record<string, unknown>][] = [
-      ["status", {}], ["host.inspect", { type: "list", cwd }],
-      ["host.inspect", { type: "terminalScreen", cwd, sessionId: "s" }],
-      ["host.inspect", { type: "terminalSnapshot", cwd, id: "pty" }],
+      ["status", {}], ["host.list", { cwd }],
+      ["host.terminalScreen", { cwd, sessionId: "s" }],
+      ["host.terminalSnapshot", { cwd, id: "pty" }],
       ["host.write", { cwd, path: "new", encoding: "utf8", data: "written", overwrite: false }],
-      ["host.worktree", { action: "list", cwd }],
-      ["command.start", { kind: "shell", cwd, command: "fixture" }],
+      ["host.worktreeList", { cwd }],
+      ["command.startShell", { cwd, command: "fixture" }],
       ["command.read", { kind: "shell", cwd, id: "shell" }],
-      ["command.control", { action: "remove", kind: "shell", cwd, id: "shell" }],
+      ["command.remove", { kind: "shell", cwd, id: "shell" }],
       ["opencode.start", { cwd, model: "openai/a", task: "fixture" }],
       ["opencode.wait", { sessionId: "s", messageId: "u" }],
       ["opencode.inspect", { sessionId: "s", messageId: "u", detail: "result" }],
@@ -454,7 +454,7 @@ test("HTTP image tool retains its separate 1 MiB media allowance above the struc
   const native = nativeFixture((request) => request.path === "/api/location" ? { directory: cwd } : new Response(bytes));
   const http = await httpFixture(native);
   try {
-    const response = await http.send("tools/call", { name: "host.inspect", arguments: { type: "read", cwd, path: "image.png", image: true } });
+    const response = await http.send("tools/call", { name: "host.read", arguments: { cwd, path: "image.png", image: true } });
     const result = response.reply.result;
     assert.notEqual(result.isError, true, JSON.stringify(result));
     assert.equal(result.content.length, 1);
@@ -464,7 +464,7 @@ test("HTTP image tool retains its separate 1 MiB media allowance above the struc
     assert.equal(result.structuredContent.size, bytes.length);
     assert.equal(JSON.stringify(result.structuredContent).includes(result.content[0].data), false);
     bytes = Buffer.concat([bytes, Buffer.alloc(1_048_577 - bytes.length)]);
-    const oversized = await http.send("tools/call", { name: "host.inspect", arguments: { type: "read", cwd, path: "image.png", image: true } });
+    const oversized = await http.send("tools/call", { name: "host.read", arguments: { cwd, path: "image.png", image: true } });
     assert.equal(oversized.reply.result.isError, true);
     assert.match(oversized.reply.result.structuredContent.error, /1 MiB/);
   } finally { await http.close(); await rm(cwd, { recursive: true, force: true }); }

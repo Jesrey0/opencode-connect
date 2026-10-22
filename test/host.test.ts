@@ -65,9 +65,9 @@ test("file pages are fingerprinted, byte bounded, lossless for split UTF-8, and 
     assert.equal(first.encoding, "base64");
     assert.equal(Buffer.from(String(first.data), "base64").toString("hex"), bytes.subarray(0,2).toString("hex"));
     const hash = String(first.fingerprint);
-    assert.equal(first.nextCall?.tool, "host.inspect");
-    assert.deepEqual(first.nextCall?.arguments, { type: "read", cwd, path: `${cwd}/file`, limit: 2, offset: 2, fingerprint: hash });
-    const next = await host.inspect(first.nextCall!.arguments as Parameters<typeof host.inspect>[0]);
+    assert.equal(first.nextCall?.tool, "host.read");
+    assert.deepEqual(first.nextCall?.arguments, { cwd, path: `${cwd}/file`, limit: 2, offset: 2, fingerprint: hash });
+    const next = await host.inspect({ type: "read", ...first.nextCall!.arguments } as Parameters<typeof host.inspect>[0]);
     assert.equal(next.offset, 2);
     await assert.rejects(host.inspect({ type: "read", cwd, path: "file", offset: 2 }), /fingerprint/);
     bytes = Buffer.from("changed");
@@ -76,7 +76,7 @@ test("file pages are fingerprinted, byte bounded, lossless for split UTF-8, and 
     await assert.rejects(host.inspect({ type: "list", cwd, path: ".." }), /leaves/);
     const list = await host.inspect({ type: "list", cwd, limit: 1 });
     assert.equal(list.nextOffset, 1);
-    const last = await host.inspect(list.nextCall!.arguments as Parameters<typeof host.inspect>[0]);
+    const last = await host.inspect({ type: "list", ...list.nextCall!.arguments } as Parameters<typeof host.inspect>[0]);
     assert.equal(last.nextOffset, null);
     assert.equal(last.nextCall, null);
   } finally { await rm(cwd, { recursive: true, force: true }); }
@@ -90,8 +90,8 @@ test("native VCS diffs page metadata separately from complete patch text; change
   assert.equal("patch" in (inventory.data as object[])[0], false);
   const first = await host.inspect({ type: "vcsDiff", cwd: "/tmp", file: "a" });
   assert.equal(first.text?.length, 12000);
-  assert.equal(first.nextCall?.tool, "host.inspect");
-  const second = await host.inspect(first.nextCall!.arguments as Parameters<typeof host.inspect>[0]);
+  assert.equal(first.nextCall?.tool, "host.vcsDiff");
+  const second = await host.inspect({ type: "vcsDiff", ...first.nextCall!.arguments } as Parameters<typeof host.inspect>[0]);
   assert.equal(second.text?.length, 8000);
   patch = "changed";
   await assert.rejects(host.inspect({ type: "vcsDiff", cwd: "/tmp", file: "a", textOffset: 12000, textFingerprint: fingerprint("x".repeat(20000)) }), /changed/);
@@ -111,7 +111,7 @@ test("native VCS branches page fingerprinted names with native search", async ()
   const first = await host.inspect({ type: "vcsBranch", cwd: "/tmp", limit: 2 });
   assert.deepEqual(first.data, ["main", "feature-a"]);
   assert.equal(first.nextOffset, 2);
-  const second = await host.inspect(first.nextCall!.arguments as Parameters<typeof host.inspect>[0]);
+  const second = await host.inspect({ type: "vcsBranch", ...first.nextCall!.arguments } as Parameters<typeof host.inspect>[0]);
   assert.deepEqual(second.data, ["feature-b"]);
   assert.equal(second.nextOffset, null);
   await assert.rejects(host.inspect({ type: "vcsBranch", cwd: "/tmp", offset: 2 }), /fingerprint/);

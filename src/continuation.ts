@@ -1,4 +1,8 @@
-type ReadTool = "opencode.inspect" | "opencode.query" | "host.inspect" | "host.worktree";
+type ReadTool =
+  | "opencode.inspect" | "opencode.query"
+  | "host.list" | "host.read" | "host.find" | "host.vcs" | "host.vcsStatus"
+  | "host.vcsBranch" | "host.vcsDiff" | "host.commands" | "host.terminalScreen"
+  | "host.terminalSnapshot" | "host.worktreeList";
 export function nextCall(tool: ReadTool, args: Record<string, unknown>) {
   return { tool, arguments: args };
 }
@@ -17,7 +21,7 @@ export function pageNextCall(tool: ReadTool, args: Record<string, unknown>, resu
   } else if (typeof value.nextOffset === "number") {
     input.offset = value.nextOffset;
     input.fingerprint = value.fingerprint;
-    if (tool === "host.inspect" && input.type === "read" && typeof value.path === "string") input.path = value.path;
+    if (tool === "host.read" && typeof value.path === "string") input.path = value.path;
   } else {
     const cursor = value.cursor as { next?: string | null } | undefined;
     if (typeof cursor?.next !== "string") return null;

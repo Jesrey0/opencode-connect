@@ -6,7 +6,7 @@ const location = z.object({ directory: id }).loose();
 // Native projections vary by operation. Their fields remain data, not another
 // connector-owned schema for OpenCode's evolving runtime objects.
 const nativeObject = z.record(z.string(), z.unknown());
-const nextCall = z.object({ tool: z.enum(["opencode.inspect", "opencode.query", "host.inspect", "host.worktree"]), arguments: nativeObject }).strict().nullable();
+const nextCall = z.object({ tool: z.enum(["opencode.inspect", "opencode.query", "host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList"]), arguments: nativeObject }).strict().nullable();
 const outcome = z.enum(["completed", "failed", "incomplete", "unknown"]);
 const retry = z.object({ assistantMessageId: id, attempt: z.number().int().positive(), nextAttemptAtMs: count, error: z.object({ type: id, status: z.number().nullable(), messageOmitted: z.literal(true) }).strict() }).strict().nullable();
 const session = z.object({ sessionId: id, cwd: id, status: z.enum(["inProgress", "completed", "failed", "interrupted", "idle"]), executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "nativeTurnHistory", "historyReplay"]), model: z.string().nullable(), modelVariant: z.string().nullable(), agent: z.string().nullable() }).loose();
