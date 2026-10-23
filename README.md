@@ -3,912 +3,140 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.15.0** projects native OpenCode HostPlane operations
-and the canonical WorkerPlane
-into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**.
+OpenCode Connect **0.15.1** projects native OpenCode HostPlane operations
+and WorkerPlane execution into MCP for ChatGPT's **0xOperator**.
+It pins `@opencode/client` to **2.0.24**.
 
-This adapter exposes OpenCode-backed HostPlane and WorkerPlane operations and an
-optional [native Chrome capability](docs/browser-capability.md) powered by Nodriver.
-Linux Chrome in WSL2 is the default, with explicit launch/reuse and optional
-Windows Chrome attachment through an explicitly configured user data directory's
-`DevToolsActivePort` or loopback browser WebSocket. Windows requires explicit
-`browser.connect` authorization and Chrome's permission handshake before tab
-discovery or attachment; Windows HTTP endpoints reject before discovery, with no
-HTTP fallback. Linux retains HTTP discovery and ownership-verified launch/close.
-Custom host applications are CLI-first and keep their code, process lifecycle,
-and optional future MCP endpoints outside this connector. The standalone
-`windows-print-bridge` project is not part of the OpenCode MCP catalog.
+The connector provides bounded host files, commands, worktrees and native sessions,
+plus optional [Chrome interaction](docs/browser-capability.md). Direct Codex sessions
+run through the native OpenCode plugin in `packages/codex-plugin`, using Codex ACP.
+The plugin and connector share this repository; they have separate runtime lifecycles.
 
 ```text
-ChatGPT / 0x0perator
-  -> shared host-ingress + host OAuth
+ChatGPT / 0xOperator
+  -> shared host-ingress + OAuth
     /opencode-connect/mcp -> loopback 127.0.0.1:8788/mcp
-      -> @opencode/client 2.0.24 -> private OpenCode service
+      -> native OpenCode service
+        -> native OpenCode sessions
+        -> codex-sessions plugin RPC -> native Codex ACP sessions
 ```
 
-Shared host-ingress owns the public `/opencode-connect/mcp` route, rewrites it to
-loopback `/mcp`, and validates OAuth centrally. Authorization and cookies are
-stripped before the backend; the raw OpenCode API remains private. Live public-app
-acceptance is a separate post-deployment check; source validation does not establish
-it. The operator owns backend deployment, account binding/OAuth, and Git publication.
-Documentation and Git publication do not activate a backend release; check deployed
-build identity, service readiness, and ChatGPT tool discovery independently.
+## General Chat workflow
 
-OpenCode owns its sessions, messages, inbox, agents, permissions and model catalog.
-Codex owns its native ACP sessions, execution, history and sandbox. The existing
-session tools select the backend with `runtime` (`opencode` by default, or `codex`).
-Codex calls use the workspace-owned `codex-sessions` plugin RPC directly;
-no intermediary OpenCode model turn or OpenCode transcript is created.
+Enable OpenCode Connect in the conversation and state the objective, authorized
+project directory or browser target, and any constraint that matters. Start with
+the operation the task needs. Use readiness only for availability questions;
+recover existing identities before creating replacement work.
 
-Codex quota: call `codex.quota` with no arguments.
-This reads a sanitized, read-only App Server quota snapshot via the Codex plugin RPC;
-it does not admit a model turn. Codex quota windows and reset timestamps are
-separate from OpenCode token activity and General Chat Plus message limits. Native
-identities remain qualified by their runtime. OpenCode prompt admission returns
-a canonical user `messageId`; Codex admission returns `messageId: null`.
-
-### MCP tool contracts in 0.15
-
-| Operation | Public call |
-| --- | --- |
-| Ordinary shell/PTY replay | `command.read` with `kind: "shell"` or `"pty"`, canonical `cwd`, handle `id` and saved cursor |
-| Persistent PTY observation | `command.observePersistentPty` with canonical `cwd`, handle `id` and saved cursor; omit `kind` |
-| Codex quota windows/reset times | `codex.quota {}`; `opencode.usage` reads OpenCode token activity only |
-| Keyboard key or shortcut | `browser.keypress` with a key and optional modifiers; replaces `browser.key_combo` |
-| Vertical or two-axis scrolling | `browser.scroll` with `deltaY` and optional `deltaX`; replaces `browser.scroll_xy` |
-
-The replaced browser names have no aliases. Known unsupported runtime/field
-combinations reject before connection. Focused query responses retain one
-`results` entry with `index: 0` and the owning query type; failed queries set MCP
-`isError: true`. Activity and result inspection publish their own output contracts.
-Source changes require separate release activation and client tool refresh.
-
-## Repository guide
-
-The Codex plugin and connector share one npm-workspace repository, with two distinct runtime owners.
-- Root (src/): MCP endpoint, OpenCode runtime, HostPlane, events, deployment.
-- packages/codex-plugin/: native OpenCode plugin, Codex ACP sessions and quota reader.
-- AGENTS.md: first-stop map for coding agents.
-- docs/architecture.md: package boundaries, test commands and coordinated deployment.
-
-From the root, use npm run check:all and npm run test:all; the production release must be separately prepared and activated. OpenCode global configuration changes are not automatic.
-Supported releases require the complete plugin workspace. Configure native local
-loading with the immutable release's `packages/codex-plugin/src` directory;
-package-root directory loading is not supported. See [release lifecycle](docs/release-cutover.md)
-for coordinated acceptance, rollback, and standalone-checkout retirement.
-
-## HostPlane
-
-| Tool | Native surface |
-| --- | --- |
-| `host.list`, `host.read`, `host.find`, `host.vcs`, `host.vcsStatus`, `host.vcsBranch`, `host.vcsDiff`, `host.commands`, `host.terminalScreen`, `host.terminalSnapshot` | One purpose-specific native host read each |
-| `host.write` | Native bounded UTF-8/base64 file write, explicit overwrite/fingerprint, persisted readback |
-| `host.worktreeList`, `host.worktreeCreate`, `host.worktreeRemove`, `host.worktreeRefresh` | One purpose-specific native project worktree operation each |
-| `command.startShell`, `command.startPty`, `command.startPersistentPty` | Start one native command kind |
-| `command.read` | Read-only shell/ordinary PTY replay; native handle + canonical cwd/location + saved cursor |
-| `command.observePersistentPty` | Persistent replay with native observer exit cleanup; can remove the exited handle |
-| `command.remove`, `command.resize`, `command.input`, `command.interrupt`, `command.ctrlD` | One purpose-specific native command control each |
-
-Each operation supplies an absolute `cwd`; responses return the native canonical
-`location` and `cwd` where applicable. Save `kind`, `id`, canonical location,
-and cursor together. Shell commands are strings interpreted by OpenCode's
-selected native shell. PTY commands are executables with separate `args`.
-Persistent PTY admission additionally requires a native `sessionId` whose
-canonical location matches `cwd`. No command environment/configuration or
-connect ticket is exported. Inventory uses explicit safe fields and excludes
-auth, environment, provider request objects, config, and raw plugin/MCP errors.
-Operator-chosen file contents and command output still require secret hygiene.
-
-Host and command operations are distinct purpose-specific tools; no generic
-operation-selector executor or compatibility alias is exposed. For example,
-`host.list` accepts `{"cwd":"/workspace"}` and `host.read` accepts
-`{"cwd":"/workspace","path":"README.md","limit":2000}`. Replace
-`/workspace` with the authorized absolute directory. `command.startShell` starts
-a shell process. Unknown fields remain rejected.
-
-`find` is native filename search, bounded to 50 hits; `possiblyTruncated` is
-conservative because the API has no continuation. For content search, use a
-native shell command such as `rg --line-number --glob '*.ts' 'pattern' src`.
-For patching, use native shell `git apply --check` followed by `git apply` with
-a deliberately quoted patch/heredoc. Inspect conflicts and reread VCS state.
-These run through the same command lifecycle; there is no second search/patch
-engine or duplicate exec tool. Exact-version public APIs provide no live LSP,
-symbol lookup, or formatter surface; the connector does not invent one.
-
-Files are read with native `file.read`; file/list paths are checked against the
-canonical location, including resolved symlinks. Reads page **bytes** and require
-the previous fingerprint on continuation. UTF-8 pages return text; invalid or
-split multibyte pages return base64 with encoding metadata, preserving bytes.
-Directory/status/diff inventories page at most 50 entries and 96 KB serialized
-entry data. Their fingerprints reject changed content between pages. `vcsBranch`
-lists native branch names with an optional native `search` filter; connector
-pages are fingerprinted like other inventories. VCS diff
-inventory omits patches; select `file` to page its full patch with
-`textOffset`/`textFingerprint` in UTF-16 code units. Native APIs materialize whole
-files/lists/diffs before this bounded projection; this is a transport bound,
-not a native ranged-read or memory-bound promise.
-
-`host.write` requires `encoding`, `data`, and explicit `overwrite`.
-New files require `overwrite: false` without a fingerprint; existing files require
-`overwrite: true` plus `expectedFingerprint` from a native read. Payloads cap at
-64 KiB decoded bytes (90,000 encoded characters), preserve UTF-8/BOM/Unicode,
-and require canonical base64 when selected. Parent directories must already
-exist. Canonical containment includes leaf and parent symlinks, including new
-files; escaping or dangling symlinks fail. Native persisted byte readback supplies
-size/fingerprint, not duplicate file contents. Fingerprint preflight is **not
-atomic CAS**: concurrent file creation, editing or symlink replacement between
-validation and native write is not excluded. Do not automatically retry uncertain
-writes. Patching remains native shell `git apply`, not a connector patch engine.
-
-Worktree operations discover `projectId` from canonical `cwd`; an optional supplied
-ID must match. List is fingerprint-paged. Create requires an explicit absolute
-canonical destination with an existing parent, and forwards optional native
-branch/name from the selected location. Remove requires an inventoried directory
-owned by that project, rejects its canonical root, and requires explicit `force`.
-Create/remove/refresh read back native inventory. The combined lifecycle tool is
-conservatively annotated destructive/non-idempotent, including list. Native
-failures remain failures; safe error types are retained without raw native bodies.
-
-Images are optional `read` results with `image: true`, limited to **1 MiB** and
-signature-checked PNG, JPEG, GIF, or WebP. MCP returns one image block plus
-metadata, without duplicate base64 in text or structured data. SVG/HTML and
-oversized images fail. Object results return only MCP `structuredContent` with
-`content: []`; image reads instead carry one image block. All 12 tools publish
-explicit output schemas. Connector errors return structured `error` (and admission
-`recovery` where applicable) with `isError: true`; their existing envelopes are
-included in each advertised output schema. SDK input errors retain SDK formatting;
-strict union errors omit arbitrary unknown field names rather than echoing them.
-The serialized `{ structuredContent }` projection has a repository-policy
-**256 KiB** ceiling, independent of the **1 MiB decoded image** allowance.
-Oversized JSON results fail explicitly; narrow the page or detail. OpenAI's
-256 KiB requirement applies to complete outbound **event request bodies**, not
-tool images or this repository's JSON projection policy.
-
-## Command retention and cursor contracts
-
-| Kind | Cursor unit | Native retention/expiry |
+| Intent | Starting point | Evidence to retain |
 | --- | --- | --- |
-| `shell` | bytes | In-memory location registry, max 25 exited jobs; file-backed output does not make handles restart durable |
-| `pty` | JavaScript UTF-16 code units | 2 Mi code units of running replay, max 25 exited metadata entries; attaching after exit is unavailable |
-| `persistentPty` | bytes | Experimental native session-bound daemon, head/tail and replay-loss metadata; an attached observer seeing exit triggers native removal |
+| Find and read project content | `host.list`, `host.find`, `host.read` | Canonical `cwd`, file path, fingerprint and returned `nextCall` |
+| Search contents or run a check | `command.startShell`, then `command.read` | `kind`, native handle `id`, canonical `cwd`, cursor, exit/drain evidence |
+| Delegate fresh work | `opencode.create` with `cwd` and `task` | `runtime`, `sessionId`, OpenCode user `messageId` |
+| Continue or fork known work | `opencode.continue`; `opencode.fork` for OpenCode | Existing session identity and returned admission identity |
+| Follow or recover a worker | `opencode.wait`, `opencode.inspectActivity`, `opencode.inspectResult` | Exact prompt identity, outcome evidence and returned continuations |
+| Learn native capabilities | `opencode.skills`, `opencode.skill`, current model/agent/runtime catalogs | Canonical IDs in the task's native location |
+| Read Codex quota | `codex.quota {}` | Native quota windows and reset timestamps |
+| Operate a browser | `browser.tabs`, exact `browser.attach`, `browser.snapshot` | Target, lease, current element references and application postconditions |
 
-Shell `list` contains running commands only. Save exited IDs yourself; there is
-no recovery-by-output-file or connector registry. Removal terminates and forgets
-a command. Location eviction, runtime restart, native eviction, removal, or
-daemon loss can invalidate handles; missing handles fail visibly. The connector
-makes no restart-durability promise for these native commands.
+Public tools are purpose-specific. They do not accept internal `type`, `action`
+or command-start `kind` selectors. `command.read` still needs the saved `kind`
+(`shell` or `pty`); `command.observePersistentPty` takes `cwd` and `id` without it.
+Follow returned `nextCall` objects exactly instead of reconstructing cursors.
 
-Shell `drained` is true only when a native terminal state (`exited`, `timeout`,
-`killed`) was read **before** output and the returned `cursor >= size`. A running
-shell at the output tail is not drained. Native shell output independently
-UTF-8-decodes byte slices; splitting a multibyte character can produce replacement
-characters. Responses declare `encoding: nativeUtf8` and that limitation. The
-connector preserves native cursor/size behavior and does not reconstruct bytes.
-
-PTY reads use bounded temporary native sockets. `replay` preserves requested,
-available, and end offsets plus loss/truncation metadata. `replayComplete` means
-the native replay marker arrived; clipped output may still need another page.
-Persistent byte pages use UTF-8 or lossless base64 on split/invalid bytes. Ordinary
-PTY pages avoid new surrogate splits, but native replay chunks/offsets can already
-split Unicode; the connector cannot repair native loss. Ordinary exited metadata
-returns `replayAvailable: false`, `drained: false`. If final PTY metadata readback
-fails after replay capture, output/cursor/replay metadata survive. Responses set
-`metadataVerified: false`, include a safe `metadataReadError` and
-`lastConfirmedInfo` from before replay, and never claim drained. A native
-`PtyNotFoundError` confirms `handleAvailable: false`; other readback failures leave
-availability unknown (`null`). Socket detach does not confirm terminal state.
-Persistent observer exit cleanup makes `command.observePersistentPty` destructive
-and non-idempotent. `command.read` accepts only shells and ordinary PTYs and is
-read-only. No retained-exit promise is made for persistent observation.
-
-`host.terminalScreen` uses native session terminal `read` with bounded
-`lines` (1–1,000); `terminalSnapshot` selects a canonical persistent PTY `id`.
-Both validate the owning session against `cwd`, return rendered text with native
-screen cursor/size, and use fingerprinted text pages. Snapshots exclude the native
-binary checkpoint. These are **rendered screen views**, not raw byte replay:
-screen text offsets cannot be used as command replay cursors, and neither view
-proves command success or output drain.
-
-Socket detach is not process exit. Input returns `inputSent` and
-`acknowledged: false`: native PTY input has **no durable acknowledgement**. A
-bounded 250 ms send window helps transport delivery but proves no execution.
-Never retry uncertain input automatically. Persistent input requires native
-controller role; `takeover: true` explicitly requests ownership when needed.
-`ctrlD` sends a terminal character, not pipe EOF. Shells support removal only;
-use PTY input/interrupt/resize for interactive work. Read limits default to 12,000
-and cap at 65,536 bytes/code units; live read waits cap at 2 s, attachment/replay
-at 5 s. Shell timeout defaults to 120 s and caps at 24 hours.
-
-## WorkerPlane
-
-`status.readiness`, `status.recovery`, `opencode.create`, `opencode.continue`,
-`opencode.fork`, `opencode.wait`, `opencode.inspectActivity`, `opencode.inspectResult`, individually
-named `opencode.*` query tools, and individually named `opencode.*` session action
-tools retain OpenCode's native worker identities. Actions include `opencode.steer`,
-`opencode.updateInbox`, `opencode.respondPermission`, `opencode.switchModel`, and
-`opencode.delete`; each action tool has its own selector-free input schema.
-Set `runtime: "codex"` to operate native Codex sessions through the same tools.
-Codex has its own session IDs and a narrower capability contract, described below.
-Events wake bounded waits; persisted session/message state remains authoritative.
-Stale/unrelated terminal hints cannot force completion; timeout reconciles canonical
-state even when the terminal event was missed. SDK request cancellation or HTTP
-disconnect releases the wait's native read/event observer without interrupting
-the retained worker; use `opencode.interrupt` to stop native execution.
-
-For a quick availability check, use `status.readiness`; use `status.recovery` for
-active/recent worker inventory and result evidence. These have separate inputs;
-readiness performs no worker inventory reads.
-It returns connector version/build identity and OpenCode readiness without reading
-worker/session history or Codex RPC. Component summaries cover events and the local
-browser supervisor; they do not probe Chrome, validate a lease, or verify the Codex
-plugin or quota. An unavailable OpenCode returns `ready: false` with connector
-identity and a sanitized issue. `status.recovery` accepts an optional runtime to
-select that worker inventory and preserves existing result evidence.
-Use `browser.status` for browser endpoint and attachment diagnosis. See the
-[operator acceptance matrix](docs/operator-acceptance.md) for measurement and
-the remaining ChatGPT workflow checks.
-
-The pinned official MCP SDK per-request HTTP entry serves only `2026-07-28`
-using `server/discover`, per-request `_meta`, and matching standard
-`MCP-Protocol-Version`, `Mcp-Method`, and method-specific `Mcp-Name` headers.
-Client capabilities are required; client identity follows the SDK's current
-[protocol contract](https://modelcontextprotocol.io/specification/2026-07-28/basic/lifecycle).
-The HTTP entry caps complete request bodies at **4 MiB**, including metadata,
-at both the Express parser and Fetch handler. This accommodates multi-step
-Unicode browser input and full permission/attachment sets. SDK tool validation
-allows at most **4,096 object keys and array elements** across one argument tree,
-independently of byte size; oversized input fails before tool execution.
-Parser failures return sanitized JSON errors without body or stack diagnostics.
-Input/output discovery uses JSON Schema 2020-12. Strict discriminated
-unions own validation and publish model-visible properties plus variant restrictions.
-Discovery also includes concise server instructions for shared selector, command
-lifecycle and recovery rules. See the dated [ChatGPT MCP review](docs/chatgpt-mcp-review.md)
-for official OpenAI references, source checks and outstanding client acceptance.
-The SDK owns version/metadata/header validation and wire errors. Legacy requests
-and initialization are rejected with supported-version diagnostics; session
-GET/DELETE return 405 and no MCP session is allocated. The SDK acknowledges
-legacy notifications (including `notifications/initialized`) with empty 202,
-without creating a server/exchange or accessing native state.
-SDK Express localhost Host/Origin validation protects loopback; shared ingress
-owns public OAuth, request-rate ceilings, and public exposure. When Events is
-enabled, discovery additionally requires ingress authorization before SDK wire
-validation, so unauthenticated discovery returns 401 first.
-Connector-defined Events authorization and subscription-capacity failures use
-application error codes `1001` and `1002`, outside the JSON-RPC reserved range.
-Callback verification retains OpenAI Events' prescribed `-32015` code. See the
-[current MCP error-allocation policy](https://modelcontextprotocol.io/specification/2026-07-28/basic/index#error-codes).
-Event methods and their capability are registered as the OpenAI MCP Events
-extension. For continuation, explicitly create
-an event-triggered Scheduled task using the connected plugin's event, exact worker
-IDs as filters, and saved canonical-result/follow-up instructions. That task causes
-ChatGPT to call `events/subscribe` and supply callback credentials. Confirm task
-creation, callback verification and persisted activation before relying on it.
-Installing/connecting the plugin or ending a response does not create this task.
-Ordinary timed tasks, condition polling and Codex automations do not establish an
-MCP event trigger. Verify task-creation support in the current surface before
-starting gated acceptance work. Native terminal reconciliation follows exact result-selection
-continuations across bounded passes, retaining the native fingerprint and resetting
-stale scans rather than interpreting partial results.
-
-Authenticated MCP Events exposes one event, `opencode.session.terminal`, with
-required exact `sessionId` and initiating user `messageId` filters. It is
-delivered only after OpenCode's persisted session/message state confirms that
-prompt is terminal; callbacks are hints to inspect the exact prompt, not result
-claims. `events/subscribe` verifies an HTTPS callback with a signed challenge;
-deliveries use Standard Webhooks HMAC-SHA256 and a bounded eight-attempt retry
-schedule. One delivery tick serves several due subscriptions in stable admission
-order up to an explicit per-tick bound; it never drains the queue, and
-per-delivery backoff, authorization, and storage semantics are unchanged.
-Reconciliation and delivery failures record sanitized `reconciliationFailed` and
-`deliveryFailed` lifecycle evidence without callback URLs, secrets, or raw
-error bodies. Subscriptions and pending deliveries persist under
-`$XDG_STATE_HOME/opencode-connect/events/`; omitted `ttlMs` expires after one
-hour, finite TTL is clamped to one minute–24 hours, and `null` does not expire.
-Use authenticated refresh (`events/subscribe` again) or exact
-`events/unsubscribe` to manage a subscription. On restart subscriptions resume
-only after current ingress grant validation. The private
-`/_host-ingress/events/authorize/opencode-connect` contract authenticates the
-forwarded `x-host-ingress-auth-context` and later checks the stored opaque grant
-context; callback credentials and grant contexts are stored only in the private
-state file. Events do not replay missed history; consumers should deduplicate by
-stable `eventId` and reconcile with `opencode.inspectResult`.
-
-Event lifecycle diagnostics are available in the authenticated `status.recovery`
-tool's `events` field and at local `GET /observe` under `events`; shared ingress
-exposes only `/mcp`, not this observation endpoint. Diagnostics include sanitized
-subscription IDs, exact session/message IDs, expiration/verification-cache times,
-delivery IDs/state/attempts, aggregate state counts and `storageFailed`.
-Subscription summaries are bounded to the latest 32 stored entries and 24 KiB;
-`subscriptionsTruncated` reports omissions. The latest 128 lifecycle records are
-also capped at 24 KiB; process counters retain totals across truncated records.
-Both counters and recent records reset on restart. Persisted state remains
-separate from this process trace.
-
-Lifecycle stages cover subscription receipt/acceptance/rejection, callback verification
-(start/success/cache/failure), persisted activation, cancellation/expiry/revocation,
-authorization pause/resume, subscriptions recovery, queueing, delivery
-attempts/outcomes, delivery failure, callback acknowledgement, storage failure,
-and reconciliation failure.
-Every record is emitted as sanitized `mcp_events` structured service-log data.
-Callback URLs, signing secrets, challenge bodies, grant contexts and raw error
-bodies are excluded. `callbackAcknowledged` means HTTP receipt; it does not prove
-ChatGPT ran the follow-up or displayed a reply. `events/subscribe` receipt is recorded
-at the HTTP entry before SDK wire validation; discovery authorization rejections,
-`events/list`/`events/unsubscribe` handling,
-and unparsable-transport failures record no lifecycle entry.
-Ingress rejections before forwarding require evidence at that owning boundary.
-
-PlatformPlane guidance decides whether the current ChatGPT surface actually
-supports post-turn continuation. Runtime-specific OpenCode Events mechanics live
-in the native global `opencode-connect` skill and its Events reference, discovered
-through OpenCode at runtime rather than mirrored into this repository. After event
-changes, rescan the connector and confirm the event appears alongside tools.
-Request native ChatGPT monitoring with exact session/message IDs and verify
-callback success plus persisted activation before ending a response or releasing
-a gated test worker. A native wait, backend restart or webhook `2xx` is not
-post-turn chat acceptance. See the
-[official MCP Events contract](https://developers.openai.com/plugins/build/mcp-events).
-
-Semantic activity and recent-message summaries use 512 UTF-16-unit text previews
-so long Unicode history stays bounded in recovery or action-required responses.
-`query messages` pages likewise return 512-unit previews with canonical message
-IDs, explicit truncation/paging metadata, at most 10 tool summaries per assistant
-entry (`toolCount`/`toolsTruncated` mark the remainder; recover the rest through
-`query tools`), and a lossless read-only `nextCall` per entry. Preview
-continuations page the remainder at the full on-demand width; an explicit
-`type: message` `textLimit` is preserved instead. Recover complete text through
-`query message`, which defaults to full text on demand. Compaction entries carry
-128-unit summary/recent previews with sizes plus fingerprinted `summaryNextCall`/
-`recentNextCall` (or `type: message` `field: summary|recent`) for exact recovery.
-Bounded native content keeps default and max pages inside the 256 KiB envelope;
-unbounded native fields can still exceed it, in which case the result fails
-explicitly and the caller narrows the page. Native opaque cursors and order are
-preserved; rows are never skipped and cursors never invented to fit a byte cap.
-
-Scalar `agent` is the executing session selection; omission on fresh work lets
-OpenCode choose its configured default. `agents[]` is structured prompt context
-and does not admit delegated child execution. Native agent APIs are list/get only; the connector
-does not create, update or delete agent definitions. Catalog mode/model/rules are
-native facts, not a connector permission mode.
-
-Fresh starts require `cwd`; model and agent are optional. Omitted selections are
-left out of native `session.create` so OpenCode chooses its configured defaults.
-Resume and fork inherit cwd/model/variant/agent without requiring callers to replay
-them. An explicit model or agent must match persisted native selection before any
-mutation. Agent IDs are canonical IDs, not display names. Responses read native
-selection after prompt admission and report nullable model/agent only when native
-state remains unset.
-For active work use `steer`; for idle continuation use `start` with `sessionId`.
-Fresh starts accept a native `variant` with an explicit model, included in native
-creation. Resume/fork inherit canonical variant and reject any variant override;
-responses include the post-admission native `modelVariant`.
-
-Start/steer and native session commands accept structured native `files`, `agents`
-and `skills`. Files use SDK input `{ uri, name?, description?, mention? }`, not
-the persisted attachment shape. Inline files use canonical base64 data URIs,
-bounded to 64 KiB decoded; URI credentials are rejected. Agents use canonical
-`name` IDs; skills use canonical `id` (native catalogs validate both). Mentions
-are exact `{ start, end, text }` UTF-16 prompt ranges. Each kind caps at 20,
-text at 64 KiB and serialized attachments at 128 KiB. File contents/URIs and
-operator-chosen prompts are not confidentiality boundaries. Native prompt/session
-endpoints validate agent and skill identities. User prompts retain
-their canonical user message identity, not a synthetic admission identity.
-
-Purpose-specific query tools include `opencode.models`, `opencode.agents`,
-`opencode.agent`, `opencode.skills`, `opencode.skill`, `opencode.providers`,
-`opencode.usage`, `opencode.sessions`, `opencode.session`, `opencode.messages`,
-`opencode.message`, `opencode.sessionDiff`, `opencode.inbox`, `opencode.tools`,
-`opencode.tool`, `opencode.permissions`, `opencode.savedApprovals`, and
-`opencode.runtime`, plus the separate `codex.quota` read. There is no batch query executor.
-Each query output has one fixed-identity result entry; errors in that entry also
-set the MCP tool error flag. Catalog/inventory pages use
-`offset`, `limit`, `fingerprint`; native session/message pages use opaque
-native cursors instead. Agent details include description, system,
-steps, paged permissions, mode, hidden status and model, excluding `request`.
-Session inventories explicitly identify `runtime` on the page and each record.
-OpenCode `status` derives from native active state and execution outcome;
-`executionOutcome` preserves native `succeeded|failed|interrupted`, not assistant
-result success. Inventory `outcome` is `unknown`, with `outcomeBasis: "unavailable"`:
-no assistant-result evidence is read by listing. `createdAtMs`, `updatedAtMs`,
-`idleAtMs`, and `archivedAtMs` preserve native timestamps when available.
-Codex ACP listing is metadata-only: `status`/`executionOutcome` are `null`, outcome
-is unknown, and only its optional RFC3339 update time becomes `updatedAtMs`;
-other timestamps are `null` (unavailable, not proof of no archive).
-Codex retains native cursor/page size/ordering and accepts only `cwd` and `cursor`;
-`limit`, search and offset/fingerprint filters are rejected, never ignored.
-Titles are displayed, not classified. No archive action is implemented.
-Select `field: permissions` for independent rule pages. Full system/description recovery uses `type: agent`, `agentId`, selected `field` and
-text pagination. `type: message` likewise recovers full user/assistant text by
-canonical ID. `field: summary|recent` pages the exact native compaction summary
-or recent text of a canonical compaction message with fingerprinted continuation.
-Session `cost`/`tokens` are cumulative session totals (`usageBasis:
-"cumulativeSessionTotals"`); assistant and completed/failed compaction entries
-project their own request `requestTokens`/`requestCost` (`requestUsageBasis`
-names the native request, `"unavailable"` when absent). Current context-window
-occupancy is `unknown`: the pinned native surface exposes cumulative totals and
-per-request usage only, never a context-used percentage, so none is projected.
-Native session/message cursors are opaque; pass the returned cursor
-without `order` on continuation. Text pages use UTF-16 code units and require a
-fingerprint at nonzero offsets. Usage or complex unpaged state may hit the
-256 KiB ceiling; narrower queries must be used rather than silently truncating.
-The pinned client exposes `session.context` as a whole-session read and
-`session.log` as a stream (including follow mode), neither with a stable bounded
-projection; therefore no context/log query variants are exposed. Provider catalog
-`activation` is native configuration state, not authentication or connectivity.
-The pinned provider/model catalog provides no reliable sanitized auth/connection
-signal; catalog activation does not imply successful execution.
-
-### Agent catalog introspection
-
-`query agents` defaults to a compact **effective** native catalog, including
-built-ins and configured agents. Hidden internal agents are excluded unless
-`includeHidden: true`. The response returns the native resolved `location`,
-`hiddenCount`, page totals and fingerprint. Supply `cwd` to select the project;
-omission uses native location resolution. Model, agent and provider queries read
-their native endpoints directly and preserve native empty results.
-The pinned client
-does not expose agent provenance, so `provenanceAvailable: false` is explicit;
-the connector never guesses builtin/global/project origin from an ID.
+For a bounded file read, call `host.read`:
 
 ```json
-{"type":"agents","cwd":"/absolute/project","includeHidden":false}
+{"cwd":"/absolute/project","path":"README.md","limit":2000}
 ```
 
-Compact entries contain canonical ID/name, mode, hidden status, a 512-unit
-description preview and model. They omit system instructions, provider request
-objects and raw rule chains. `view: full` restores full projected entries;
-individual `query agent` fields retain paged instruction/raw rule recovery.
-The catalog is bounded to 50 entries per page (default 25). Invalid limits are
-schema errors with field/bounds; direct backend pagination names `limit` or
-`offset`. Missing individual agents return `errorCode: AGENT_NOT_FOUND` and the
-requested `agentId`, without leaking native error bodies.
-
-Raw ordered agent permissions remain available through `query agent field:
-permissions`; raw ordered session rules and pending requests remain available
-through `query permissions`. No connector-derived permission summary is exposed.
-
-Additional query details:
-
-- `skill` selects canonical `skillId` and pages full native content.
-- `sessionDiff` forwards native `from`/`to` message boundaries scoped to
-  `sessionId` and optional `context` (0–1,000). Inventory is fingerprint-paged;
-  selected `file` recovers independent patch text pages. It is not a host VCS diff.
-- `inbox` pages pending native identities/types/delivery with bounded previews;
-  selected `inboxId` pages text. Absence means absent from pending inbox, not
-  proof of delivery, cancellation or execution success.
-- `tools` pages an assistant message's independent tool inventory beyond summary
-  limits. `tool` selects exact `sessionId`/`messageId`/`toolId`, with explicit
-  `field: input|content|error`, native timing/status and `contentIndex` for outputs.
-  Text output and selected input use fingerprinted text pages. Structured input
-  omits credential/config/env/request/provider-state keys. Selected file outputs
-  expose bounded name/mime metadata only (`encoding: metadataOnly`,
-  `uriOmitted: true`); the connector never fetches a URI automatically and
-  returns no inline file bytes or reference text. Error detail preserves type/status but omits
-  native message bodies. Reasoning/provider state/request objects stay excluded.
-  Arbitrary tool text/input can still contain secrets; select
-  evidence deliberately. Existing message/tool summaries remain available.
-
-Result inspection scans up to **500 messages per call** via meaningful native
-pagination. It selects the latest assistant inside the requested user's prompt
-segment, stopping at the next user boundary; a latest user with no assistant has an
-unknown result and cannot inherit an earlier answer. It never falls back to another
-prompt when a target is missing. If incomplete, retain `selectionCursor`,
-`candidateAssistantMessageId`, and `selectionFingerprint` with the original
-`sessionId`/`messageId`. Continue until `selectionComplete`. Session changes
-between/during pages reject the scan and require restarting. Text pagination is
-separate from selection completeness; recover the selected `assistantMessageId`
-through `query message` to avoid rescanning long history. An active session does
-not advertise a final selection.
-
-`status` remains execution lifecycle (`inProgress`, `completed`, `failed`,
-`interrupted`, `idle`); `executionOutcome` preserves native session outcome.
-Derived `outcome` uses selected assistant evidence: `completed` requires a
-persisted completion time, `finish: stop` and no error; `failed` retains the
-selected error type/status or error finish; other selected finishes are
-`incomplete`. Active, unscanned, missing-assistant or unfinished selections are
-`unknown`. `outcomeBasis`/`outcomeEvidence` identify the exact assistant and
-finish; provider bodies remain omitted. Assistant completion does not verify the
-user objective or a host change: inspect the owning filesystem, VCS, process,
-tests or deployed service independently. Native idle/execution success is never
-substituted for assistant-result evidence.
-
-Native provider retry/backoff is observable through `retry` on status workers,
-semantic inspection and active wait responses, selected results (`result.retry`),
-and projected assistant messages. It contains the canonical `assistantMessageId`,
-native `attempt`, `nextAttemptAtMs`, and error type/status; error messages, bodies,
-headers and provider state are omitted. Retrying workers retain `inProgress` and
-an unknown final outcome. A scheduled time is native evidence, not a connector
-countdown or a guarantee of when the next request starts; passing that time alone
-does not clear retry state. Wait continues through backoff until native execution
-ends, input is required, or its bounded timeout expires. Step failures and retry
-events alone never authorize terminal notifications.
-
-Retry projections read canonical assistant message metadata, without caching
-event hints or interpreting private provider payloads. Current retry recovery
-reads at most 20 recent messages and
-stops at the newest assistant or user/idle boundary. `retry: null` means no retry
-was observed in that bounded view, not that the provider cannot retry. A failed
-extra status read preserves inventory and exposes sanitized `retryReadError`;
-exact inspection failures still error. Selected-result retry belongs to the
-requested prompt segment, which may differ from current session activity.
-
-The connector submits the canonical prompt once. OpenCode owns same-session
-provider retry decisions and delays, including immediate termination for hard
-provider failures. Retry observation never admits another prompt, changes its
-identity, or replays an uncertain admission; retain the returned recovery identity
-and reconcile canonical state.
-
-Status and untargeted terminal semantic recovery scan at most 500 messages per
-worker; active workers stay unknown without a result scan. Extra result reads
-that fail or race removal retain readiness/inventory and report unknown,
-unavailable evidence with a sanitized read error. Exact requested inspection
-failures still error. Selection and text fingerprints retain their independent
-contracts.
-
-Read-only continuations return `{ tool, arguments }`: result `nextCall` continues
-selection with original canonical IDs/cursor/candidate/fingerprint;
-`textNextCall` selects the exact assistant via `query message` after selection
-completes. Query and host pages return `nextCall` with their fingerprint or native
-cursor, including canonical location when available. If an untargeted bounded
-scan has no user identity yet, continuation reads native message pages to recover
-it rather than guessing a target. These are argument objects, not callbacks or
-automatic replay. Mutations and persistent observer command reads have no
-automatic continuation. `host.worktreeList` continuation is list-only despite the
-combined tool's conservative lifecycle annotations.
-
-`opencode.switchModel` and `opencode.switchAgent` delegate validation to their native
-session endpoints and return persisted session readback. These are separate, **non-atomic**
-operations; switching one must not be treated as switching both. `switchModel`
-accepts an optional native `variant`. Omitting model `variant` delegates
-resolution to OpenCode; read back its resolved `modelVariant`. `setPermissions` replaces ordered
-canonical rules and checks persisted readback. `synthetic` accepts text,
-description, native delivery (`steer`/`queue`), and optional resume, returning the
-real inbox identity; it is not a user prompt and is not passed to `wait` as one.
-
-Delete one exact native session with
-`opencode.delete { "runtime": "opencode"|"codex", "sessionId": "…" }`.
-**Breaking contract:** delete no longer defaults to OpenCode; explicit runtime is
-required by MCP validation and the facade. Codex inventory `updatedAt` is replaced
-by `updatedAtMs`; there are no compatibility aliases.
-OpenCode preflight refuses native active execution, pending permission requests,
-forms or inbox work, and fails closed when that state cannot be read. Codex refuses
-locally supervised execution/admission and pending approvals; ACP listing does
-not expose authoritative external execution state. These checks are not an atomic
-cross-client exclusion guarantee. Resolve/interrupt work explicitly and reconcile
-before deletion; inventory alone is not delete authorization.
-`deleted: true` requires OpenCode typed not-found readback or Codex absence from a
-complete bounded native catalog scan. Codex without native delete/list support
-refuses before mutation. Partial scans, remaining records or failed readback are
-not success. Never automatically retry uncertain deletion.
-`DELETE_NOT_FOUND` is a pre-mutation refusal only: OpenCode's typed
-`SessionNotFoundError` from `session.get`, or Codex's `unknown_session` after a
-complete bounded native catalog scan before submitting delete. A failed/partial
-scan is `DELETE_PREFLIGHT_FAILED`, not not-found. ACP delete-request failures,
-including not-found-like rejections after submission, remain uncertain; no
-transport failure is inferred to mean absence.
-Known application failures return MCP `isError` and safe `errorCode`, `reason`,
-`mutationMayHaveOccurred`: `DELETE_RUNTIME_REQUIRED`, `DELETE_NOT_FOUND`, `DELETE_SESSION_ACTIVE`,
-`DELETE_PENDING_APPROVAL`, `DELETE_PENDING_FORM`, `DELETE_PENDING_INBOX`,
-`DELETE_PREFLIGHT_FAILED`, `DELETE_UNSUPPORTED`, `DELETE_BUSY`, `DELETE_FAILED`,
-or `DELETE_UNVERIFIED`. Schema rejection occurs before application execution;
-platform/tool permission or transport rejection outside this service cannot be
-observed or diagnosed by the connector. Native error bodies are omitted.
-
-`cancelInbox`/`updateInbox` require a pending `inboxId` in the targeted session
-and reconcile native pending inventory after mutation. `removeSavedApproval`
-removes one project-scoped saved approval by exact `approvalId` resolved from
-the targeted session, failing when the ID is absent from that project and
-verifying absence after removal. Never automatically retry uncertain removal. If update races delivery,
-absence leaves `deliveryVerified: false` and `persisted: false`, not a fabricated
-delivery result. `compact` returns its native compaction `inboxId` with `status: "admitted"` and
-`completed: false`, plus `correlationSupported: true` and a bounded
-verifyNextCall reads the exact native compaction message using its admission
-ID. Native inbox IDs are SessionMessage IDs. Verify matching message ID, type and
-running/completed/failed status; missing messages and inbox absence prove neither
-success nor failure. The message includes its reason, model when available,
-summary/recent previews and per-request usage. Recover exact summary/recent
-fields through fingerprinted continuations; no timing heuristic or connector
-registry is needed.
-`command` and `invokeSkill` delegate identity validation to their native session
-endpoints. Both upstream operations return `void`, so the connector
-returns submission without inventing user `messageId`/inbox identity or completion.
-`revertStage`, `revertClear`, and `revertCommit` preserve OpenCode's staged revert
-boundary: stage selects a canonical message (and optional native files choice),
-clear discards staging, and commit applies the staged revert. Staging is not a
-one-shot undo; commit acts on native staged state.
-Native **session commands** differ from HostPlane shell/PTY commands. No universal
-raw RPC or credential/configuration action is exposed. Never automatically retry
-uncertain admission or mutation; reconcile native state first.
-
-### Codex sessions
-
-Use `opencode.create` with `runtime: "codex"`, `task`, and an existing absolute
-`cwd`. Admission returns the actual native Codex `sessionId` after session setup
-and native mode selection. Fresh sessions default to native `agent` mode.
-Optional `mode` selects `read-only`, `workspace-write`, `agent`, or
-`agent-full-access`. ACP prompt execution continues asynchronously;
-`messageId` is null because ACP does not return a canonical user prompt ID at
-admission. Retain the runtime and session ID together. Never retry uncertain
-admission automatically; a known session ID remains available for reconciliation.
-
-`opencode.inspectActivity`, `opencode.inspectResult`, and `opencode.wait` accept the same runtime and session ID.
-They observe the current session turn, not an exact historical prompt. Omit
-`messageId`; `capabilities.exactPromptWait` is false. Results retain the native
-assistant ID when available, bounded text pagination and explicit truncation.
-Wait is bounded to 40 seconds. A terminal result distinguishes native prompt
-completion from objective success. Pending native permissions wake wait with
-`actionRequired` and appear in `pendingActions`. After adapter restart or cache eviction,
-native conversation history is recoverable, but execution termination evidence
-is unavailable: outcome stays unknown and wait returns `executionUnavailable`.
-
-Continue an idle session with `opencode.continue runtime: "codex" sessionId task`.
-Continuation inherits cwd and the locally known mode. If selection was lost
-after cache eviction or restart, continuation requires an explicit `mode`;
-native history does not prove the previous selection. Interrupt with
-`opencode.interrupt`; this preserves the conversation. Execution
-capacity remains reserved until the ACP process is reaped. Delete an idle native
-session with `action: "delete"`. The plugin has two execution slots, one bounded
-metadata connection, and a 64-entry expiring supervision cache. Cache eviction
-never deletes native Codex sessions.
-
-`query sessions/session/messages/message`, `query runtime`, and
-`query permissions section: "pending"` accept `runtime: "codex"`. Native history
-replay supplies canonical user and assistant IDs. Message inventories page a
-bounded history snapshot with offsets and fingerprints; full text recovery uses
-native message IDs. `historyComplete: false` and `outputTruncated` disclose
-retention limits. Missing exact messages fail without selecting another result.
-Session inventories use the ACP native cursor. `status runtime: "codex"` reports
-locally supervised sessions; native inventories use `query sessions`.
-
-Codex inherits its own configured model and uses native sandbox and approval
-presets. Native `agent` grants workspace writes with automatic approval review;
-`workspace-write` routes escalation to the operator, `read-only` selects the
-native read-only sandbox, and `agent-full-access` explicitly disables sandbox
-and approval checks. Choose full access only for an authorized need.
-
-Answer pending permissions with `opencode.respondPermission`, `runtime: "codex"`,
-the owning `sessionId`, `requestId`, and exact offered
-`optionId`. Native options are not translated to OpenCode decisions. Inspect
-the bounded command or diff first; truncated requests cannot be approved.
-Stale, foreign, and duplicate replies fail. Handle requests within the task
-authority without repeatedly interrupting the user for routine implementation.
-
-Codex executes native tools; ACP filesystem and terminal client access remain
-disabled. Model and agent selection, fork, attachments, active steering, inbox,
-compaction and MCP Events are not exposed for Codex. Unsupported operations fail
-explicitly instead of reaching OpenCode or fabricating IDs. Ordinary native
-OpenCode operations retain their existing behavior.
-
-## Permissions and authority
-
-`start.permissions` is optional for fresh sessions only. Omission preserves the
-native default policy. There is no `permissionMode`, read-only alias, or blanket
-allow shortcut. Explicit canonical rules are `{ action, resource, effect }`,
-where effect is `allow`, `deny`, or `ask`. Session rules follow agent rules, so
-broad session allow can override agent restrictions. Explicit configured deny is
-checked before saved approvals. Query `permissions` with `section: rules` (default) or `section: pending`; each
-section has independent fingerprinted pagination. Project-scoped saved approvals
-have their own query.
-
-Agent names such as `plan` and `explore` are **not** evidence of a constrained
-reviewer; inspect the current native ordered rules. A session can use:
+For a verification command, call `command.startShell`, then read its returned handle:
 
 ```json
-[
-  {"action":"*","resource":"*","effect":"deny"},
-  {"action":"read","resource":"*","effect":"allow"},
-  {"action":"glob","resource":"*","effect":"allow"},
-  {"action":"grep","resource":"*","effect":"allow"},
-  {"action":"external_directory","resource":"*","effect":"deny"},
-  {"action":"read","resource":"*.env","effect":"deny"},
-  {"action":"read","resource":"*.env.*","effect":"deny"}
-]
+{"cwd":"/absolute/project","command":"npm run check"}
 ```
 
-The initial deny blocks edit, shell, Code Mode, subagents and unknown actions.
-This is permission-checked worker authority, **not an OS sandbox**. Grep/glob
-match queries/patterns, not confidentiality boundaries. Child agents have their
-own policy, so this reviewer must not launch them. Allowed tests execute
-repository code with host authority. Direct authenticated HostPlane calls do
-not inherit worker permissions. No global configuration changes are needed.
+For fresh OpenCode work, call `opencode.create`:
 
-The native model catalog alone owns current availability. The connector does not
-filter disabled models or derive a `free` eligibility judgment. Model entries
-retain native `enabled`, cost tiers, capability and compatibility metadata. Query
-the catalog in the selected native location.
+```json
+{"cwd":"/absolute/project","task":"Fix the reported defect, verify its observable behavior, and report the changed files and remaining risks."}
+```
 
-## Source, packaging and validation
+OpenCode selects its configured model and agent when omitted. For Codex, add
+`runtime: "codex"`; use the exposed native mode when needed. Retain the returned
+runtime and session together. OpenCode wait requires its canonical user
+`messageId`; Codex returns `messageId: null` and wait/inspection omit that field.
+Do not retry an uncertain admission. Use the retained IDs and `status.recovery`
+when recovery is necessary.
 
-This repository is the sole source owner for the OpenCode Connect backend and its
-native Codex plugin. PlatformPlane `$0xOperator` guidance is managed separately
-by ChatGPT and stays capability-agnostic. Runtime-specific operator knowledge is
-installed as native OpenCode global skills under `~/.config/opencode/skills/`
-and discovered through the live OpenCode skill catalog. Do not copy that skill
-library into this repository or maintain a second catalog here.
+Worker completion is result evidence. Verify the requested artifact or state at
+its owning source before reporting success. Resolve pending actions within the
+authorized scope. Delete accepted idle workers with `opencode.delete`, explicitly
+supplying `runtime` and `sessionId`, before retiring their working directory.
+
+For browser work, choose an exact discovered tab and observe before acting. Linux
+Chrome is the default. Windows requires an explicitly authorized `browser.connect`
+and Chrome's permission handshake before discovery and attachment. Bind changes
+to the intended object and verify both the changed value and material neighboring
+state. Release the lease with `browser.detach`; Chrome and its profile persist.
+
+PlatformPlane `$0xOperator` guidance is managed separately by ChatGPT. Native
+runtime knowledge is discovered with `opencode.skills` in the relevant `cwd`,
+then loaded with `opencode.skill` using its canonical ID. Resolve references from
+the returned skill path. Neither installed skill library is mirrored here.
+
+## Native invariants
+
+OpenCode owns its catalogs, defaults, permissions, sessions, messages, inbox,
+ordering and lifecycle. The connector preserves those facts and adds bounded
+projection, sanitized errors, exact identity recovery and mutation readback.
+Canonical native IDs and cursor units remain distinct; prompt attachments do
+not create subagents or select the executing agent.
+
+Codex owns execution, sandbox modes, history and native session IDs. The plugin
+owns ACP supervision; the connector calls its RPC. There is no intermediary
+OpenCode model turn or CLI turn. `codex.quota` is a read-only App Server snapshot;
+`opencode.usage` is OpenCode token activity. Neither is General Chat message quota.
+Recovered Codex turn outcomes require correlated native history; history alone
+does not establish the earlier mode or objective success.
+
+Mutations can be uncertain after timeout or connection loss. Reconcile persisted
+state before any retry. Cancellation of a read/wait releases observation without
+stopping a worker. Use the explicit interrupt operation when stopping execution
+is authorized. Direct HostPlane authority is separate from worker permissions.
+
+## Documentation
+
+| Document | Owns |
+| --- | --- |
+| [MCP contract](docs/mcp-contract.md) | OpenAI requirements, transport/auth boundary, focused tools, native projections, bounds, permissions and recovery |
+| [Architecture](docs/architecture.md) | Source ownership, dependencies, console, service lifetime and persistence |
+| [Browser capability](docs/browser-capability.md) | Setup, Linux/Windows consent, targets, workflows, input, verification and cleanup |
+| [Operator acceptance](docs/operator-acceptance.md) | General Chat prompt-selection cases, complete workflow evidence and reproducible local probes |
+| [Release lifecycle](docs/release-cutover.md) | Immutable builds, connector/plugin acceptance and coordinated rollback |
+| [Codex plugin](packages/codex-plugin/README.md) | Direct ACP sessions, modes, approvals, history and quota |
+| [Agent guide](AGENTS.md) | Repository engineering boundaries |
+
+## Development and release
+
+Node 24 or newer is required. From the repository root:
 
 ```bash
 npm ci --include=dev
-npm run test:all
 npm run check:all
-npm run verify:integration
-npm run verify:release
+npm run test:all
 npm run build
+npm run verify:integration
 git diff --check
 ```
 
-The canonical build cleans repository-owned `dist` before TypeScript compilation
-so deleted source artifacts cannot survive into deployment.
+`check:all` includes release identity and native-client checks. Integration checks
+the installed workspace, pinned OpenCode version, native loader and RPC method
+contract without contacting a live service. Build cleans generated `dist` first.
+Use an isolated source copy when a console depends on the checkout's toolchain.
 
-Tests exercise the pinned official client against deterministic native HTTP/wire
-fixtures, lifecycle/bounds, Unicode, permission forwarding/readback, sanitized
-queries, result recovery beyond 100/500 messages, mutation between pages, and
-MCP discovery/image/transport limits. Real HTTP calls exercise the core MCP surface and verify the exact 71-tool core catalog,
-output-schema validation, structured-only results, near-1-MiB PNG reads,
-legacy/malformed-wire rejection without native access, localhost Host/Origin
-protection, and cancellation without worker interruption. Published `tools/list` schemas expose root
-and nested query object properties/discriminator enums alongside strict variant
-constraints; JSON Schema validation tests verify unsupported combinations and
-bounds independently of the Zod parser. Published schemas also carry the
-`opencode.create`/`opencode.continue`/`opencode.fork` admission rules and the
-`opencode.inspectResult` selection-continuation dependencies that the backend already enforced at runtime,
-so those combinations are refused by the contract with the same reason and before
-any native access, instead of failing or being ignored after a round trip. Both
-layers stay in force: the backend guards remain authoritative for non-MCP callers,
-and a parity test asserts the two never drift. Native session outcomes and exact
-assistant error/finish evidence are tested separately, including partial recovery
-failures and latest prompts without an assistant. Retry fixtures verify native
-backoff, next-step clearing, immediate 403 and exhausted transient failures,
-terminal notification gating, sanitized metadata and single prompt admission
-across status/inspect/wait/result recovery. An isolated 2.0.22 service with a local
-mock provider also verified a 429 scheduled retry followed by success with one
-prompt admission, then immediate 403 termination on a second prompt in the same
-session. The service emitted `session.retry.scheduled` and exposed matching
-assistant metadata; no legacy `session.status` event was observed in that probe.
-Source-side disposable live checks used the
-existing exact-version runtime for shell decoding/drain and ordinary/persistent
-PTY replay/input/resize/expiry. Those checks do not replace operator-owned public
-MCP/OAuth acceptance or worker/deployment verification. Live ChatGPT event-triggered
-wake-up acceptance requires genuine task/callback credentials and remains a
-separate operator check; deterministic webhook receipt is not ChatGPT acceptance.
-
-Node 24+ is required. `npm run dev` starts the local source server; defaults are
-loopback `127.0.0.1:8788/mcp`. HOST/PORT come from the process environment;
-there is no user-global dotenv loader. Service authentication stays inside the
-official client/service API. Secrets remain outside the repository.
-
-Events retain their JSON state at
-`${XDG_STATE_HOME:-$HOME/.local/state}/opencode-connect/events/store.json`.
-A dedicated built-in SQLite connection holds an exclusive kernel-managed lock
-at sibling `store.lock.sqlite` for the store's entire lifetime. Ownership is
-released on close, process crash (including SIGKILL), or reboot; it does not
-rely on PID liveness or shutdown cleanup. Startup failures also release ownership.
-Keep this state on a local filesystem with working SQLite file locking, and
-**never delete or replace `store.lock.sqlite` while a connector is running**.
-A genuine second owner fails closed; storage/locking errors are not treated as
-stale locks. Connector processes must not share a store concurrently;
-deployment activation stops/restarts the managed service.
-
-Native service lifecycle admission occurs only at connector startup. Ordinary calls use native discovery and fail explicitly when unavailable; they never start, replace or recover the service. Health and MCP errors omit raw upstream bodies. Failed starts preserve a known sessionId and admission stage; promptSubmitted null means delivery is uncertain and requires reconciliation.
-
-Native worktree branch is an existing Git reference, not a new branch name. Omit branch and supply name to use native worktree branch creation; errors retain the canonical SDK error type without raw command/provider output.
-
-## Live console
-
-The read-only terminal console shows both OpenCode and Codex native inventories,
-with runtime-labeled rows and runtime-specific detail routing. Codex combines one
-native history page with supervised workers, including workers absent from that
-page. Native ACP history alone has no turn outcome; the bounded, read-only Codex
-App Server lookup correlates `thread/read` metadata with the newest native turn.
-Historical `completed`, `failed`, and `interrupted` states appear only when
-verified by native turn history. Correlated `thread/read` may also provide the
-persisted thread model, provider, and reasoning effort even when no terminal turn
-is available; those settings do not make execution known. Missing metadata stays
-unavailable. Session mode is shown only when this adapter locally supervised and
-applied it; recovered historical modes are never inferred. Unavailable,
-in-progress, or mismatched execution history remains `unverified`. ACP still
-owns execution, and no history read starts or resumes a turn.
-Unsupported or
-disconnected Codex RPC leaves OpenCode visible and marks partial visibility;
-history and supervised-status failures are independent. Codex supervised status uses the five-second fallback cadence, while
-expensive native Codex history discovery is cached for five minutes (including
-failed reads). Dashboard `r` explicitly refreshes history and quota. Native Codex history reads have a twelve-second deadline to accommodate
-ACP startup, while supervised status keeps a three-second deadline. The plugin
-releases metadata-read ownership on cancellation. Codex detail shows the latest 25 bounded native
-message previews (up to 512 characters each, with truncation markers), replaces
-each history snapshot, and never advertises live deltas. No quota reads or
-session mutations are performed by this inventory view.
-
-The console also resolves active OpenCode sessions missing from the bounded
-recent page. Pending permissions show only a generic request label; native
-resource strings and tool-call titles are not displayed.
-
-For OpenCode, the console streams assistant text while a selected session is
-followed. Tool-only steps show tool names and status, excluding their inputs,
-outputs. Reasoning parts show a dim **activity-only** marker: `active` from native
-start/delta events or an incomplete part's timing, `ended` from native end events
-or completed part timing, and `observed` when persisted parts lack active/end
-evidence. These markers are not reasoning summaries or worker-completion claims.
-All reasoning text (live and persisted), provider state and request objects stay
-excluded; 2.0.22's [native part schema](https://github.com/anomalyco/opencode/blob/v2.0.22/packages/schema/src/session-message.ts)
-and [provider round-trip tests](https://github.com/anomalyco/opencode/blob/v2.0.22/packages/core/test/session-runner.test.ts)
-expose no separate guaranteed-safe reasoning summary field.
-Native page order is authoritative for identities read together, correcting even
-previously retained provisional order. Text and reasoning overlays share
-first-activity anchors only for missing/in-flight identities and a cache of at
-most 128 assistant IDs, with at most 64 reasoning identities per assistant;
-persisted activity retains the first 64 reasoning parts per message so appending
-parts cannot displace earlier end evidence. Persisted end timing wins
-over in-flight deltas. Unflushed messages and ended reasoning identities are never
-evicted to admit new overlays. Completed readback frees payload overlays, but
-payload-free ordering anchors remain while earlier identities are missing.
-Anchors are bounded to 128 IDs and released only when earlier identities have
-native readback. At capacity, new identities are skipped until slots can safely
-be released or the view is reopened; persisted reads remain available.
-Opening an OpenCode view reads back to its latest operator
-prompt within 500 native messages; subsequent refreshes read one recent page and
-update loaded history by canonical message ID. Refreshes do not discard earlier
-loaded operator messages or unflushed streamed text. Home/PgUp scroll back;
-End/G resumes following. Reopen an existing console process after source updates
-to load the new observer.
-
-## Deployment (operator)
-
-States stay distinct: **source** (Git checkout) is never executed live;
-**build** is the content-hashed release under
-`~/.local/lib/opencode-connect/builds/<buildId>/`; **deployed** is the
-`current` symlink target; **live** is what `/health` reports.
-
-Build identity is the 16-hex SHA-256 over `package.json`,
-`package-lock.json`, `tsconfig.json`, all regular files under `src/` and
-`scripts/`, and the Codex workspace manifest, directory entry and `src/`.
-Hashing and staging use the same inventory. A dirty tree is
-allowed; commit/branch/dirty metadata is observability-only in `build.json`.
-Identical content reuses an existing build only after full integrity and installed
-contract verification; corrupt candidates are never implicitly deleted or repaired.
-
-```bash
-npm run build
-npm run deploy -- prepare                 # isolated build, then production-only runtime deps
-npm run deploy -- status                  # current/previous, service, live health, source
-npm run deploy -- activate <buildId>      # switch current, restart only opencode-connect.service, verify /health
-npm run deploy -- rollback                 # switch to previous, restart, verify; reversible via second rollback
-```
-
-`prepare` copies runtime sources into a staging directory, installs the full
-locked toolchain, compiles there, prunes development-only dependencies, writes
-`build.json`, verifies the pruned integration contract and compiled runtime identity,
-and renames into place. It never uses the checkout `node_modules`/`dist`.
-The strict record seals the full source hash plus `dist` and the pruned
-`node_modules` tree (including executable bits and internal link targets).
-Reuse, activation, rollback and runnable-status checks rehash these inventories and
-rerun installed integration/identity checks before accepting a build. External
-runtime links and symlinked source inputs are rejected. These checks detect
-corruption; they are not a signature or protection from a storage owner rewriting
-both artifacts and their checksums. Releases must remain immutable after validation.
-`activate` preserves the old `current` target in `previous`, restarts only
-`opencode-connect.service` (`systemctl --user`), and polls `/health` until the
-exact `buildId` matches. On verification failure it restores the old target
-and unit state when possible and reports rollback failure separately.
-`rollback` swaps `current`/`previous` so a second rollback restores.
-These operations manage the connector only. They do not migrate global OpenCode
-plugin configuration or verify/reload the loaded Codex plugin. Record and restore
-the matching plugin configuration separately. Unsealed historical records and
-connector-only builds are not supported rollback candidates; independently prepare
-and accept a complete rollback pair before cutover. There is no old-record reader
-or automatic conversion. See [architecture](docs/architecture.md) for coordinated
-acceptance and immutable plugin-path guidance. A matching `/health` build ID is
-not proof of Codex RPC/quota readiness.
-
-`/health` reports `{ version, buildId, build }` alongside `upstream`.
-Deployed releases report their content hash; source runs (`npm run dev`,
-checkout `dist`) report the explicit non-release identity `buildId: "source"`.
-Identity is resolved from the loaded package, never from process cwd. Invalid
-release metadata, a missing record in a build-ID directory, or compiled version
-drift fails closed instead of silently reporting source mode.
-
-The unit template at `deploy/systemd/opencode-connect.service` points at
-`~/.local/lib/opencode-connect/current` for both working directory and
-`ExecStart`. It expects a stable Node executable at `~/.local/bin/node`, so a
-version manager can be upgraded without baking a user name or version-specific
-NVM path into the unit. It does not touch ingress, OAuth, ngrok, or other services.
-The operator owns unit installation, activation and runtime verification.
+Source validation, Git publication, immutable release preparation, connector
+activation, native plugin loading and live ChatGPT acceptance are distinct gates.
+Follow the [release runbook](docs/release-cutover.md); preserve installed configuration
+and the matching connector/plugin rollback pair. `/health` proves connector
+identity and native connectivity, not loaded Codex plugin identity or quota.

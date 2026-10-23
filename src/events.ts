@@ -12,10 +12,9 @@ import * as z from "zod/v4";
 
 export const EVENT_NAME = "opencode.session.terminal";
 const MAX_ATTEMPTS = 8;
-// One delivery tick serves several due subscriptions in stable admission order
-// so a single slow callback cannot starve later ones. The bound is explicit:
-// a tick never drains the queue, and per-delivery backoff, authorization and
-// storage semantics are unchanged.
+// Each delivery tick validates at most this many due subscriptions. A rotating
+// cursor prevents repeatedly unavailable grants from starving later callbacks.
+// A tick never drains the queue; retry, authorization and storage rules remain.
 export const MAX_DELIVERIES_PER_TICK = 8;
 const MAX_SUBSCRIPTIONS = 128;
 const MIN_TTL = 60_000;
@@ -110,8 +109,11 @@ export class Events {
   private timer?: NodeJS.Timeout;
   private busy = false;
   private deliveryScheduled = false;
+  private deliveryCursor = 0;
+  private closing?: Promise<void>;
   private stateQueue: Promise<unknown> = Promise.resolve();
   private serialize<T>(run: () => Promise<T>): Promise<T> {
+    if (this.closing) return Promise.reject(fail("Events store is closed"));
     const result = this.stateQueue.then(run);
     this.stateQueue = result.catch(() => {});
     return result;
@@ -145,7 +147,17 @@ export class Events {
       throw error;
     }
   }
-  async close() { clearInterval(this.timer); await this.stateQueue; this.releaseLock?.(); }
+  close(): Promise<void> {
+    if (!this.closing) {
+      clearInterval(this.timer);
+      // No further admission may extend stateQueue after we capture it.
+      this.closing = this.stateQueue.then(() => {
+        this.releaseLock?.();
+        this.releaseLock = undefined;
+      });
+    }
+    return this.closing;
+  }
   private async persist() {
     try {
       const bytes = JSON.stringify(this.store);
@@ -175,7 +187,14 @@ export class Events {
       Object.keys(auth).every((key) => data.authorization?.[key as keyof Authorization] === auth[key as keyof Authorization]);
   }
   catalog() { return { events: [{ name: EVENT_NAME, description: "A canonical OpenCode user prompt reached a terminal lifecycle state; inspect that exact prompt for its result.", delivery: ["webhook"], inputSchema: z.toJSONSchema(eventArgumentsSchema, { target: "draft-2020-12" }), payloadSchema: z.toJSONSchema(eventArgumentsSchema.extend({ status: z.enum(["completed", "failed", "interrupted", "incomplete"]) }), { target: "draft-2020-12" }) }] }; }
-  targets() { return Object.values(this.store.subscriptions).filter(live).map(({ sessionId, messageId }) => ({ sessionId, messageId })); }
+  targets() {
+    const unique = new Map<string, { sessionId: string; messageId: string }>();
+    for (const sub of Object.values(this.store.subscriptions)) {
+      if (!live(sub) || sub.delivery) continue;
+      unique.set(JSON.stringify([sub.sessionId, sub.messageId]), { sessionId: sub.sessionId, messageId: sub.messageId });
+    }
+    return [...unique.values()];
+  }
   subscribe(input: Subscribe, auth: Authorization, validate: (sessionId: string, messageId: string) => Promise<void>) {
     return this.serialize(() => this.admit(input, auth, validate));
   }
@@ -264,6 +283,7 @@ export class Events {
   }
   private post(url: URL, body: string, headers: Record<string, string>) { return this.hooks.post ? this.hooks.post(url, body, headers) : post(url, body, headers); }
   processDeliveries() {
+    if (this.closing) return Promise.resolve();
     if (this.deliveryScheduled) return Promise.resolve();
     this.deliveryScheduled = true;
     return this.serialize(() => this.deliver()).finally(() => { this.deliveryScheduled = false; });
@@ -304,10 +324,18 @@ export class Events {
       }
       if (housekeeping) await this.persist();
       for (const sub of expired) this.recordSubscription("subscriptionExpired", sub);
-      let dispatched = 0;
-      for (const sub of Object.values(this.store.subscriptions)) {
-        if (dispatched >= MAX_DELIVERIES_PER_TICK) break;
+      // Every due grant check consumes work, even when the grant is unavailable.
+      // Resume from the next position so revoked/paused entries cannot starve
+      // later subscriptions across delivery ticks.
+      const subscriptions = Object.values(this.store.subscriptions);
+      const start = this.deliveryCursor % (subscriptions.length || 1);
+      let considered = 0;
+      for (let offset = 0; offset < subscriptions.length && considered < MAX_DELIVERIES_PER_TICK; offset++) {
+        const index = (start + offset) % subscriptions.length;
+        const sub = subscriptions[index]!;
         if (!live(sub) || !sub.delivery || sub.delivery.state !== "pending" || sub.delivery.nextAt > this.time()) continue;
+        considered++;
+        this.deliveryCursor = (index + 1) % subscriptions.length;
         let authorized = false;
         try { authorized = await this.valid(sub.authorization); } catch {
           if (sub.state !== "paused") { sub.state = "paused"; await this.persist(); this.recordSubscription("subscriptionPaused", sub, { reason: "authorization" }); }
@@ -322,7 +350,6 @@ export class Events {
         if (delivery.attempts >= MAX_ATTEMPTS) { delivery.state = "exhausted"; await this.persist(); this.recordSubscription("deliveryOutcome", sub, { outcome: "exhausted" }); continue; }
         delivery.attempts++; delivery.nextAt = dispatchTime + Math.pow(2, delivery.attempts) * 1000; await this.persist();
         this.recordSubscription("deliveryAttempt", sub);
-        dispatched += 1;
         const timestamp = Math.floor(this.time() / 1000).toString();
         let httpStatus: number | undefined;
         try {

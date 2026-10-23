@@ -1,6 +1,6 @@
 {
   "name": "opencode-codex-subagent",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "OpenCode 2.0.24 V2 plugin for direct Codex ACP sessions",
   "type": "module",
   "main": "./src/index.js",

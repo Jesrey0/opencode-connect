@@ -34,6 +34,15 @@ export const CODEX_DEFAULT_MODE = "agent"
 const MODE_IDS = new Set(CODEX_SESSION_MODES.map((mode) => mode.id))
 class CodexModeError extends Error {}
 
+// Initialization can fail after opening an owned child. If shutdown also fails,
+// pass its lifetime back to the session owner instead of losing the only closer.
+export class CodexShutdownError extends Error {
+  constructor(close) {
+    super("Codex transport shutdown failed; details omitted")
+    this.close = close
+  }
+}
+
 /** True only for an exactly advertised Codex session mode. */
 export function isCodexSessionMode(value) {
   return typeof value === "string" && MODE_IDS.has(value)
@@ -163,20 +172,21 @@ export async function openCodexConnection({ open, cwd, onUpdate, signal, onPermi
   const app = createCodexClientApp({ onPermission })
   app.onNotification("session/update", ({ params }) => onUpdate?.(params))
   let opened, connection, closing
-  const close = async () => {
+  const close = () => {
     if (!closing) closing = (async () => {
       try { connection?.close() } finally { await opened?.close() }
-    })()
+    })().catch(error => {
+      // Keep the retry handle live if reaping could not be confirmed.
+      closing = undefined
+      throw error
+    })
     return closing
   }
   try {
     await cancellable(async () => {
       const resource = await open({ cwd })
-      if (signal?.aborted) {
-        await resource.close()
-        signal.throwIfAborted()
-      }
       opened = resource
+      signal?.throwIfAborted()
     }, signal)
     connection = app.connect(opened.target)
     const client = connection.agent
@@ -189,7 +199,7 @@ export async function openCodexConnection({ open, cwd, onUpdate, signal, onPermi
     })
     return { request, notify: (method, params) => client.notify(method, params), close, initialized }
   } catch (error) {
-    await close()
+    try { await close() } catch { throw new CodexShutdownError(close) }
     throw error
   }
 }

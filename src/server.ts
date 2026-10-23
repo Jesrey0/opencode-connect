@@ -32,7 +32,23 @@ app.get("/health", async (_req: Request, res: Response) => {
 // Local observation only: shared ingress routes only the authenticated /mcp path.
 app.get("/observe", (_req: Request, res: Response) => res.json({ events: events.snapshot() }));
 
-for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => { void mcp.close().finally(() => process.exit(0)); });
+let stopping = false;
+let nativeAbort: AbortController | undefined;
+for (const signal of ["SIGTERM", "SIGINT"] as const) process.once(signal, () => {
+  if (stopping) return;
+  stopping = true;
+  clearInterval(reconcileTimer);
+  nativeAbort?.abort();
+  void (async () => {
+    // Drain accepted native reads and event writes before releasing store ownership.
+    await reconciler.stop();
+    await events.close();
+    await mcp.close();
+  })().then(() => process.exit(0), (error) => {
+    console.error("OpenCode Connect shutdown failed", safeError(error));
+    process.exit(1);
+  });
+});
 
 app.listen(PORT, HOST, () => console.log(`OpenCode Connect listening on http://${HOST}:${PORT}/mcp`));
 
@@ -42,15 +58,17 @@ const terminalHints = new Set(["session.execution.succeeded", "session.execution
 const eventSessionId = (event: { data?: unknown }) => event.data && typeof event.data === "object" && "sessionID" in event.data && typeof event.data.sessionID === "string" ? event.data.sessionID : undefined;
 void (async () => {
   let delay = 1000;
-  while (true) {
+  while (!stopping) {
     try {
       const { client } = await connectNative();
       const controller = new AbortController();
+      nativeAbort = controller;
+      if (stopping) controller.abort();
       const iterator = client.event.subscribe({ signal: controller.signal })[Symbol.asyncIterator]();
       await reconcileEvents();
       delay = 1000;
       try {
-        while (true) {
+        while (!stopping) {
           const item = await iterator.next();
           if (item.done) break;
           if (terminalHints.has(item.value.type)) {
@@ -58,8 +76,9 @@ void (async () => {
             if (sessionId) await reconcileEvents(sessionId);
           }
         }
-      } finally { controller.abort(); await iterator.return?.(); }
+      } finally { controller.abort(); if (nativeAbort === controller) nativeAbort = undefined; await iterator.return?.(); }
     } catch (error) { console.error("Events native observation unavailable", safeError(error)); }
+    if (stopping) break;
     await new Promise((resolve) => setTimeout(resolve, delay));
     delay = Math.min(delay * 2, 30_000);
   }

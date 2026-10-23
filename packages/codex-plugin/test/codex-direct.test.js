@@ -895,6 +895,44 @@ test("interruption preserves a session and refuses concurrent continuation", asy
   await sessions.dispose()
 })
 
+test("failed startup shutdown reserves capacity until adapter disposal reaps the child", async () => {
+  let attempts = 0
+  const sessions = codexSessions({
+    maxConcurrent: 1,
+    connect: async () => ({
+      initialized: { agentCapabilities: { sessionCapabilities: { list: {} } } },
+      request: async () => { throw new Error("private startup failure") },
+      close: async () => {
+        attempts++
+        if (attempts === 1) throw new Error("private close failure")
+      },
+    }),
+  })
+  await assert.rejects(sessions.start({ cwd, task: "first" }), /shutdown failed/)
+  assert.equal(attempts, 1)
+  await assert.rejects(sessions.start({ cwd, task: "second" }), /capacity/)
+  await sessions.dispose()
+  assert.equal(attempts, 2)
+})
+
+test("metadata cleanup failures keep the exclusive control slot until disposal", async () => {
+  let attempts = 0
+  const sessions = codexSessions({
+    connect: async () => ({
+      initialized: { agentCapabilities: { sessionCapabilities: { list: {} } } },
+      request: async () => ({ sessions: [], nextCursor: null }),
+      close: async () => {
+        attempts++
+        if (attempts === 1) throw new Error("private close failure")
+      },
+    }),
+  })
+  await assert.rejects(sessions.list({}), /shutdown failed/)
+  await assert.rejects(sessions.list({}), /already in progress/)
+  await sessions.dispose()
+  assert.equal(attempts, 2)
+})
+
 test("capacity is reserved during admission and released after process cleanup", async () => {
   const native = backend()
   let releaseClose

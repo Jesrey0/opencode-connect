@@ -22,6 +22,11 @@ There are two runtime components and one source/install lock. This repository is
 
 ## Call path
 External ChatGPT -> opencode-connect HTTP/MCP -> OpenCode 2.0.24 native client -> OpenCode private service.
+
+The pinned native package declarations and OpenCode V2 [API](https://opencode.ai/v2/docs/api),
+[client](https://opencode.ai/v2/docs/build/client), and
+[RPC](https://opencode.ai/v2/docs/build/plugins/rpc) contracts own this integration.
+V1 server examples do not define V2 selection, message or plugin behavior.
 For Codex: the connector calls the codex-sessions RPC, registered by the workspace plugin in the OpenCode service. Direct Codex uses ACP sessions. The plugin does not intercept OpenCode's native subagent tool. Quota reads call the installed Codex App Server with a short-lived read-only client.
 
 For optional browser operations: the existing MCP handler shares one connector-owned
@@ -49,7 +54,7 @@ Build the connector with: npm run build
 Verify plugin contract with: npm run verify:integration
 Verify source release identity with: npm run verify:release (also in check:all)
 
-The root npm commands preserve existing connector entrypoints. To run plugin-only tests: npm test --workspace opencode-codex-subagent
+To run plugin-only tests: npm test --workspace opencode-codex-subagent
 
 Focused tests: node --import tsx --test test/runtime-modules.test.ts test/codex.test.ts test/deployment.test.ts; node --test packages/codex-plugin/test/codex-usage.test.js packages/codex-plugin/test/stdio.test.js. Existing catalog/message/result/wait suites continue to protect moved behavior. Tests inject services and spawn fixtures only; verify:integration does not contact a running OpenCode service.
 
@@ -63,3 +68,82 @@ Connector deployment stages the workspace but manages only opencode-connect.serv
 For each coordinated deployment, record the old plugin configuration and connector build, validate the source gates, then separately authorize preparation, plugin loading and connector activation. Use the explicit immutable builds/<buildId>/packages/codex-plugin/src path to make the loaded version auditable. Preserve existing plugin options. Verify the native plugin inventory, RPC capabilities, direct-session behavior and read-only quota at their owning runtime after the authorized load.
 
 Rollback automation swaps connector current/previous only. Restore the corresponding immutable plugin path/configuration and verify its native reload separately. Treat the recorded pre-cutover connector build and plugin path as the rollback pair for that deployment; no historical release is a permanent default baseline. A rollback candidate is valid only if it contains the complete workspace, a sealed release record and passes integrity/integration/identity checks. Unsealed historical records and connector-only releases are outside the supported release invariant; independently prepare and accept rollback candidates before cutover. See [release lifecycle](release-cutover.md) for the coordinated acceptance and recovery gates; re-inspect runtime identity before acting.
+
+## Live console
+
+The read-only terminal console shows both OpenCode and Codex native inventories,
+with runtime-labeled rows and runtime-specific detail routing. Codex combines one
+native history page with supervised workers, including workers absent from that
+page. Native ACP history alone has no turn outcome; the bounded, read-only Codex
+App Server lookup correlates `thread/read` metadata with the newest native turn.
+Historical `completed`, `failed`, and `interrupted` states appear only when
+verified by native turn history. Correlated `thread/read` may also provide the
+persisted thread model, provider, and reasoning effort even when no terminal turn
+is available; those settings do not make execution known. Missing metadata stays
+unavailable. Session mode is shown only when this adapter locally supervised and
+applied it; recovered historical modes are never inferred. Unavailable,
+in-progress, or mismatched execution history remains `unverified`. ACP still
+owns execution, and no history read starts or resumes a turn.
+Unsupported or
+disconnected Codex RPC leaves OpenCode visible and marks partial visibility;
+history and supervised-status failures are independent. Codex supervised status uses the five-second fallback cadence, while
+expensive native Codex history discovery is cached for five minutes (including
+failed reads). Dashboard `r` explicitly refreshes history and quota. Native Codex history reads have a twelve-second deadline to accommodate
+ACP startup, while supervised status keeps a three-second deadline. The plugin
+releases metadata-read ownership on cancellation. Codex detail shows the latest 25 bounded native
+message previews (up to 512 characters each, with truncation markers), replaces
+each history snapshot, and never advertises live deltas. No quota reads or
+session mutations are performed by this inventory view.
+
+The console also resolves active OpenCode sessions missing from the bounded
+recent page. Pending permissions show only a generic request label; native
+resource strings and tool-call titles are not displayed.
+
+For OpenCode, the console streams assistant text while a selected session is
+followed. Tool-only steps show tool names and status, excluding their inputs,
+outputs. Reasoning parts show a dim **activity-only** marker: `active` from native
+start/delta events or an incomplete part's timing, `ended` from native end events
+or completed part timing, and `observed` when persisted parts lack active/end
+evidence. These markers are not reasoning summaries or worker-completion claims.
+All reasoning text (live and persisted), provider state and request objects stay
+excluded. The pinned native surface does not provide a separate guaranteed-safe
+reasoning summary field.
+Native page order is authoritative for identities read together, correcting even
+previously retained provisional order. Text and reasoning overlays share
+first-activity anchors only for missing/in-flight identities and a cache of at
+most 128 assistant IDs, with at most 64 reasoning identities per assistant;
+persisted activity retains the first 64 reasoning parts per message so appending
+parts cannot displace earlier end evidence. Persisted end timing wins
+over in-flight deltas. Unflushed messages and ended reasoning identities are never
+evicted to admit new overlays. Completed readback frees payload overlays, but
+payload-free ordering anchors remain while earlier identities are missing.
+Anchors are bounded to 128 IDs and released only when earlier identities have
+native readback. At capacity, new identities are skipped until slots can safely
+be released or the view is reopened; persisted reads remain available.
+Opening an OpenCode view reads back to its latest operator
+prompt within 500 native messages; subsequent refreshes read one recent page and
+update loaded history by canonical message ID. Refreshes do not discard earlier
+loaded operator messages or unflushed streamed text. Home/PgUp scroll back;
+End/G resumes following. Reopen an existing console process after source updates
+to load the new observer.
+
+## Service and persistence ownership
+
+`npm run dev` starts the local source server at `127.0.0.1:8788/mcp` by default.
+`HOST` and `PORT` come from the process environment; there is no global dotenv
+loader. Native service lifecycle admission occurs only at connector startup.
+Ordinary calls discover the native service and fail when unavailable; they never
+start, replace or recover it. The raw OpenCode API stays private.
+
+Events persist JSON state at
+`${XDG_STATE_HOME:-$HOME/.local/state}/opencode-connect/events/store.json`.
+A dedicated SQLite connection holds an exclusive kernel-managed transaction on
+sibling `store.lock.sqlite` for the store's lifetime. Close, process crash and
+reboot release ownership; startup failure releases it too. Keep this on a local
+filesystem with SQLite locking. Never delete or replace the lock file while a
+connector runs. A second owner fails closed; lock I/O/corruption is not a stale
+lock. Deployment activation stops/restarts the managed connector service.
+
+Optional browser dependencies and profiles live outside immutable release trees.
+Browser cleanup, connector restart and native plugin reload have separate owners;
+see the [browser lifecycle](browser-capability.md#ownership-privacy-and-lifecycle).

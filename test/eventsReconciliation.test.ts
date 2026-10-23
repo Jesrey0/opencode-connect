@@ -91,3 +91,20 @@ test("an inspect failure never escapes reconcile and never blocks other targets"
   assert.equal((reads.at(-2) as { selectionCursor?: string }).selectionCursor, undefined);
   assert.equal(queued.length, 2);
 });
+
+test("stopping reconciliation prevents an in-flight native read from queueing work after shutdown", async () => {
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const { reconciler, reads, queued } = harness(async () => {
+    entered(); await gate;
+    return { session: { executionOutcome: "succeeded" }, result: { terminal: true, selectionComplete: true, outcome: "completed" } };
+  }, [target]);
+  const pending = reconciler.reconcile();
+  await started;
+  reconciler.stop();
+  release(); await pending;
+  await reconciler.reconcile();
+  assert.equal(reads.length, 1);
+  assert.deepEqual(queued, []);
+});

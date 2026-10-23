@@ -6,6 +6,7 @@ import { Schema } from "effect"
 import {
   CODEX_DEFAULT_MODE,
   CODEX_SESSION_MODES,
+  CodexShutdownError,
   DEFAULT_TIMEOUT_MS,
   applySessionMode,
   isCodexSessionMode,
@@ -299,6 +300,7 @@ function applyTurnEvidence(record, evidence) {
 
 export function createCodexSessions({ open, connect = openCodexConnection, timeoutMs = DEFAULT_TIMEOUT_MS, maxConcurrent = 2, ttlMs = 600_000, maxPendingPermissions = MAX_PENDING_PERMISSIONS, readUsage = readCodexUsage, readTurnOutcomes = createTurnOutcomeReader(), now = Date.now } = {}) {
   const records = new Map(), locks = new Set()
+  const failedClosers = new Set()
   const lifecycle = new AbortController(), operations = new Set()
   function trackOperation() {
     let finish
@@ -325,9 +327,22 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     controlBusy = true
     const finish = trackOperation()
     const signal = AbortSignal.any([AbortSignal.timeout(30_000), lifecycle.signal, ...(callerSignal ? [callerSignal] : [])])
-    let conn
+    let conn, cleanupFailed = false
     try { signal.throwIfAborted(); conn = await connection(undefined, onUpdate, signal); return await operation(conn, signal) }
-    finally { try { await conn?.close() } finally { controlBusy = false; finish() } }
+    catch (error) {
+      if (error instanceof CodexShutdownError) { failedClosers.add(error.close); cleanupFailed = true }
+      throw error
+    } finally {
+      try { await conn?.close() }
+      catch {
+        failedClosers.add(() => conn.close())
+        cleanupFailed = true
+        throw fail("unavailable", "Codex transport shutdown failed; details omitted")
+      } finally {
+        if (!cleanupFailed) controlBusy = false
+        finish()
+      }
+    }
   }
   async function catalog(conn, input = {}, signal) {
     if (!conn.initialized.agentCapabilities?.sessionCapabilities?.list) throw fail("unsupported", "Codex does not advertise session listing")
@@ -548,8 +563,15 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
         status: "inProgress", capabilities: CAPABILITIES,
       }
     } catch (error) {
-      try { await conn?.close() } finally { active--; if (id) locks.delete(id); if (record?.sessionId) locks.delete(record.sessionId) }
-      if (record?.sessionId) throw fail("admission_failed", "Codex session exists; prompt admission must be reconciled before retrying", { sessionId: record.sessionId, promptSubmitted: submitted ? null : false })
+      let cleanupFailed = error instanceof CodexShutdownError
+      if (cleanupFailed) failedClosers.add(error.close)
+      try { await conn?.close() }
+      catch { failedClosers.add(() => conn.close()); cleanupFailed = true }
+      // Admission owns a child before it owns a prompt. A failed close retains
+      // that capacity and any known session lock, just like turn cleanup does.
+      if (!cleanupFailed) { active--; if (id) locks.delete(id); if (record?.sessionId) locks.delete(record.sessionId) }
+      if (record?.sessionId) throw fail("admission_failed", "Codex session exists; prompt admission must be reconciled before retrying", { sessionId: record.sessionId, promptSubmitted: submitted ? null : false, ...(cleanupFailed ? { cleanupFailed: true } : {}) })
+      if (cleanupFailed) throw fail("unavailable", "Codex transport shutdown failed; details omitted")
       throw error
     } finally { finish() }
   }
@@ -751,7 +773,11 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
         await r.close()
         await r.done
       })])
-      if (results.some(result => result.status === "rejected")) throw fail("unavailable", "Codex adapter shutdown failed; details omitted")
+      // An in-flight admission can retain its closer while disposal waits for
+      // operations above, so collect these only after those operations settle.
+      const cleanup = await Promise.allSettled([...failedClosers].map(close => close()))
+      if ([...results, ...cleanup].some(result => result.status === "rejected")) throw fail("unavailable", "Codex adapter shutdown failed; details omitted")
+      failedClosers.clear()
     } finally {
       // Settle anything still parked so no caller waits on a dead adapter.
       for (const r of records.values()) { cancelAll(r); notifyWaiters(r) }

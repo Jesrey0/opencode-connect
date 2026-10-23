@@ -164,6 +164,99 @@ test("one delivery tick serves several due subscriptions in order within an expl
   } finally { await events.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test("delivery work bounds include unavailable grants and later subscriptions are not starved", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-events-fairness-"));
+  const checks: string[] = []; const delivered: string[] = [];
+  let checkingDeliveries = false;
+  const events = await Events.open(join(root, "store.json"), {
+    valid: async (authorization) => {
+      if (checkingDeliveries) {
+        checks.push(authorization.grantId);
+        if (Number(authorization.grantId) < MAX_DELIVERIES_PER_TICK) throw new Error("authorization unavailable");
+      }
+      return true;
+    },
+    post: async (_url, body) => {
+      const payload = JSON.parse(body);
+      if (payload.type === "verification") return { status: 200, body: Buffer.from(JSON.stringify({ challenge: payload.challenge })) };
+      delivered.push(payload.data.messageId);
+      return { status: 200, body: Buffer.alloc(0) };
+    },
+  });
+  try {
+    for (let index = 0; index < MAX_DELIVERIES_PER_TICK + 2; index++) {
+      await events.subscribe({ name: EVENT_NAME, arguments: { sessionId: "s1", messageId: `u${index}` },
+        delivery: { mode: "webhook", url: "https://hooks.example/callback", secret } }, { ...auth, grantId: String(index) }, async () => {});
+      await events.observe("s1", `u${index}`, "completed");
+    }
+    checkingDeliveries = true;
+    await events.processDeliveries();
+    assert.deepEqual(checks, Array.from({ length: MAX_DELIVERIES_PER_TICK }, (_, index) => String(index)));
+    assert.deepEqual(delivered, []);
+    checks.length = 0;
+    await events.processDeliveries();
+    assert.ok(checks.length <= MAX_DELIVERIES_PER_TICK);
+    assert.deepEqual(checks.slice(0, 2), [String(MAX_DELIVERIES_PER_TICK), String(MAX_DELIVERIES_PER_TICK + 1)]);
+    assert.deepEqual(delivered, [`u${MAX_DELIVERIES_PER_TICK}`, `u${MAX_DELIVERIES_PER_TICK + 1}`]);
+    assert.ok(events.diagnostics().filter((entry) => entry.state === "paused").every((entry) => entry.attempts === 0));
+  } finally { await events.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("reconciliation targets deduplicate exact prompts and stop after durable event queueing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-events-targets-"));
+  const path = join(root, "store.json"); const fixture = eventHarness(path, [500, 500]); const events = await fixture.eventsPromise;
+  try {
+    await subscribe(events);
+    await events.subscribe({ name: EVENT_NAME, arguments: { sessionId: "s1", messageId: "u1" },
+      delivery: { mode: "webhook", url: "https://hooks.example/other", secret } }, auth, async () => {});
+    await subscribe(events, "u2");
+    assert.deepEqual(events.targets(), [{ sessionId: "s1", messageId: "u1" }, { sessionId: "s1", messageId: "u2" }]);
+    await events.observe("s1", "u1", "completed");
+    assert.deepEqual(events.targets(), [{ sessionId: "s1", messageId: "u2" }]);
+    await events.processDeliveries();
+    assert.equal(events.diagnostics().filter((entry) => entry.deliveryState === "pending").length, 2);
+    assert.deepEqual(events.targets(), [{ sessionId: "s1", messageId: "u2" }]);
+    await events.close();
+    const restored = await eventHarness(path).eventsPromise;
+    try { assert.deepEqual(restored.targets(), [{ sessionId: "s1", messageId: "u2" }]); }
+    finally { await restored.close(); }
+  } finally { await events.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("closing drains accepted admissions, rejects new state work, and never writes under a successor owner", async () => {
+  const root = await mkdtemp(join(tmpdir(), "opencode-events-close-"));
+  const path = join(root, "store.json"); const fixture = eventHarness(path); const events = await fixture.eventsPromise;
+  let release!: () => void; let entered!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const input = { name: EVENT_NAME, arguments: { sessionId: "s1", messageId: "u1" },
+    delivery: { mode: "webhook", url: "https://hooks.example/callback", secret } };
+  const pending = events.subscribe(input, auth, async () => { entered(); await gate; });
+  try {
+    await started;
+    const closing = events.close();
+    assert.equal(events.close(), closing);
+    await assert.rejects(subscribe(events, "u2"), /closed/u);
+    await assert.rejects(events.observe("s1", "u1", "completed"), /closed/u);
+    await assert.rejects(events.unsubscribe({ ...input, delivery: { mode: "webhook", url: input.delivery.url } }, auth), /closed/u);
+    await assert.rejects(Events.open(path), /already owned/u);
+    release(); await pending; await closing;
+    const successor = await eventHarness(path).eventsPromise;
+    try {
+      assert.deepEqual(successor.targets(), [{ sessionId: "s1", messageId: "u1" }]);
+      await subscribe(successor, "u2");
+      await assert.rejects(subscribe(events, "u3"), /closed/u);
+      await events.processDeliveries();
+      await events.close();
+      await assert.rejects(Events.open(path), /already owned/u);
+      assert.deepEqual(successor.targets().map((target) => target.messageId), ["u1", "u2"]);
+    } finally { await successor.close(); }
+    const restored = await eventHarness(path).eventsPromise;
+    try { assert.deepEqual(restored.targets().map((target) => target.messageId), ["u1", "u2"]); }
+    finally { await restored.close(); }
+  } finally { release(); await pending; await events.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test("subscribe verifies a signed challenge with deterministic subscription header; exact filters and restart are preserved", async () => {
   const root = await mkdtemp(join(tmpdir(), "opencode-events-lifecycle-"));
   const path = join(root, "events", "store.json"); const fixture = eventHarness(path);
@@ -189,7 +282,7 @@ test("subscribe verifies a signed challenge with deterministic subscription head
     assert.equal(fixture.requests[2]!.headers["webhook-id"], JSON.parse(fixture.requests[2]!.body).eventId);
     await events.close();
     const reopened = await Events.open(path, { authenticate: async () => auth, valid: async () => true, post: async () => ({ status: 200, body: Buffer.alloc(0) }) });
-    try { assert.deepEqual(reopened.targets(), [{ sessionId: "s1", messageId: "u1" }]); assert.equal(reopened.diagnostics()[0]!.deliveryState, "delivered"); }
+    try { assert.deepEqual(reopened.targets(), [], "persisted delivery is complete and must not be re-reconciled"); assert.equal(reopened.diagnostics()[0]!.deliveryState, "delivered"); }
     finally { await reopened.close(); }
   } finally { await events.close(); await rm(root, { recursive: true, force: true }); }
 });

@@ -11,7 +11,7 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 
 import { createFakeCodexAgent } from "./fake-acp.js"
-import { CODEX_CLIENT_CAPABILITIES, openCodexConnection } from "../src/codex.js"
+import { CODEX_CLIENT_CAPABILITIES, CodexShutdownError, openCodexConnection } from "../src/codex.js"
 
 /** Every client method the envelope must refuse, not merely not advertise. */
 const DENIED_CLIENT_METHODS = [
@@ -59,4 +59,29 @@ test("every ACP filesystem, terminal and elicitation call is refused", async () 
       assert.match(call.error, /not available/i, `${call.method} must be refused`)
     }
   } finally { await open.close() }
+})
+test("failed initialization retains its child closer and can retry failed shutdown", async () => {
+  const { agent } = createFakeCodexAgent({ hangMethod: "initialize" })
+  const controller = new AbortController()
+  let closeAttempts = 0
+  const opening = openCodexConnection({
+    open: async () => ({ target: agent, close: async () => {
+      closeAttempts++
+      if (closeAttempts === 1) throw new Error("private shutdown failure")
+    } }),
+    signal: controller.signal,
+  })
+  // Allow the fake ACP initialize request to enter before interrupting startup.
+  await new Promise(resolve => setImmediate(resolve))
+  controller.abort()
+  let shutdown
+  await assert.rejects(opening, error => {
+    shutdown = error
+    return error instanceof CodexShutdownError && !error.message.includes("private")
+  })
+  assert.equal(closeAttempts, 1)
+  await shutdown.close()
+  assert.equal(closeAttempts, 2, "a rejected closer must not be permanently cached")
+  await shutdown.close()
+  assert.equal(closeAttempts, 2, "verified shutdown stays idempotent")
 })

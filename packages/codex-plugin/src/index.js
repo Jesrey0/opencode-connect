@@ -15,6 +15,7 @@ import {
 } from "./codex.js"
 import { SessionError, installCodexSessionsRpc } from "./direct.js"
 import { readCodexUsage } from "./usage.js"
+import { createTurnOutcomeReader } from "./outcomes.js"
 
 /** Normalizes plugin options without trusting their shape. */
 export function readOptions(raw = {}) {
@@ -29,7 +30,7 @@ export function readOptions(raw = {}) {
     nodePath: typeof raw.nodePath === "string" && raw.nodePath.length > 0 ? raw.nodePath : undefined,
     codexAcpEntry:
       typeof raw.codexAcpEntry === "string" && raw.codexAcpEntry.length > 0 ? raw.codexAcpEntry : undefined,
-    // Codex binary used only by the read-only quota snapshot.
+    // Codex binary used by the read-only quota and native history readers.
     codexPath: typeof raw.codexPath === "string" && raw.codexPath.length > 0 ? raw.codexPath : undefined,
   }
 }
@@ -75,6 +76,7 @@ export async function installCodexSessions(ctx, internals = {}) {
     timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     // Quota reads have their own short timeout and do not inherit turn bounds.
     readUsage: ({ signal }) => readCodexUsage({ codexPath: options.codexPath, cwd: options.cwd ?? ctx.location?.directory, signal }),
+    readTurnOutcomes: createTurnOutcomeReader({ codexPath: options.codexPath, cwd: options.cwd ?? ctx.location?.directory }),
     ...internals.direct,
   })
 
