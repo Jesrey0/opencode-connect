@@ -542,7 +542,10 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   });
   await t.test("worker crash invalidates leases while ordinary wait timeout preserves observation", async () => {
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
-    const worker = (backend as any).worker; process.kill(worker.pid, "SIGKILL"); await once(worker, "exit"); await sleep(20);
+    const worker = (backend as any).worker;
+    const exited = once(worker, "exit");
+    process.kill(worker.pid, "SIGKILL");
+    await exited; await sleep(20);
     await assert.rejects(snapshot(), errorCode("invalid_lease"));
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
     // Allow cold attachment checks after worker replacement to finish before
@@ -659,21 +662,32 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     for (const forced of [false, true]) {
       const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { cwd: root, env, stdio: "pipe" });
       await new Promise<void>((resolve, reject) => { child.stdout.once("data", () => resolve()); child.once("exit", code => reject(new Error("Connector child exited " + code))); });
+      const exited = once(child, "exit");
       if (forced) child.kill("SIGKILL"); else child.stdin.end();
-      await once(child, "exit"); await sleep(100);
+      await exited; await sleep(100);
       assert.equal((await fetch(cdpUrl + "/json/version")).ok, true);
       assert.deepEqual(await pageIds(), baseline);
     }
   });
   await t.test("forced connector exit reaps its worker during a blocked browser action", async () => {
-    const script = `import {BrowserBackend} from ${JSON.stringify(join(root, "src/browser/backend.ts"))};const b=new BrowserBackend({enabled:true});const a=await b.call('attach',{targetId:${JSON.stringify(one.id)},controlMode:'control'});console.log(JSON.stringify({pid:b.worker.pid}));process.stdin.once('data',()=>{void b.call('action',{leaseId:a.leaseId,authorized:true,action:'navigate',url:${JSON.stringify(pageUrl + "/blocked")},timeoutMs:30000}).catch(()=>{});});`;
+    const script = `import {BrowserBackend} from ${JSON.stringify(join(root, "src/browser/backend.ts"))};const b=new BrowserBackend({enabled:true});const a=await b.call('attach',{targetId:${JSON.stringify(one.id)},controlMode:'control'});console.log(JSON.stringify({pid:b.worker.pid}));process.stdin.once('data',()=>{void b.call('action',{leaseId:a.leaseId,authorized:true,action:'navigate',url:${JSON.stringify(pageUrl + "/blocked")},timeoutMs:30000}).catch(error=>{console.error('blocked navigation failed',error?.code,error?.message);process.exitCode=1;b.close();});});`;
     const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], { cwd: root, env, stdio: "pipe" });
     t.after(() => { child.kill("SIGKILL"); releaseBlocked?.(); });
-    const [data] = await once(child.stdout, "data");
+    const [data] = await once(child.stdout, "data", { signal: AbortSignal.timeout(10000) });
     const workerPid = JSON.parse(data.toString()).pid;
+    const errors: string[] = [];
+    child.stderr.on("data", (chunk: Buffer) => { if (errors.length < 20) errors.push(chunk.toString()); });
     const blocked = new Promise<void>(resolve => { blockedRequest = resolve; });
-    child.stdin.write("go"); await blocked;
-    child.kill("SIGKILL"); await once(child, "exit");
+    let deadline: NodeJS.Timeout | undefined;
+    const boundedBlocked = Promise.race([
+      blocked,
+      new Promise<never>((_, reject) => { deadline = setTimeout(() =>
+        reject(new Error("Blocked fixture request never arrived; child stderr: " + errors.join("").slice(-2048))), 12000); }),
+    ]);
+    try { child.stdin.write("go"); await boundedBlocked; }
+    finally { if (deadline) clearTimeout(deadline); }
+    const exited = once(child, "exit");
+    child.kill("SIGKILL"); await exited;
     let running = true;
     for (let attempt = 0; attempt < 40; attempt++) {
       try { const state = await readFile(`/proc/${workerPid}/stat`, "utf8"); running = state.split(") ")[1]?.[0] !== "Z"; } catch { running = false; }
@@ -687,7 +701,10 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   });
   await t.test("normal Python termination preserves Chrome and permits reattachment", async () => {
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
-    const worker = (backend as any).worker; process.kill(worker.pid, "SIGTERM"); await once(worker, "exit");
+    const worker = (backend as any).worker;
+    const exited = once(worker, "exit");
+    process.kill(worker.pid, "SIGTERM");
+    await exited;
     assert.deepEqual(await pageIds(), baseline);
     backend.close(); backend = new BrowserBackend({ enabled: true, env, chromeLaunchMode: "direct" });
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;

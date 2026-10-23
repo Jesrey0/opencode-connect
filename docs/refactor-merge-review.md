@@ -77,3 +77,40 @@ The finishing source changes are not a new live deployment. Git merge and push d
 - Retain the explicit non-atomic host-write contract until the native owner provides an appropriate atomic operation.
 - Account for native command-handle and PTY replay retention; preserve long-running verification logs and exit evidence at their owning host layer.
 - Preserve mutation uncertainty and recovery controls. Remove supported protocol behavior only when its owning current contract establishes that it is obsolete.
+
+## Post-cutover browser follow-up — 23 October 2026
+
+After live connector activation, five consecutive query-only navigation cycles
+through General Chat's native MCP path succeeded: stationary-document waits
+timed out as expected, and changed-query main-document transitions were
+confirmed. This is bounded live evidence, not proof of intermittent reliability.
+
+The opt-in real-Chrome suite subsequently reproduced readyState=complete
+postcondition timeouts after Chrome accepted navigation. In one diagnostic full
+run, the HTTP fixture observed one main-document request, one iframe request
+and two audio requests; a subsequent read-only readyState=interactive wait
+was confirmed and a snapshot showed the new public URL. This predicate also
+accepts complete, so it does not prove which exact state was observed. Removing
+media/iframe dependencies and using a disposable navigation target **did not**
+eliminate the full-suite timeout. Both unproven fixture changes were reverted.
+Independent full runs had 89/91 and 91/91 outcomes; the intermittent
+navigation-completion risk remains open. Do not weaken the production deadline
+or replay an uncertain navigation without further evidence.
+
+Separately, the forced-connector-exit acceptance fixture could wait indefinitely
+for a blocked request while suppressing child-navigation failures, or register
+child/worker exit listeners after signalling termination. Its test-only patch
+bounds the fixture handshake, retains child error evidence, and registers exit
+observers before kill signals. A focused real-Chrome file run passed 37/37; full
+runs confirmed forced-exit recovery even when the separate navigation check
+failed. No browser adapter, deployed service or native plugin behavior was
+changed. Final source checks and publication remain separate gates.
+
+Final post-follow-up verification on a detached checkout with locked
+dependencies: check:all and native integration passed, 403 core tests passed
+(3 browser opt-ins skipped), 145 Codex plugin tests passed, and build passed.
+The full opt-in real-Chrome gate passed once (91/91) but also failed at the
+intermittent navigation readiness check in separate runs (89/91). One earlier
+combined core run independently failed an Events delivery-capacity test; the
+focused Events file and a subsequent complete core rerun passed. These
+intermittent outcomes are recorded, not reclassified as resolved.
