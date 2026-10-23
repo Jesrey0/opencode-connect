@@ -8,11 +8,11 @@ export function variantsOf(schema: object): readonly z.ZodObject[] {
   return variants;
 }
 
-export function withoutDiscriminator(schema: z.ZodObject, key: string): z.ZodObject {
-  const shape = Object.fromEntries(Object.entries(schema.shape).filter(([field]) => field !== key));
+export function withoutFields(schema: z.ZodObject, ...keys: string[]): z.ZodObject {
+  const shape = Object.fromEntries(Object.entries(schema.shape).filter(([field]) => !keys.includes(field)));
   const object = z.object(shape).strict();
   const error = schema.def.error as z.core.$ZodErrorMap | undefined;
-  return object.clone({ ...object.def, error });
+  return object.clone({ ...object.def, checks: schema.def.checks, error }).meta(schema.meta() ?? {});
 }
 
 // Publish model-visible fields alongside the union's strict variant constraints.

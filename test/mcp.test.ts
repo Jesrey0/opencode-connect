@@ -25,16 +25,16 @@ test("MCP discovery uses host/command groups and canonical worker names without 
   const fixture = await mcpFixture(nativeFixture(() => { throw new Error("discovery must not access runtime"); }));
   try {
     const { tools } = await fixture.client.listTools();
-    const focused = ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.read", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"];
+    const focused = ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.read", "command.observePersistentPty", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"];
     const queries = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
     const actions = ["steer", "cancelInbox", "updateInbox", "compact", "command", "invokeSkill", "interrupt", "respondPermission", "respondForm", "cancelForm", "delete", "revertStage", "revertClear", "revertCommit", "switchModel", "switchAgent", "setPermissions", "removeSavedApproval", "synthetic"].map(action => `opencode.${action}`);
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["status.readiness", "status.recovery", "opencode.create", "opencode.continue", "opencode.fork", "opencode.wait", "opencode.inspectActivity", "opencode.inspectResult", ...queries, ...actions, "host.write", ...focused].sort());
+    assert.deepEqual(tools.map((t) => t.name).sort(), ["status.readiness", "status.recovery", "opencode.create", "opencode.continue", "opencode.fork", "opencode.wait", "opencode.inspectActivity", "opencode.inspectResult", ...queries, ...actions, "codex.quota", "host.write", ...focused].sort());
     // OpenAI plugin reference/guidelines reviewed 2026-10-15; see
     // docs/chatgpt-mcp-review.md for sources and behavior justifications.
     for (const [name, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of [
       ["status.readiness", true, false, false, true], ["status.recovery", true, false, false, true],
       ["host.write", false, true, false, false],
-      ["command.read", false, true, false, false],
+      ["command.read", true, false, false, true], ["command.observePersistentPty", false, true, false, false], ["codex.quota", true, false, false, true],
       ...["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList"].map(name => [name, true, false, false, true] as const),
       ...["host.worktreeCreate", "host.worktreeRemove", "command.startShell", "command.startPty", "command.startPersistentPty", "command.remove", "command.input", "command.interrupt", "command.ctrlD"].map(name => [name, false, true, name.startsWith("command."), false] as const),
       ...["opencode.steer", "opencode.compact", "opencode.command", "opencode.invokeSkill", "opencode.interrupt", "opencode.respondPermission", "opencode.respondForm", "opencode.revertCommit", "opencode.removeSavedApproval", "opencode.synthetic"].map(name => [name, false, true, ["opencode.steer", "opencode.compact", "opencode.command", "opencode.invokeSkill", "opencode.interrupt", "opencode.respondPermission", "opencode.respondForm", "opencode.revertCommit", "opencode.synthetic"].includes(name), false] as const),
@@ -84,7 +84,9 @@ test("focused host and command tools have unique purpose-specific schemas and tr
     const resize = tools.find(tool => tool.name === "command.resize")!.annotations!;
     assert.deepEqual([resize.readOnlyHint, resize.destructiveHint, resize.idempotentHint], [false, false, true]);
     const read = tools.find(tool => tool.name === "command.read")!.annotations!;
-    assert.deepEqual([read.readOnlyHint, read.destructiveHint], [false, true], "persistent observer may remove an exited handle");
+    assert.deepEqual([read.readOnlyHint, read.destructiveHint], [true, false]);
+    const observer = tools.find(tool => tool.name === "command.observePersistentPty")!.annotations!;
+    assert.deepEqual([observer.readOnlyHint, observer.destructiveHint, observer.idempotentHint], [false, true, false], "persistent observer may remove an exited handle");
     for (const name of ["host.inspect", "host.worktree", "command.start", "command.control", "opencode.query", "opencode.act", "opencode.start", "opencode.inspect", "status"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
   } finally { await fixture.close(); }
 });
@@ -324,7 +326,7 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
     assert.equal("includePermissionsSummary" in agentsTool.properties!, false);
     const sessionsTool = schemas.get("opencode.sessions")!;
     for (const field of ["cursor", "limit", "cwd", "searchTerm", "runtime"]) assert.ok(field in sessionsTool.properties!, `sessions.${field}`);
-    assert.equal((sessionsTool.properties!.limit as { default?: number }).default, 25);
+    assert.equal((sessionsTool.properties!.limit as { default?: number }).default, undefined, "OpenCode page defaults must not be injected into Codex calls");
     assert.equal((schemas.get("opencode.message")!.properties!.textLimit as { default?: number }).default, 12000);
     const start = schemas.get("opencode.create")!;
     assert.equal((start.properties!.agent as { type: string }).type, "string");

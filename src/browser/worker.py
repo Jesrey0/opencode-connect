@@ -947,7 +947,7 @@ class Adapter:
                         reject("invalid_element", "Fill requires an editable text control")
                     if kind == "select" and state["tag"] != "SELECT":
                         reject("invalid_element", "Select requires a native select element")
-                    if kind in ("click", "rightClick", "doubleClick", "hover", "scroll", "wheel"):
+                    if kind in ("click", "rightClick", "doubleClick", "hover", "scroll"):
                         pos = await self.point(args["elementRef"])
                         self.dispatched = True
                         if kind in ("click", "rightClick", "doubleClick"):
@@ -960,10 +960,8 @@ class Adapter:
                                 self.mouse("mouseMoved",pos["x"],pos["y"]),
                                 self.mouse("mouseReleased",pos["x"],pos["y"]))
 
-                        elif kind == "scroll":
-                            await self.function(obj, "function(delta){this.scrollBy({top:delta,behavior:'instant'});}", [args["deltaY"]])
                         else:
-                            await self.function(obj, "function(dx,dy){this.scrollLeft+=dx;this.scrollTop+=dy;}", [args["deltaX"], args["deltaY"]])
+                            await self.function(obj, "function(dx,dy){this.scrollBy({left:dx,top:dy,behavior:'instant'});}", [args.get("deltaX", 0), args["deltaY"]])
                     elif kind == "typeText":
                         if state["readonly"] or not (state["tag"] in ("INPUT","TEXTAREA") and state["type"] not in ("file","hidden") or await self.function(obj,"function(){return this.isContentEditable;}")):
                             reject("invalid_element", "Typing requires editable text or contenteditable")
@@ -984,15 +982,6 @@ class Adapter:
                                 obj = await self.text_guard(args["elementRef"])
                                 if plan["control"] and not await self.function(obj, "function(expected,prefix,more){return this.value===expected&&(!more||this.selectionStart===prefix.length&&this.selectionEnd===prefix.length);}", [plan["prefix"] + value[:start + size] + plan["suffix"], plan["prefix"] + value[:start + size], start + size < len(value)]):
                                     reject("partial_input", "Control text differs after an ordered part; input stopped without replay")
-                    elif kind == "keyCombo":
-                        obj = await self.focus(args["elementRef"], obj)
-                        bits={"Alt":1,"Control":2,"Meta":4,"Shift":8}
-                        mask=sum(bits[m] for m in args["modifiers"])
-                        key=args["key"]
-                        vk=ord(key) if len(key)==1 else {"Enter":13,"Escape":27,"Tab":9,"Backspace":8,"Delete":46,"ArrowLeft":37,"ArrowUp":38,"ArrowRight":39,"ArrowDown":40}[key]
-                        self.dispatched = True
-                        await self.conn.send(cdp.input_.dispatch_key_event("rawKeyDown",key=key,code="Key"+key if len(key)==1 else key,modifiers=mask,windows_virtual_key_code=vk))
-                        await self.conn.send(cdp.input_.dispatch_key_event("keyUp",key=key,code="Key"+key if len(key)==1 else key,modifiers=mask,windows_virtual_key_code=vk))
                     elif kind == "fill":
                         obj = await self.focus(args["elementRef"], obj, editable=True)
                         plan = await self.text_plan(obj, args["value"], True)
@@ -1010,8 +999,15 @@ class Adapter:
                         self.dispatched = True
                         key = args["key"]
                         codes = {"Enter": 13, "Tab": 9, "Escape": 27, "Backspace": 8, "Delete": 46, "ArrowLeft": 37, "ArrowUp": 38, "ArrowRight": 39, "ArrowDown": 40, "Home": 36, "End": 35, "Space": 32}
-                        await self.conn.send(cdp.input_.dispatch_key_event("keyDown", key=" " if key == "Space" else key, windows_virtual_key_code=codes[key], text="\r" if key == "Enter" else " " if key == "Space" else None))
-                        await self.conn.send(cdp.input_.dispatch_key_event("keyUp", key=key, windows_virtual_key_code=codes[key]))
+                        if "modifiers" in args:
+                            bits = {"Alt": 1, "Control": 2, "Meta": 4, "Shift": 8}
+                            mask = sum(bits[m] for m in args["modifiers"])
+                            vk = ord(key) if len(key) == 1 else codes[key]
+                            await self.conn.send(cdp.input_.dispatch_key_event("rawKeyDown", key=key, code="Key"+key if len(key) == 1 else key, modifiers=mask, windows_virtual_key_code=vk))
+                            await self.conn.send(cdp.input_.dispatch_key_event("keyUp", key=key, code="Key"+key if len(key) == 1 else key, modifiers=mask, windows_virtual_key_code=vk))
+                        else:
+                            await self.conn.send(cdp.input_.dispatch_key_event("keyDown", key=" " if key == "Space" else key, windows_virtual_key_code=codes[key], text="\r" if key == "Enter" else " " if key == "Space" else None))
+                            await self.conn.send(cdp.input_.dispatch_key_event("keyUp", key=key, windows_virtual_key_code=codes[key]))
             if kind in ("fill", "typeText"):
                 # Fill has finished dispatching. A change handler may move
                 # focus or disable the accepted control; read back the same
@@ -1173,9 +1169,9 @@ def validate(method, args):
             validate("action", {**{key: value for key, value in step.items() if key != "target"}, "leaseId": args["leaseId"], "authorized": True, "elementRef": "workflow-observation"})
     if method == "action":
         kind = args["action"]
-        variants = {"navigate": {"url"}, "click": {"elementRef"}, "rightClick": {"elementRef"}, "doubleClick": {"elementRef"}, "hover": {"elementRef"}, "drag": {"sourceRef", "targetRef"}, "typeText": {"elementRef","value"}, "keyCombo": {"elementRef","key","modifiers"}, "wheel": {"elementRef","deltaX","deltaY"}, "fill": {"elementRef", "value"}, "select": {"elementRef", "value"}, "upload": {"elementRef", "files"}, "keypress": {"elementRef", "key"}, "scroll": {"elementRef", "deltaY"}}
+        variants = {"navigate": {"url"}, "click": {"elementRef"}, "rightClick": {"elementRef"}, "doubleClick": {"elementRef"}, "hover": {"elementRef"}, "drag": {"sourceRef", "targetRef"}, "typeText": {"elementRef","value"}, "fill": {"elementRef", "value"}, "select": {"elementRef", "value"}, "upload": {"elementRef", "files"}, "keypress": {"elementRef", "key"}, "scroll": {"elementRef", "deltaY"}}
         common = {"leaseId", "action", "authorized", "expected", "timeoutMs"}
-        optional = {"inputMode", "keyDelayMs"} if kind == "typeText" else set()
+        optional = {"inputMode", "keyDelayMs"} if kind == "typeText" else {"modifiers"} if kind == "keypress" else {"deltaX"} if kind == "scroll" else set()
         if args["authorized"] is not True or kind not in variants or set(args) - common - variants[kind] - optional or variants[kind] - set(args):
             reject("invalid_arguments", "Invalid or unauthorized browser action")
         for field in ("value", "url", "key"):
@@ -1195,18 +1191,18 @@ def validate(method, args):
                     reject("unsupported_input", "Sequential text supports printable Unicode and LF; other control characters are unsupported")
         if kind == "upload" and (not isinstance(args["files"], list) or not 1 <= len(args["files"]) <= 10 or any(not isinstance(file, str) or len(file) > 4096 for file in args["files"])):
             reject("invalid_arguments", "Invalid upload files")
-        if kind == "keyCombo" and (
+        if kind == "keypress" and "modifiers" in args and (
             args["key"] not in ("A","C","V","X","Z","Enter","Escape","Tab","Backspace","Delete","ArrowLeft","ArrowRight","ArrowUp","ArrowDown")
             or not isinstance(args["modifiers"], list) or not 1 <= len(args["modifiers"]) <= 4
             or len(set(str(m) for m in args["modifiers"])) != len(args["modifiers"])
             or any(m not in ("Control","Alt","Shift","Meta") for m in args["modifiers"])
         ):
             reject("invalid_arguments", "Invalid shortcut key or modifiers")
-        if kind == "wheel" and (type(args["deltaX"]) is not int or abs(args["deltaX"]) > 10000):
-            reject("invalid_arguments", "Invalid wheel delta")
-        if kind in ("scroll", "wheel") and (type(args["deltaY"]) is not int or abs(args["deltaY"]) > 10000):
+        if kind == "scroll" and "deltaX" in args and (type(args["deltaX"]) is not int or abs(args["deltaX"]) > 10000):
+            reject("invalid_arguments", "Invalid horizontal scroll amount")
+        if kind == "scroll" and (type(args["deltaY"]) is not int or abs(args["deltaY"]) > 10000):
             reject("invalid_arguments", "Invalid scroll amount")
-        if kind == "keypress" and args["key"] not in ("Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "Space"):
+        if kind == "keypress" and "modifiers" not in args and args["key"] not in ("Enter", "Tab", "Escape", "Backspace", "Delete", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "Home", "End", "Space"):
             reject("invalid_arguments", "Unsupported key")
         if "expected" in args:
             validate_condition(args["expected"])

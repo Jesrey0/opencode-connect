@@ -1,21 +1,22 @@
 import { EventErrorCode } from "./eventsErrors.js";
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
-import { OpenCodeBackend } from "./opencode.js";
+import { OpenCodeBackend, type QueryInput } from "./opencode.js";
 import { HostBackend } from "./host.js";
-import { exposedUnion, variantsOf, withoutDiscriminator } from "./schema.js";
+import { exposedUnion, variantsOf, withoutFields } from "./schema.js";
 import { VERSION } from "./version.js";
 import { loadBuildInfo } from "./buildInfo.js";
 import { safeError, AdmissionError, ConnectorError, SessionDeleteError } from "./bounds.js";
 import { ProtocolErrorCode, ProtocolError } from "@modelcontextprotocol/server";
 import { Events, EVENT_NAME, eventArgumentsSchema } from "./events.js";
 import type { ServerContext, ContentBlock } from "@modelcontextprotocol/server";
-import { errorOutputSchema, outputSchemas, outputVariant } from "./results.js";
-import { CODEX_MODES } from "./codex.js";
+import { errorOutputSchema, outputSchemas, outputVariant, queryOutputSchema } from "./results.js";
+import { CODEX_MODES, CODEX_ACTIONS, CODEX_QUERY_TYPES } from "./codex.js";
 import { BrowserBackend } from "./browser/backend.js";
 import { registerBrowserTools } from "./browser/tools.js";
 
 const runtimeSchema = z.enum(["opencode", "codex"]).optional().describe("Session runtime; omission selects OpenCode. Codex uses native ACP session IDs and advertises its narrower capabilities.");
+const opencodeRuntimeSchema = z.literal("opencode").optional().describe("OpenCode-only operation; omission selects OpenCode.");
 const codexUnsupportedStartFields = ["model", "agent", "variant", "permissions", "forkFromSessionId", "beforeMessageId", "title", "files", "agents", "skills"] as const;
 
 const pageShape = { offset: z.number().int().min(0).optional().meta({ default: 0 }), limit: z.number().int().min(1).max(50).optional().describe("Page size: integer 1..50; defaults to 25.").meta({ default: 25 }), fingerprint: z.string().min(1).optional() };
@@ -82,7 +83,7 @@ export const querySchema = exposedUnion("type", [
   z.object({ runtime: runtimeSchema,
     type: z.literal("sessions"),
     cursor: z.string().min(1).optional(),
-    limit: z.number().int().min(1).max(50).optional().meta({ default: 25 }),
+    limit: z.number().int().min(1).max(50).optional().describe("OpenCode-only page size; defaults to 25. Codex uses its native page size."),
     cwd: z.string().min(1).optional(),
     searchTerm: z.string().min(1).optional(),
   }),
@@ -130,6 +131,29 @@ export function structuredResult(structuredContent: Record<string, unknown>, con
   return result;
 }
 
+function queryInputSchema(type: string, schema: z.ZodObject) {
+  if (type === "usage" || !CODEX_QUERY_TYPES.has(type)) return schema.safeExtend({ runtime: opencodeRuntimeSchema });
+  const forbidden = type === "sessions" ? ["limit", "searchTerm"] : type === "messages" ? ["cursor"] : type === "message" ? ["field"] : [];
+  const pendingOnly = type === "permissions";
+  if (!forbidden.length && !pendingOnly) return schema;
+  return schema.superRefine((input, context) => {
+    if (input.runtime !== "codex") return;
+    for (const field of forbidden) if (input[field] !== undefined) context.addIssue({ code: "custom", message: `${field} is unsupported by Codex ${type}`, path: [field] });
+    if (pendingOnly && input.section !== "pending") context.addIssue({ code: "custom", message: "Codex permissions require section: pending", path: ["section"] });
+  }).meta({ ...schema.meta(), allOf: [{
+    if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] },
+    then: {
+      ...(forbidden.length ? { not: { anyOf: forbidden.map(field => ({ required: [field] })) } } : {}),
+      ...(pendingOnly ? { properties: { section: { const: "pending" } }, required: ["section"] } : {}),
+    },
+  }] });
+}
+
+async function queryResult(backend: OpenCodeBackend, input: QueryInput, signal?: AbortSignal) {
+  const result = await backend.query([input], signal);
+  return { ...structuredResult(result), ...(result.results.some(entry => "error" in entry) ? { isError: true } : {}) };
+}
+
 export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, browser?: BrowserBackend): McpServer {
   const capabilities = { tools: { listChanged: false }, ...(events ? { events: {} } : {}) };
   const server = new McpServer({ name: "opencode-connect", version: VERSION }, {
@@ -137,7 +161,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     // Bounds recursive validation work independently of serialized string size.
     // Full permission/attachment sets and 12-step browser workflows fit this budget.
     maxToolInputElements: 4096,
-      instructions: "Use purpose-specific tools; no generic runners. Status readiness/recovery, OpenCode create/continue/fork, and inspect activity/result are distinct. Preserve native IDs and canonical cwd; follow nextCall. Reconcile uncertain mutations; worker termination is not task success. Start commands with command.startShell, command.startPty or command.startPersistentPty; read saved handles with command.read.",
+      instructions: "Use purpose-specific tools; no generic runners. Readiness/recovery, create/continue/fork and activity/result inspection are distinct. Preserve native IDs and canonical cwd; follow nextCall. Reconcile uncertain mutations; worker termination is not task success. Start commands with command.startShell, command.startPty or command.startPersistentPty. Read ordinary handles with command.read; persistent observers use command.observePersistentPty.",
   });
   if (events) {
     const authenticated = async (extra: ServerContext) => {
@@ -251,20 +275,28 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   for (const [name, kind, description] of [
     ["command.startShell", "shell", "Run a shell command string with a timeout. Then use command.read with the returned handle and cursor."],
     ["command.startPty", "pty", "Run an executable with separate args in an ordinary PTY. Replay attachment ends at exit; then use command.read."],
-    ["command.startPersistentPty", "persistentPty", "Start an experimental session-bound PTY. cwd must match the session; native retention and observer cleanup apply."],
+    ["command.startPersistentPty", "persistentPty", "Start an experimental session-bound PTY. cwd must match the session; use command.observePersistentPty with native retention and observer cleanup."],
   ] as const) {
     const variant = variantsOf(commandStartSchema).find((schema) => (schema.shape as any).kind.value === kind)!;
     registerTool(name, { title: `Start ${kind} command`, description, inputSchema: variant.omit({ kind: true } as never), outputSchema: outputSchemas.commandStart.extend({ kind: z.literal(kind) }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
     }, async (input) => structuredResult(await host.start({ ...input, kind } as any)));
   }
+  const commandReadShape = { cwd: handleShape.cwd, id: handleShape.id, cursor: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(65536).optional(), waitMs: z.number().int().min(0).max(2000).optional() };
   registerTool("command.read", {
     title: "Read Native OpenCode Command",
-    description: "Read bounded native command replay by saved handle/cursor. Persistent observers may remove exited handles; detach or unverified metadata never proves exit or drain.",
-    inputSchema: z.object({ ...handleShape, cursor: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(65536).optional(), waitMs: z.number().int().min(0).max(2000).optional() }).strict(),
-    outputSchema: outputSchemas.commandRead,
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+    description: "Read bounded shell or ordinary PTY replay by saved handle/cursor. Detach or unverified metadata never proves exit or drain. Persistent PTYs require command.observePersistentPty.",
+    inputSchema: z.object({ kind: z.enum(["shell", "pty"]), ...commandReadShape }).strict(),
+    outputSchema: outputSchemas.commandRead.extend({ kind: z.enum(["shell", "pty"]) }),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async (input) => structuredResult(await host.read(input)));
+  registerTool("command.observePersistentPty", {
+    title: "Observe Persistent OpenCode Terminal",
+    description: "Read bounded persistent-PTY replay by saved handle/cursor. Native observer cleanup can remove an exited handle; this is destructive and non-idempotent. Detach does not prove exit or drain.",
+    inputSchema: z.object(commandReadShape).strict(),
+    outputSchema: outputSchemas.commandRead.extend({ kind: z.literal("persistentPty") }),
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
+  }, async (input) => structuredResult(await host.read({ ...input, kind: "persistentPty" })));
   for (const [name, action, description] of [
     ["command.remove", "remove", "Terminate and forget a native command handle; removal is destructive and cannot be retried when uncertain."],
     ["command.resize", "resize", "Set the dimensions of an ordinary or persistent PTY; repeating the same dimensions is safe."],
@@ -313,8 +345,8 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       sessionId: z.string().min(1),
       runtime: runtimeSchema,
       messageId: z.string().min(1).optional().describe("Required canonical user message ID for OpenCode. Omit for Codex, whose wait observes the current session turn."),
-    }).strict().refine(input => input.runtime === "codex" || !!input.messageId, { message: "OpenCode wait requires messageId" })
-      .meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: {}, else: { required: ["messageId"] } }),
+    }).strict().refine(input => input.runtime === "codex" ? input.messageId === undefined : !!input.messageId, { message: "OpenCode wait requires messageId; Codex wait must omit it", path: ["messageId"] })
+      .meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { required: ["messageId"] } }, else: { required: ["messageId"] } }),
     outputSchema: outputSchemas.wait,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async ({ sessionId, messageId, runtime }, context) => structuredResult(await backend.wait(sessionId, messageId, context.mcpReq.signal, runtime)));
@@ -333,12 +365,12 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     .meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { required: ["messageId"] } } });
   registerTool("opencode.inspectActivity", {
     title: "Inspect OpenCode Activity", description: "Read current native activity and pending actions, optionally scoped to a canonical OpenCode prompt. Codex observes the current session turn and does not support exact-prompt selection.",
-    inputSchema: inspectActivitySchema, outputSchema: outputSchemas.inspect,
+    inputSchema: inspectActivitySchema, outputSchema: outputSchemas.inspectActivity,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async input => structuredResult(await backend.inspect({ ...input, detail: "semantic" })));
   registerTool("opencode.inspectResult", {
     title: "Inspect OpenCode Result", description: "Select the result for a canonical OpenCode prompt, or observe the current Codex turn. Complete selection before interpreting outcome; continue with returned read-only nextCall.",
-    inputSchema: inspectResultSchema, outputSchema: outputSchemas.inspect,
+    inputSchema: inspectResultSchema, outputSchema: outputSchemas.inspectResult,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async input => structuredResult(await backend.inspect({ ...input, detail: "result" })));
 
@@ -358,7 +390,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["opencode.runtime", "runtime", "Read native runtime capabilities and plugin/MCP/command inventory for cwd."],
     ["opencode.skills", "skills", "List canonical native skills, optionally in project context."],
     ["opencode.providers", "providers", "List native provider identities and activation state for optional cwd context."],
-    ["opencode.usage", "usage", "Read OpenCode cumulative session token activity; Codex returns read-only quota windows, not ChatGPT Plus limits."],
+    ["opencode.usage", "usage", "Read OpenCode cumulative session token activity. Codex quota windows and reset times are read separately with codex.quota."],
     ["opencode.sessions", "sessions", "List native sessions with native cursor pagination and optional cwd/search filters. Codex supports its narrower cursor inventory."],
     ["opencode.session", "session", "Read one exact native session's canonical projected state."],
   ] as const;
@@ -370,14 +402,19 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   } as const;
   for (const [name, type, description] of queryTools) {
     const variant = variantsOf(querySchema).find((schema) => (schema.shape as any).type.value === type)!;
-    let inputSchema = withoutDiscriminator(variant, "type");
-    if (type === "messages") inputSchema = inputSchema.refine((input: any) => !input.cursor || !input.order, { message: "native message cursor cannot be combined with order", path: ["order"] }).meta({ not: { required: ["cursor", "order"] } });
+    const inputSchema = queryInputSchema(type, withoutFields(variant, "type"));
     registerTool(name, {
       title: queryTitles[type], description,
-      inputSchema, outputSchema: outputSchemas.query,
+      inputSchema, outputSchema: queryOutputSchema(type),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
-    }, async (input, context) => structuredResult(await backend.query([{ ...input, type } as any], context.mcpReq.signal)));
+    }, async (input, context) => queryResult(backend, { ...input, type } as QueryInput, context.mcpReq.signal));
   }
+  registerTool("codex.quota", {
+    title: "Read Codex Quota",
+    description: "Read sanitized Codex quota windows and reset times through the native plugin's read-only App Server client. Does not admit a model turn or return OpenCode token totals or ChatGPT Plus message limits.",
+    inputSchema: z.object({}).strict(), outputSchema: queryOutputSchema("usage"),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async (_input, context) => queryResult(backend, { runtime: "codex", type: "usage" }, context.mcpReq.signal));
 
   const actTools = [
     ["opencode.steer", "steer", "Steer an active native session with a prompt and optional attachments. The returned message ID is canonical; never retry uncertain submission.", false, true, true, false],
@@ -402,7 +439,8 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   ] as const;
   for (const [name, action, description, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of actTools) {
     const variant = variantsOf(actSchema).find((schema) => (schema.shape as any).action.value === action)!;
-    let inputSchema = withoutDiscriminator(variant, "action");
+    let inputSchema = withoutFields(variant, "action");
+    if (!CODEX_ACTIONS.has(action)) inputSchema = inputSchema.safeExtend({ runtime: opencodeRuntimeSchema });
     if (action === "respondPermission") inputSchema = inputSchema.refine((input: any) => input.runtime === "codex" ? !!input.optionId && input.decision === undefined && input.message === undefined : !!input.decision && input.optionId === undefined, { message: "Codex requires optionId; OpenCode requires decision" }).meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { required: ["optionId"], not: { anyOf: [{ required: ["decision"] }, { required: ["message"] }] } }, else: { required: ["decision"], not: { required: ["optionId"] } } });
     registerTool(name, {
       title: `OpenCode ${action}`,

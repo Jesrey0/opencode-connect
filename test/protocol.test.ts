@@ -294,10 +294,10 @@ test("HTTP disconnect cancels the Codex quota RPC rather than leaving its reader
     });
   });
   const http = await httpFixture(native);
-  const request = httpRequest(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "opencode.usage" } });
+  const request = httpRequest(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "codex.quota" } });
   request.on("error", () => {});
   try {
-    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: meta, name: "opencode.usage", arguments: { runtime: "codex" } } }));
+    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: meta, name: "codex.quota", arguments: {} } }));
     await ready;
     request.destroy();
     await stopped;
@@ -341,7 +341,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     const listing = await http.send("tools/list");
     assert.equal(listing.status, 200);
     const tools = listing.reply.result.tools as any[];
-    assert.equal(tools.length, 69);
+    assert.equal(tools.length, 71);
     const validators = new AjvJsonSchemaValidator();
     for (const tool of tools) {
       assert.equal(tool.inputSchema.$schema, "https://json-schema.org/draft/2020-12/schema");
@@ -416,7 +416,8 @@ test("HTTP command.read validates metadata-unavailable success for both PTY kind
     });
     const http = await httpFixture(native, undefined, 20, host);
     try {
-      const response = await http.send("tools/call", { name: "command.read", arguments: { kind, cwd: "/tmp", id: "pty", waitMs: 0 } });
+      const name = kind === "persistentPty" ? "command.observePersistentPty" : "command.read";
+      const response = await http.send("tools/call", { name, arguments: { ...(kind === "pty" ? { kind } : {}), cwd: "/tmp", id: "pty", waitMs: 0 } });
       const value = response.reply.result;
       assert.notEqual(value.isError, true, JSON.stringify(value));
       assert.deepEqual(value.content, []);
@@ -426,7 +427,7 @@ test("HTTP command.read validates metadata-unavailable success for both PTY kind
       assert.equal(value.structuredContent.drained, false);
       assert.equal(JSON.stringify(value).includes("PRIVATE"), false);
       const listing = await http.send("tools/list");
-      const schema = listing.reply.result.tools.find((tool: any) => tool.name === "command.read").outputSchema;
+      const schema = listing.reply.result.tools.find((tool: any) => tool.name === name).outputSchema;
       assert.equal(new AjvJsonSchemaValidator().getValidator(schema)(value.structuredContent).valid, true);
     } finally { await http.close(); }
   }

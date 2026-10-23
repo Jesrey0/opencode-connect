@@ -3,7 +3,7 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.14.2** projects native OpenCode HostPlane operations
+OpenCode Connect **0.15.0** projects native OpenCode HostPlane operations
 and the canonical WorkerPlane
 into MCP for ChatGPT's **0x0perator**. It pins `@opencode/client` to **2.0.24**.
 
@@ -40,12 +40,28 @@ session tools select the backend with `runtime` (`opencode` by default, or `code
 Codex calls use the workspace-owned `codex-sessions` plugin RPC directly;
 no intermediary OpenCode model turn or OpenCode transcript is created.
 
-Codex quota: call `opencode.usage` with `runtime: "codex"`.
+Codex quota: call `codex.quota` with no arguments.
 This reads a sanitized, read-only App Server quota snapshot via the Codex plugin RPC;
 it does not admit a model turn. Codex quota windows and reset timestamps are
 separate from OpenCode token activity and General Chat Plus message limits. Native
 identities remain qualified by their runtime. OpenCode prompt admission returns
 a canonical user `messageId`; Codex admission returns `messageId: null`.
+
+### MCP tool contracts in 0.15
+
+| Operation | Public call |
+| --- | --- |
+| Ordinary shell/PTY replay | `command.read` with `kind: "shell"` or `"pty"`, canonical `cwd`, handle `id` and saved cursor |
+| Persistent PTY observation | `command.observePersistentPty` with canonical `cwd`, handle `id` and saved cursor; omit `kind` |
+| Codex quota windows/reset times | `codex.quota {}`; `opencode.usage` reads OpenCode token activity only |
+| Keyboard key or shortcut | `browser.keypress` with a key and optional modifiers; replaces `browser.key_combo` |
+| Vertical or two-axis scrolling | `browser.scroll` with `deltaY` and optional `deltaX`; replaces `browser.scroll_xy` |
+
+The replaced browser names have no aliases. Known unsupported runtime/field
+combinations reject before connection. Focused query responses retain one
+`results` entry with `index: 0` and the owning query type; failed queries set MCP
+`isError: true`. Activity and result inspection publish their own output contracts.
+Source changes require separate release activation and client tool refresh.
 
 ## Repository guide
 
@@ -69,7 +85,8 @@ for coordinated acceptance, rollback, and standalone-checkout retirement.
 | `host.write` | Native bounded UTF-8/base64 file write, explicit overwrite/fingerprint, persisted readback |
 | `host.worktreeList`, `host.worktreeCreate`, `host.worktreeRemove`, `host.worktreeRefresh` | One purpose-specific native project worktree operation each |
 | `command.startShell`, `command.startPty`, `command.startPersistentPty` | Start one native command kind |
-| `command.read` | Native handle + canonical cwd/location + saved cursor; bounded output |
+| `command.read` | Read-only shell/ordinary PTY replay; native handle + canonical cwd/location + saved cursor |
+| `command.observePersistentPty` | Persistent replay with native observer exit cleanup; can remove the exited handle |
 | `command.remove`, `command.resize`, `command.input`, `command.interrupt`, `command.ctrlD` | One purpose-specific native command control each |
 
 Each operation supplies an absolute `cwd`; responses return the native canonical
@@ -180,8 +197,9 @@ fails after replay capture, output/cursor/replay metadata survive. Responses set
 `lastConfirmedInfo` from before replay, and never claim drained. A native
 `PtyNotFoundError` confirms `handleAvailable: false`; other readback failures leave
 availability unknown (`null`). Socket detach does not confirm terminal state.
-Persistent observer exit cleanup makes `command.read` destructive and
-non-idempotent, not read-only. No retained-exit promise is made.
+Persistent observer exit cleanup makes `command.observePersistentPty` destructive
+and non-idempotent. `command.read` accepts only shells and ordinary PTYs and is
+read-only. No retained-exit promise is made for persistent observation.
 
 `host.terminalScreen` uses native session terminal `read` with bounded
 `lines` (1–1,000); `terminalSnapshot` selects a canonical persistent PTY `id`.
@@ -381,7 +399,9 @@ Purpose-specific query tools include `opencode.models`, `opencode.agents`,
 `opencode.usage`, `opencode.sessions`, `opencode.session`, `opencode.messages`,
 `opencode.message`, `opencode.sessionDiff`, `opencode.inbox`, `opencode.tools`,
 `opencode.tool`, `opencode.permissions`, `opencode.savedApprovals`, and
-`opencode.runtime`. There is no batch query executor. Catalog/inventory pages use
+`opencode.runtime`, plus the separate `codex.quota` read. There is no batch query executor.
+Each query output has one fixed-identity result entry; errors in that entry also
+set the MCP tool error flag. Catalog/inventory pages use
 `offset`, `limit`, `fingerprint`; native session/message pages use opaque
 native cursors instead. Agent details include description, system,
 steps, paged permissions, mode, hidden status and model, excluding `request`.
@@ -722,7 +742,7 @@ so deleted source artifacts cannot survive into deployment.
 Tests exercise the pinned official client against deterministic native HTTP/wire
 fixtures, lifecycle/bounds, Unicode, permission forwarding/readback, sanitized
 queries, result recovery beyond 100/500 messages, mutation between pages, and
-MCP discovery/image/transport limits. Real HTTP calls exercise the core MCP surface and verify the exact 12-tool catalog,
+MCP discovery/image/transport limits. Real HTTP calls exercise the core MCP surface and verify the exact 71-tool core catalog,
 output-schema validation, structured-only results, near-1-MiB PNG reads,
 legacy/malformed-wire rejection without native access, localhost Host/Origin
 protection, and cancellation without worker interruption. Published `tools/list` schemas expose root

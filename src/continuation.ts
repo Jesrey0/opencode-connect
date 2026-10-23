@@ -26,7 +26,7 @@ export function nextCall(tool: ReadTool, args: Record<string, unknown>) {
 }
 
 // Caller-owned continuation arguments only; nothing executes or replays them.
-// Mutation responses and command.read (persistent exit cleanup) do not use this.
+// Mutation responses and persistent command observation do not use this.
 export function pageNextCall(tool: ReadTool, args: Record<string, unknown>, result: unknown) {
   if (!result || typeof result !== "object") return null;
   const value = result as Record<string, unknown>;

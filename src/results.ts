@@ -78,11 +78,8 @@ export const outputSchemas = {
     z.object({ sessionId: id, messageId: id, state: z.literal("terminal"), wakeReason: z.literal("terminal"), session, result }).strict(),
     z.object({ sessionId: id, messageId: id, state: z.literal("active"), wakeReason: z.enum(["actionRequired", "timeout"]), ...semanticShape }).strict(),
   ]),
-  inspect: z.union([codexInspection, z.object({ session, result }).strict(), z.object(semanticShape).strict()]),
-  query: z.object({ results: z.array(z.union([
-    z.object({ index: count, type: id, result: nativeObject }).strict(),
-    z.object({ index: count, type: id, error: z.string(), errorCode: z.string().nullable(), agentId: z.string().nullable() }).strict(),
-  ])) }).strict(),
+  inspectActivity: z.union([codexInspection, z.object(semanticShape).strict()]),
+  inspectResult: z.union([codexInspection, z.object({ session, result }).strict()]),
   act: z.discriminatedUnion("action", [
     z.object({ action: z.enum(["switchModel", "switchAgent", "setPermissions"]), session, persisted: z.literal(true) }).strict(),
     z.object({ action: z.literal("compact"), inboxId: id, sessionId: id, type: id, createdAtMs: z.number(), delivery: z.enum(["steer", "queue"]), status: z.literal("admitted"), completed: z.literal(false), correlationSupported: z.literal(true), completionNote: z.string().min(1), verifyNextCall: nextCall }).strict(),
@@ -102,6 +99,14 @@ export const outputSchemas = {
     z.object({ action: z.literal("delete"), runtime: z.enum(["opencode", "codex"]), sessionId: id, deleted: z.literal(true) }).strict(),
   ]),
 };
+
+export function queryOutputSchema(type: string) {
+  const identity = { index: z.literal(0), type: z.literal(type) };
+  return z.object({ results: z.array(z.union([
+    z.object({ ...identity, result: nativeObject }).strict(),
+    z.object({ ...identity, error: z.string(), errorCode: z.string().nullable(), agentId: z.string().nullable() }).strict(),
+  ])).length(1) }).strict();
+}
 
 // Derive each public operation's output from the backend's authoritative union.
 // Shared enum variants are narrowed too, so another operation cannot validate.

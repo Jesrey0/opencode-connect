@@ -268,6 +268,7 @@ function checkNotes(){const e=document.getElementById('notes').firstElementChild
 <button onclick="this.remove()">Remove me</button><div id="status" role="status">Ready</div>
 <a href="/next">Next page</a><iframe title="Fixture frame" src="/frame"></iframe>
 <div style="height:80px;overflow:auto" role="region" aria-label="Scroll area" onscroll="document.getElementById('status').textContent='Wheel scrolled '+this.scrollTop"><div style="height:2000px">Scrollable</div></div>
+<div style="width:80px;height:80px;overflow:auto;scroll-behavior:smooth" role="region" aria-label="XY scroll area" onscroll="this.dataset.first??=this.scrollLeft+','+this.scrollTop;document.getElementById('status').textContent='XY first '+this.dataset.first+' last '+this.scrollLeft+','+this.scrollTop"><div style="width:2000px;height:2000px">Scrollable both ways</div></div>
 <script>fetch('/tone.wav').then(r=>r.blob()).then(b=>document.getElementById('blob-audio').src=URL.createObjectURL(b));let count=0;function openSourceEditor(){const field=document.createElement('textarea');field.id='source-text';field.setAttribute('aria-label','Source text');field.oninput=()=>document.getElementById('status').textContent='Source entered';const button=document.createElement('button');button.textContent='Insert source';button.onclick=addSource;document.getElementById('editor').replaceChildren(field,button);}function addSource(){const p=document.createElement('p');p.textContent='Source '+(++count)+': '+document.getElementById('source-text').value;document.getElementById('sources').append(p);document.getElementById('editor').replaceChildren();}${"/* unneeded script data */".repeat(5000)}</script>`;
 
 test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE_CONNECT_BROWSER_TEST !== "1", timeout: 180000 }, async t => {
@@ -382,14 +383,20 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     assert.equal((await act({ action: "click", elementRef: await getRef("Native input test"), expected: { type: "text", value: "Trusted down true" } })).verification, "confirmed");
     assert.equal((await act({ action: "rightClick", elementRef: await getRef("Native input test"), expected: { type: "text", value: "Trusted context true" } })).verification, "confirmed");
     assert.equal((await act({ action: "doubleClick", elementRef: await getRef("Native input test"), expected: { type: "text", value: "Trusted double true" } })).verification, "confirmed");
-    assert.equal((await act({ action: "keyCombo", elementRef: await getRef("Key receiver"), key: "A", modifiers: ["Control"] })).verification, "inconclusive");
+    assert.equal((await act({ action: "keypress", elementRef: await getRef("Key receiver"), key: "A", modifiers: ["Control"] })).verification, "inconclusive");
     assert.equal((await act({ action: "typeText", elementRef: await getRef("Key receiver"), value: "New", expected: { type: "text", value: "Typed New" } })).verification, "confirmed");
+    assert.equal((await act({ action: "keypress", elementRef: await getRef("Key receiver"), key: "Home" })).verification, "inconclusive");
+    assert.equal((await act({ action: "keypress", elementRef: await getRef("Key receiver"), key: "Space", expected: { type: "element", target: { role: "textbox", name: "Key receiver" }, value: " New" } })).verification, "confirmed");
     const refs = await snapshot();
     const sourceRef = refs.nodes.find((node: any) => node.name === "Drag source" && node.ref)?.ref;
     const targetRef = refs.nodes.find((node: any) => node.name === "Drop target" && node.ref)?.ref;
     assert.ok(sourceRef && targetRef);
     assert.equal((await act({ action: "drag", sourceRef, targetRef, expected: { type: "text", value: "Drop move" } })).verification, "confirmed");
-    assert.equal((await act({ action: "wheel", elementRef: await getRef("Scroll area"), deltaX: 0, deltaY: 120 })).verification, "inconclusive");
+    assert.equal((await act({ action: "scroll", elementRef: await getRef("Scroll area"), deltaX: 0, deltaY: 120 })).verification, "inconclusive");
+  });
+  await t.test("bounded XY scrolling is immediate despite smooth CSS and vertical-only calls preserve horizontal position", async () => {
+    assert.equal((await act({ action: "scroll", elementRef: await getRef("XY scroll area"), deltaX: 120, deltaY: 240, expected: { type: "text", value: "XY first 120,240 last 120,240" } })).verification, "confirmed");
+    assert.equal((await act({ action: "scroll", elementRef: await getRef("XY scroll area"), deltaY: 60, expected: { type: "text", value: "XY first 120,240 last 120,300" } })).verification, "confirmed");
   });
   await t.test("fill, click and expected conditions distinguish dispatch from success", async () => {
     assert.equal((await act({ action: "fill", elementRef: await getRef("Name"), value: "Operator", expected: { type: "text", value: "Name entered" } })).verification, "confirmed");
@@ -671,7 +678,7 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
       assert.equal(listResponse.status, 200, JSON.stringify(listed));
       const exposed = listed.result.tools as any[];
       assert.ok(!exposed.some(tool => tool.name === "browser.action"), "No generic action executor is exposed");
-      for (const name of ["browser.hover", "browser.click", "browser.double_click", "browser.right_click", "browser.drag", "browser.key_combo", "browser.type_text", "browser.scroll_xy", "browser.scroll", "browser.navigate", "browser.fill", "browser.upload"]) {
+      for (const name of ["browser.hover", "browser.click", "browser.double_click", "browser.right_click", "browser.drag", "browser.type_text", "browser.scroll", "browser.navigate", "browser.fill", "browser.upload"]) {
         const tool = exposed.find(item => item.name === name);
         assert.ok(tool, "Missing MCP tool: "+name);
         for (const hint of ["readOnlyHint", "destructiveHint", "openWorldHint"]) assert.equal(typeof tool.annotations[hint], "boolean", name+" "+hint);
@@ -683,7 +690,7 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
       assert.equal(exposed.find(item => item.name === "browser.snapshot").annotations.readOnlyHint, true);
       assert.equal(exposed.find(item => item.name === "browser.snapshot").annotations.idempotentHint, false, "A fresh snapshot invalidates prior element refs");
       assert.equal(exposed.find(item => item.name === "browser.close").annotations.destructiveHint, true);
-      assert.equal(exposed.filter(item => item.name.startsWith("browser.")).length, 27, "Browser catalog includes managed Linux close and distinct named actions");
+      assert.equal(exposed.filter(item => item.name.startsWith("browser.")).length, 25, "Browser catalog includes managed Linux close and consolidated keyboard/scroll actions");
       assert.equal(exposed.find(item => item.name === "browser.snapshot").inputSchema.properties.scopeRef.type, "string");
       const workflowSchema = exposed.find(item => item.name === "browser.workflow").inputSchema;
       assert.deepEqual(workflowSchema.properties.steps.items.anyOf[0].properties.target.properties.within.required, ["role", "name"]);

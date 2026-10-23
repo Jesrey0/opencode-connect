@@ -17,6 +17,33 @@ spec.loader.exec_module(worker)
 
 
 class BoundaryTests(unittest.TestCase):
+    def test_keyboard_and_scroll_parameters_preserve_bounds_and_supported_key_modes(self):
+        common = {"leaseId": "lease", "elementRef": "e", "authorized": True}
+        for fields in [
+            {"action": "keypress", "key": "Home"},
+            {"action": "keypress", "key": "A", "modifiers": ["Control"]},
+            {"action": "keypress", "key": "Enter", "modifiers": ["Control", "Shift"]},
+            {"action": "scroll", "deltaY": 120},
+            {"action": "scroll", "deltaX": -10000, "deltaY": 10000},
+        ]:
+            with self.subTest(fields=fields):
+                worker.validate("action", {**common, **fields})
+        for fields in [
+            {"action": "keypress", "key": "A"},
+            {"action": "keypress", "key": "Home", "modifiers": ["Control"]},
+            {"action": "keypress", "key": "A", "modifiers": []},
+            {"action": "keypress", "key": "A", "modifiers": ["Control", "Control"]},
+            {"action": "keypress", "key": "A", "modifiers": ["Super"]},
+            {"action": "scroll", "deltaX": True, "deltaY": 0},
+            {"action": "scroll", "deltaX": 10001, "deltaY": 0},
+            {"action": "scroll", "deltaX": 0.5, "deltaY": 0},
+            {"action": "scroll", "deltaY": -10001},
+            {"action": "keyCombo", "key": "A", "modifiers": ["Control"]},
+            {"action": "wheel", "deltaX": 0, "deltaY": 120},
+        ]:
+            with self.subTest(fields=fields), self.assertRaises(worker.Rejected):
+                worker.validate("action", {**common, **fields})
+
     def test_windows_endpoints_require_loopback_browser_websockets_and_linux_keeps_http(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertEqual(worker.endpoint("linux"), "http://127.0.0.1:9222")

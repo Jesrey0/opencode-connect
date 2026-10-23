@@ -135,8 +135,8 @@ Names below are the native MCP names; ChatGPT may project punctuation differentl
 | `browser.snapshot` | `leaseId`, optional `maxNodes` (1–300, default 100), `frameId`, container `scopeRef`, name/role substring `filter`; compact AX roles, names, states, references, document generation, frame summaries, truncation and observation errors. |
 | `browser.click`, `browser.right_click`, `browser.double_click`, `browser.hover` | `leaseId`, `elementRef`, `authorized:true`; native Chrome mouse input on the observed element. |
 | `browser.drag` | Drag between observed `sourceRef` and `targetRef` using Chrome mouse events. |
-| `browser.key_combo`, `browser.type_text`, `browser.keypress` | Focus observed field and send a bounded shortcut, Unicode text, or single key via Chrome input. |
-| `browser.scroll`, `browser.scroll_xy` | Scroll a selected element programmatically, using safe bounded vertical or XY deltas. These do not produce a trusted mouse-wheel event. |
+| `browser.type_text`, `browser.keypress` | Focus observed field and send Unicode text, a single key or a shortcut with optional modifiers via Chrome input. |
+| `browser.scroll` | Scroll a selected element instantly using bounded `deltaY` and optional `deltaX` (default zero). This does not produce a trusted mouse-wheel event. |
 | `browser.fill`, `browser.select`, `browser.upload` | Programmatic form fill, selection, or files supplied to an observed input/chooser button; may trigger autosave/uploads. |
 | `browser.navigate` | Navigate the attached tab to HTTP/HTTPS, potentially discarding unsaved form state. |
 | `browser.workflow` | `leaseId`, `authorized:true`, 1–12 `steps`, optional total `timeoutMs` (100–30000, default 10000); fresh exact role/name targets, required postconditions, partial progress on failure. |
@@ -164,9 +164,14 @@ compatibility route.
 
 Native input support: `click`, `right_click`, `double_click`, `hover` and
 `drag` use Chrome's CDP mouse events instead of JavaScript `element.click()`.
-`key_combo` and `type_text` use CDP keyboard/text events. Normal `keypress`
+`keypress` and `type_text` use CDP keyboard/text events. Plain `keypress`
 supports Enter, Tab, Escape, Backspace, Delete, arrows, Home, End and Space.
-`scroll` and `scroll_xy` use bounded DOM scrolling. They report dispatch rather than verified scroll position; native wheel-event injection is not yet accepted by the Chrome fixture and is not advertised.
+Optional nonempty unique `modifiers` select Control, Alt, Meta and/or Shift;
+shortcuts support A/C/V/X/Z, Enter, Escape, Tab, Backspace, Delete and arrows.
+`scroll` uses one bounded instant DOM scroll for both axes, including on elements
+with smooth CSS scrolling. Omitted `deltaX` preserves horizontal position. It
+reports dispatch rather than verified scroll position; native wheel-event
+injection is not advertised.
 
 `fill` and `select` remain programmatic DOM operations that raise input/change
 events, but may not satisfy sites demanding trusted user activation. Fields must

@@ -38,7 +38,8 @@ test("shared session tools route Codex directly and preserve native identities",
   outputSchemas.start.parse(admitted);
   assert.equal(admitted.sessionId, "native-thread"); assert.equal(admitted.messageId, null);
   const inspected = await backend.inspect({ runtime: "codex", sessionId: admitted.sessionId, detail: "result" });
-  outputSchemas.inspect.parse(inspected);
+  outputSchemas.inspectResult.parse(inspected);
+  outputSchemas.inspectActivity.parse(inspected);
   assert.equal((inspected as any).result.text, "answer");
   assert.equal((inspected as any).session.model, "gpt-5.3-codex");
   assert.equal((inspected as any).session.modelProvider, "openai");
@@ -158,7 +159,7 @@ test("installed workspace RPC and connector definitions agree and usage crosses 
   const client = new Client({ name: "workspace-rpc-contract", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
   try {
-    const response = await client.callTool({ name: "opencode.usage", arguments: { runtime: "codex" } });
+    const response = await client.callTool({ name: "codex.quota", arguments: {} });
     assert.notEqual(response.isError, true);
     const result = (response.structuredContent as any).results[0];
     assert.equal(result.result.buckets[0].primary.usedPercent, 7);

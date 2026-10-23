@@ -114,8 +114,8 @@ test("native retry projects across status, inspect, wait and messages without re
     assert.equal(waited.session.status, "inProgress");
     assert.equal(JSON.stringify([status, semantic, result, waited, query]).includes("SECRET"), false);
     outputSchemas.status.parse(status);
-    outputSchemas.inspect.parse(semantic);
-    outputSchemas.inspect.parse(result);
+    outputSchemas.inspectActivity.parse(semantic);
+    outputSchemas.inspectResult.parse(result);
     outputSchemas.wait.parse(waited);
     await fixture.reconciler.reconcile();
     assert.equal(fixture.queued.length, 0);

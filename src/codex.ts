@@ -6,6 +6,8 @@ import { CodexSessionsDefinition } from "./codexRpc.js";
 
 export type Runtime = "opencode" | "codex";
 export const CODEX_MODES = ["read-only", "workspace-write", "agent", "agent-full-access"] as const;
+export const CODEX_ACTIONS: ReadonlySet<string> = new Set(["interrupt", "delete", "respondPermission"]);
+export const CODEX_QUERY_TYPES: ReadonlySet<string> = new Set(["usage", "sessions", "runtime", "session", "permissions", "messages", "message"]);
 export type CodexMode = typeof CODEX_MODES[number];
 const CONTROL = /[\x00-\x1f\x7f]/;
 const statuses = new Set(["idle", "inProgress", "completed", "failed", "interrupted"]);
@@ -146,7 +148,7 @@ export async function codexWait(client: OpenCodeClient, sessionId: string, messa
 }
 export async function codexAct(client: OpenCodeClient, input: { action: string; sessionId: string; requestId?: string; optionId?: string; decision?: string; message?: string }) {
   const { action, sessionId } = input;
-  if (!["interrupt", "delete", "respondPermission"].includes(action)) throw new ConnectorError("Codex session action " + action + " is unsupported");
+  if (!CODEX_ACTIONS.has(action)) throw new ConnectorError("Codex session action " + action + " is unsupported");
   if (action === "respondPermission" && (!input.optionId || !input.requestId || input.decision !== undefined || input.message !== undefined)) throw new ConnectorError("Codex permission replies require an exact native optionId and requestId");
   const value = await call(client, action, { sessionId, ...(action === "respondPermission" ? { requestId: input.requestId, optionId: input.optionId } : {}) });
   if (action === "delete") {
@@ -170,6 +172,7 @@ export async function codexStatus(client: OpenCodeClient, signal?: AbortSignal) 
   });
 }
 export async function codexQuery(client: OpenCodeClient, input: { type: string; sessionId?: string; messageId?: string; cwd?: string; cursor?: string; order?: "asc" | "desc"; searchTerm?: string; textOffset?: number; textLimit?: number; textFingerprint?: string; section?: string; field?: string } & PageInput, signal?: AbortSignal) {
+  if (!CODEX_QUERY_TYPES.has(input.type)) throw new ConnectorError(`Codex query ${input.type} is unsupported`);
   if (input.type === "usage") {
     // The native Codex plugin owns App Server quota collection and redaction.
     // These quota windows are not OpenCode token totals or General Chat limits.
