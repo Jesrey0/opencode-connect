@@ -755,7 +755,10 @@ class Adapter:
             top = next(iter(frames))
             loaders = (top, frames[top]["loader"])
             changed = safe_url(row["url"]) != safe_url(condition["fromUrl"]) or navigation_before is not None and loaders != navigation_before
-            return changed and await self.evaluate("document.readyState") == "complete"
+            # A parsed main document is a confirmed navigation, even if
+            # unrelated resources still prevent the full load event.
+            # Callers needing full load can request readyState("complete").
+            return changed and await self.evaluate("document.readyState") in ("interactive", "complete")
         if kind == "readyState":
             state = await self.evaluate("document.readyState")
             return state == condition["value"] or condition["value"] == "interactive" and state == "complete"

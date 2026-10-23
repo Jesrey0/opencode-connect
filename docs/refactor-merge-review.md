@@ -114,3 +114,36 @@ intermittent navigation readiness check in separate runs (89/91). One earlier
 combined core run independently failed an Events delivery-capacity test; the
 focused Events file and a subsequent complete core rerun passed. These
 intermittent outcomes are recorded, not reclassified as resolved.
+
+
+### Subsequent navigation lifecycle resolution — 23 October 2026
+
+An isolated CDP trace reproduced the reported timeout: Chrome acknowledged
+Page.navigate, emitted a main-frame navigation event, and document.readyState
+remained interactive throughout the ten-second verification window, with no
+Page.loadEventFired. The connector correctly refused to claim full-load
+completion; the pending resource state, not a fabricated navigation result,
+explained the reported timeout.
+
+The prior supposedly lightweight fixture accidentally appended a slash before
+its query string, making the handler serve the heavy media/iframe page again.
+The corrected identity fixture matches the exact request pathname independent
+of query/fragment, uses its own disposable Chrome tab, and still requires a
+main-document identity change across five query-only navigation cycles.
+
+The native navigation(fromUrl) condition now accepts a changed top-document
+loader or changed sanitized public URL once the main DOM has parsed
+(interactive or complete). This matches a navigation postcondition without
+requiring unrelated image/media/iframe resources to finish. An explicitly
+requested readyState(complete) remains stricter and is not implicitly granted.
+A new real-Chrome test holds a resource response open and independently confirms
+navigation succeeds at the parsed document, full load times out while held,
+then confirms after release. No mutation replay or additional browser privilege
+was introduced. Cross-frame and unchanged-document rejection tests still pass.
+
+Source acceptance on the isolated lockfile-matched checkout: check:all,
+test:all (403 core passed, three opt-in browser tests skipped by default,
+145 native Codex plugin tests passed), build, verify:integration, and the
+separate real-Chrome opt-in suite (92 of 92 passed) with temporary CDP
+instrumentation removed. Source/Git publication and the disruptive live
+release/plugin activation are separate gates.

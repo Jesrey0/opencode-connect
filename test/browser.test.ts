@@ -277,6 +277,8 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   let releaseBlocked: (() => void) | undefined;
   let iframeReloads = 0;
   let releaseIframe: (() => void) | undefined;
+  let heldResourceObserved: (() => void) | undefined;
+  let releaseHeldResource: (() => void) | undefined;
   const wav = Buffer.alloc(16044);
   wav.write("RIFF"); wav.writeUInt32LE(wav.length - 8, 4); wav.write("WAVEfmt ", 8); wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(8000, 24); wav.writeUInt32LE(16000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write("data", 36); wav.writeUInt32LE(16000, 40);
   const crossHost = httpServer((_req, res) => { res.setHeader("content-type", "audio/wav"); res.end(wav); });
@@ -284,8 +286,25 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
   t.after(() => new Promise<void>(resolve => crossHost.close(() => resolve())));
   const crossAddr = crossHost.address(); assert.ok(crossAddr && typeof crossAddr !== "string");
   const host = httpServer((req, res) => {
+    if (req.url === "/nav-held-resource") {
+      releaseHeldResource = () => {
+        if (res.writableEnded || res.destroyed) return;
+        res.setHeader("content-type", "image/gif");
+        res.end(Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64"));
+      };
+      heldResourceObserved?.(); return;
+    }
+    if (req.url === "/nav-held") {
+      res.end('<!doctype html><title>Document with pending image</title><h1>DOM parsed</h1><img src="/nav-held-resource">');
+      return;
+    }
     if (req.url === "/tone.wav") { res.setHeader("content-type", "audio/wav"); res.end(wav); return; }
     res.setHeader("content-type", "text/html");
+    // Exact pathname keeps every query-only identity transition lightweight.
+    if (req.url && new URL(req.url, "http://fixture.local").pathname === "/nav-identity") {
+      res.end("<!doctype html><title>Navigation identity</title><main>Navigation identity fixture</main>");
+      return;
+    }
     if (req.url === "/cors-media") { res.end(`<audio preload="auto" id="cross-audio" src="http://127.0.0.1:${crossAddr.port}/tone.wav"></audio>`); return; }
     if (req.url === "/blocked") { releaseBlocked = () => res.end("Released fixture"); blockedRequest?.(); return; }
     if (req.url === "/frame-auto") { res.end('<script>fetch("/frame-reload-gate").then(()=>location.replace("/frame?auto-reloaded"))</script>'); return; }
@@ -556,14 +575,26 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     assert.equal((await backend.call("status", {})).reachable, true);
   });
   await t.test("redacted URL cannot confirm navigation without a document change", async child => {
+    // A dedicated main-frame fixture isolates URL identity from media/iframe loading.
+    const navigationUrl = pageUrl + "/nav-identity";
+    const navigationTab = await newTab(navigationUrl + "?token=seed");
+    let navigationLease: string | undefined;
+    child.after(async () => {
+      try {
+        if (navigationLease) await backend.call("detach", { leaseId: navigationLease }, "owner");
+      } finally {
+        assert.equal((await fetch(cdpUrl + "/json/close/" + navigationTab.id)).ok, true);
+      }
+      assert.deepEqual(await pageIds(), baseline);
+    });
     let stage = "attachment";
     try {
-      attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
-      const navigationLease = leaseId;
-      child.after(() => backend.call("detach", { leaseId: navigationLease }, "owner"));
+      assert.equal((await fetch(cdpUrl + "/json/activate/" + navigationTab.id)).ok, true);
+      attached = await backend.call("attach", { targetId: navigationTab.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
+      navigationLease = leaseId;
       for (let attempt = 0; attempt < 5; attempt++) {
         stage = `initial document ${attempt}`;
-        const initial = await act({ action: "navigate", url: pageUrl + `/?token=hidden-${attempt}#fragment`, expected: { type: "readyState", value: "complete" } });
+        const initial = await act({ action: "navigate", url: navigationUrl + `?token=hidden-${attempt}#fragment`, expected: { type: "readyState", value: "complete" } });
         assert.equal(initial.verification, "confirmed", `${stage}: ${JSON.stringify(initial)}`);
         stage = `snapshot ${attempt}`;
         const observed = (await snapshot()).url;
@@ -571,12 +602,42 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
         assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "navigation", fromUrl: observed } }, "owner")).verification, "timed_out");
         // A changed query loads a new document with the same public URL.
         stage = `changed document ${attempt}`;
-        const changed = await act({ action: "navigate", url: pageUrl + `/?token=changed-${attempt}#fragment`, expected: { type: "navigation", fromUrl: observed } });
+        const changed = await act({ action: "navigate", url: navigationUrl + `?token=changed-${attempt}#fragment`, expected: { type: "navigation", fromUrl: observed } });
         assert.equal(changed.verification, "confirmed", `${stage}: ${JSON.stringify(changed)}`);
       }
     } catch (error) {
       throw new Error(`Redacted URL navigation failed at ${stage}`, { cause: error });
     }
+  });
+  await t.test("main-document navigation confirms after parsing while subresource load is unfinished", async child => {
+    const navTab = await newTab(pageUrl + "/next");
+    let currentLease: string | undefined;
+    child.after(async () => {
+      releaseHeldResource?.();
+      try { if (currentLease) await backend.call("detach", { leaseId: currentLease }, "owner"); }
+      finally { assert.equal((await fetch(cdpUrl + "/json/close/" + navTab.id)).ok, true); }
+      assert.deepEqual(await pageIds(), baseline);
+    });
+    assert.equal((await fetch(cdpUrl + "/json/activate/" + navTab.id)).ok, true);
+    const navAttachment = await backend.call("attach", { targetId: navTab.id, controlMode: "control" }, "owner");
+    currentLease = navAttachment.leaseId as string;
+    const observed = new Promise<void>(resolve => { heldResourceObserved = resolve; });
+    const changed = await backend.call("action", {
+      leaseId: currentLease, authorized: true, action: "navigate", url: pageUrl + "/nav-held",
+      expected: { type: "navigation", fromUrl: pageUrl + "/next" }, timeoutMs: 6000,
+    }, "owner") as any;
+    assert.equal(changed.verification, "confirmed", JSON.stringify(changed));
+    // The pending image prevents full load but must not prevent a verified
+    // top-document change. No navigation is repeated or inferred from an iframe.
+    await Promise.race([observed, new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new Error("Pending image request was not observed")), 3000))]);
+    assert.equal((await backend.call("wait", {
+      leaseId: currentLease, condition: { type: "readyState", value: "complete" }, timeoutMs: 500,
+    }, "owner")).verification, "timed_out");
+    releaseHeldResource?.();
+    assert.equal((await backend.call("wait", {
+      leaseId: currentLease, condition: { type: "readyState", value: "complete" }, timeoutMs: 5000,
+    }, "owner")).verification, "confirmed");
   });
   await t.test("an unrelated iframe reload cannot confirm main-document navigation", async child => {
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;

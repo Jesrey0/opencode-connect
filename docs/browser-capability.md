@@ -256,11 +256,13 @@ same frame. They can compare an exact field value or contenteditable rendered
 text, or assert enabled, disabled, focused, checked, unchecked, expanded,
 collapsed, selected or editable. Actual field values are not returned. Missing
 targets continue observation; ambiguous targets reject immediately.
-Navigation uses the main document's loader change or a
-changed sanitized URL plus complete readiness. An unrelated iframe reload cannot
-confirm it. Same-URL navigation must be observed from before the change; a standalone
-wait cannot prove a reload that already finished. CSS selectors are used only for
-read-only conditions, never guessed action targets.
+Navigation uses the main document's loader change or a changed sanitized
+URL plus interactive-or-complete readiness. This confirms a parsed main document,
+not full subresource loading; explicitly request readyState(complete) when full load
+matters. An unrelated iframe reload cannot confirm it. Same-URL navigation must
+be observed from before the change; a standalone wait cannot prove a reload that
+already finished. CSS selectors are used only for read-only conditions, never
+guessed action targets.
 
 `mediaReady` requires an audio/video element with current data (`readyState >= 2`)
 and no media error; the player may be hidden. It does not establish that an
