@@ -4,7 +4,7 @@ Review date: 23 October 2026.
 
 ## Decision and scope
 
-Accept the modernization for source merge and publication after the validation below. The finishing changes remove stale public-tool callers and narrow discovery contracts without adding operations, compatibility aliases, alternate execution paths, or new dependencies.
+Accept the modernization for source merge and publication with the intermittent browser-acceptance risk recorded below. The finishing changes remove stale public-tool callers and narrow discovery contracts without adding operations, compatibility aliases, alternate execution paths, or new dependencies.
 
 OpenCode 2.0.24 remains the native authority for sessions, models, agents and permissions. The native Codex plugin retains its 11-method RPC boundary. Connector activation, native plugin loading, Git publication and live acceptance remain separate operations.
 
@@ -15,6 +15,8 @@ OpenCode 2.0.24 remains the native authority for sessions, models, agents and pe
 | The operator benchmark still called the removed `status` tool. | It now calls `status.readiness` and `status.recovery`. The original command failed with an unknown-tool error; the corrected benchmark completes both 20-trial fixture evaluations. |
 | Focused tools advertised unrelated family-wide success results. | Public status, host inspection, worktree, command and session-action outputs now derive the matching variant from their authoritative backend schemas. A regression rejects another operation's success result while retaining typed safe errors. It failed before the correction and passes afterward. |
 | A closed-browser fixture inspected the operator's real Chrome profile. | The fixture now uses its own data directory and a reserved ephemeral endpoint. Ownership refusal remains enforced; the test does not stop the operator browser. |
+| Startup shutdown could lose to a missing Python preflight result on a clean CI runner. | Closing during startup now consistently reports `closed` and preserves closed supervisor state. A deterministic regression covers executable and missing executable paths, and separately retains `setup_required` for an open backend. The missing-executable case reproduced the CI failure before the correction. |
+| A refreshed full audit identified the development MCP client redirect advisory [GHSA-6prh-2h8m-c8cw](https://github.com/modelcontextprotocol/typescript-sdk/security/advisories/GHSA-6prh-2h8m-c8cw). | Pin the development client to patched 2.3.1, matching the existing server SDK version. The production audit remained clear. Locked installation and the final full/production audits validate the dependency update. |
 | Readiness tests validated against the recovery tool's broad output schema. | Each test now validates against its owning tool's discovered schema. Healthy and unavailable native-service cases both pass. |
 | Diagnostics and the cutover runbook named retired public tools. | Guidance now uses the focused lifecycle, readiness and runtime operations. Internal native backend dispatch remains intentional and is not a public compatibility API. |
 
@@ -37,9 +39,11 @@ These are serialized JSON byte counts, not model token measurements or evidence 
 
 An initial durable full run reported 87 passing tests and four failures, counting the parent suite. The first failure was a timeout during query-only navigation with a redacted public URL. The old test ignored the preceding complete-readiness result and left its lease attached after failure, causing two later lease conflicts.
 
-The regression now asserts the initial load, repeats five unchanged-public-URL document transitions, checks that a stationary document cannot confirm navigation, and releases both navigation tests' leases through test cleanup. An isolated repeated run and a full traced run passed. The final normal, uninstrumented browser suite passed all 91 tests. Diagnostic hooks were removed from source.
+The regression now asserts the initial load, repeats five unchanged-public-URL document transitions, checks that a stationary document cannot confirm navigation, identifies the failing stage, and releases both navigation tests' leases through test cleanup. A later full run still failed this navigation case with a deadline before dispatch was reported, while the improved cleanup prevented the earlier cascade (89 passed, two failures counting the parent).
 
-The original timeout's cause was not established. Passing reruns do not prove it fixed; this remains a recorded intermittent acceptance risk. No production browser condition, timeout, or ownership check was weakened. Source merge is supported by the strengthened final acceptance and the prior independent live acceptance; activation of the finishing source remains a separate release decision.
+The cause remains unestablished. Five consecutive isolated acceptance runs passed all 25 tests each. Full-suite runs with failure-only telemetry and with the normal worker also passed all 91 tests. The normal-worker diagnostic performed extra fixture observation only after an error; that branch was not reached in its passing run. All temporary diagnostic hooks and probes were then removed. The final source retains only assertion context and lease cleanup.
+
+These passing runs do not establish a navigation fix. This is an explicit remaining release risk. No production navigation condition, timeout, or ownership check was weakened. Source publication includes independently verified schema, startup-shutdown and development dependency fixes; future live activation must assess this retained risk separately.
 
 ## Validation
 
@@ -52,13 +56,13 @@ The original timeout's cause was not established. Passing reruns do not prove it
 | Build | `npm run build` passed |
 | Native integration | `npm run verify:integration` passed |
 | Operator benchmark | Both 20-trial fixture evaluations verified |
-| Real Chrome | `OPENCODE_CONNECT_BROWSER_TEST=1 npm run test:browser`: 91 passed, 0 skipped or failed |
+| Real Chrome | Final normal-worker run: 91 passed, 0 skipped or failed; intermittent earlier failures and diagnostic removal are qualified above |
 | Dependency audit | Immediate full and production `npm audit` reports: zero reported vulnerabilities |
 | Patch review | `git diff --check` passed; unpublished baseline changes reviewed |
 
-The locked installation retains existing transitive deprecation and install-script notices. The existing native directory-loader experimental warning remains independently established. No warnings were suppressed, dependencies upgraded, or approval settings changed in this finishing pass.
+The locked installation retains existing transitive deprecation and install-script notices. The existing native directory-loader experimental warning remains independently established. Warnings and approval settings were preserved. The sole dependency update in this finishing pass pins the development MCP client from 2.2.0 to patched 2.3.1; runtime dependency versions are unchanged. Earlier audit reports returned zero findings, while a later full report identified the advisory above; only the final post-update reports support the final audit result.
 
-The repository's GitHub Actions workflow independently runs installation, source checks, tests, build and the production audit. Verify its result for the published commit; local results do not establish remote CI status.
+The first publication's GitHub Actions run exposed the missing-interpreter shutdown race above after installation and source checks passed. It was reproduced locally with an explicit missing executable, fixed at the startup lifecycle owner, and revalidated. The repository's GitHub Actions workflow independently runs installation, source checks, tests, build and the production audit. Verify its result for the published commit; local results do not establish remote CI status.
 
 ## Deployment boundary
 

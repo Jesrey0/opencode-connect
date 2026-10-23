@@ -42,19 +42,30 @@ test("Linux CDP endpoints require explicit loopback HTTP, port and no credential
   for (const value of ["http://localhost:9222", "http://192.168.1.1:9222", "https://127.0.0.1:9222", "http://127.0.0.1", "http://u:p@127.0.0.1:9222", "http://127.0.0.1:9222/path", "http://127.0.0.1:9222?token=secret"]) assert.throws(() => linuxEndpoint(value));
 });
 
-test("browser is disabled by default and invalid actions never start a worker", async () => {
+test("browser is disabled by default and invalid actions never start a worker", async t => {
   const disabled = new BrowserBackend({ env: {} });
   await assert.rejects(disabled.call("tabs", {}), errorCode("disabled"));
   const backend = new BrowserBackend({ enabled: true, env: {} });
   await assert.rejects(backend.call("action", { action: "evaluate" }), errorCode("invalid_arguments"));
   backend.close();
   await assert.rejects(backend.call("launch", {}), errorCode("closed"));
-  const cancelled = new BrowserBackend({ enabled: true });
-  await assert.rejects(cancelled.call("launch", {}, "owner", AbortSignal.abort()), errorCode("cancelled"));
-  const starting = cancelled.call("tabs", {});
-  cancelled.close();
-  await assert.rejects(starting, errorCode("closed"));
-  assert.equal((cancelled as any).worker, undefined);
+  const temp = await mkdtemp(join(tmpdir(), "browser-preflight-"));
+  t.after(() => rm(temp, { recursive: true, force: true }));
+  const missingPython = join(temp, "missing-python");
+  // Worker shutdown must win during preflight both with and without an
+  // executable. No interpreter is launched, so use Node for the available path.
+  for (const python of [process.execPath, missingPython]) {
+    const cancelled = new BrowserBackend({ enabled: true, env: { OPENCODE_CONNECT_BROWSER_PYTHON: python } });
+    await assert.rejects(cancelled.call("launch", {}, "owner", AbortSignal.abort()), errorCode("cancelled"));
+    const starting = cancelled.call("tabs", {});
+    cancelled.close();
+    await assert.rejects(starting, errorCode("closed"));
+    assert.equal((cancelled as any).worker, undefined);
+    assert.equal(cancelled.snapshot().currentIssue, "Browser connector is closed");
+  }
+  const unavailable = new BrowserBackend({ enabled: true, env: { OPENCODE_CONNECT_BROWSER_PYTHON: missingPython } });
+  t.after(() => unavailable.close());
+  await assert.rejects(unavailable.call("tabs", {}), errorCode("setup_required"));
 });
 
 test("browser close accepts no browser selector and enforces managed Linux ownership", () => {
@@ -542,17 +553,26 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     assert.equal((await backend.call("status", {})).reachable, true);
   });
   await t.test("redacted URL cannot confirm navigation without a document change", async child => {
-    attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
-    const navigationLease = leaseId;
-    child.after(() => backend.call("detach", { leaseId: navigationLease }, "owner"));
-    for (let attempt = 0; attempt < 5; attempt++) {
-      const initial = await act({ action: "navigate", url: pageUrl + `/?token=hidden-${attempt}#fragment`, expected: { type: "readyState", value: "complete" } });
-      assert.equal(initial.verification, "confirmed", `Initial document ${attempt}: ${JSON.stringify(initial)}`);
-      const observed = (await snapshot()).url;
-      assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "navigation", fromUrl: observed } }, "owner")).verification, "timed_out");
-      // A changed query loads a new document with the same public URL.
-      const changed = await act({ action: "navigate", url: pageUrl + `/?token=changed-${attempt}#fragment`, expected: { type: "navigation", fromUrl: observed } });
-      assert.equal(changed.verification, "confirmed", `Changed document ${attempt}: ${JSON.stringify(changed)}`);
+    let stage = "attachment";
+    try {
+      attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
+      const navigationLease = leaseId;
+      child.after(() => backend.call("detach", { leaseId: navigationLease }, "owner"));
+      for (let attempt = 0; attempt < 5; attempt++) {
+        stage = `initial document ${attempt}`;
+        const initial = await act({ action: "navigate", url: pageUrl + `/?token=hidden-${attempt}#fragment`, expected: { type: "readyState", value: "complete" } });
+        assert.equal(initial.verification, "confirmed", `${stage}: ${JSON.stringify(initial)}`);
+        stage = `snapshot ${attempt}`;
+        const observed = (await snapshot()).url;
+        stage = `stationary document ${attempt}`;
+        assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "navigation", fromUrl: observed } }, "owner")).verification, "timed_out");
+        // A changed query loads a new document with the same public URL.
+        stage = `changed document ${attempt}`;
+        const changed = await act({ action: "navigate", url: pageUrl + `/?token=changed-${attempt}#fragment`, expected: { type: "navigation", fromUrl: observed } });
+        assert.equal(changed.verification, "confirmed", `${stage}: ${JSON.stringify(changed)}`);
+      }
+    } catch (error) {
+      throw new Error(`Redacted URL navigation failed at ${stage}`, { cause: error });
     }
   });
   await t.test("an unrelated iframe reload cannot confirm main-document navigation", async child => {

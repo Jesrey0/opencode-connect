@@ -155,6 +155,7 @@ export class BrowserBackend {
     if (this.worker) return;
     this.starting = this.spawnWorker();
     try { await this.starting; } catch (error) {
+      if (this.closed) throw new BrowserError("closed", "Browser connector is closed");
       if (error instanceof BrowserError) {
         this.currentIssue = error.message;
         if (error.code !== "restart_limited" && this.lastIncident?.message !== error.message) this.recordIncident(error.message);
