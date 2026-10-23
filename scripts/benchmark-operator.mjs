@@ -34,11 +34,19 @@ const server = createServer(new OpenCodeBackend(connect), new HostBackend(connec
 const client = new Client({ name: "operator-fixture-benchmark", version: "1" });
 const [a, b] = InMemoryTransport.createLinkedPair();
 await server.connect(a); await client.connect(b);
+const { tools } = await client.listTools();
+const bytes = value => Buffer.byteLength(JSON.stringify(value));
+const catalog = {
+  scope: "Core MCP tools; optional browser tools are not registered in this fixture",
+  tools: tools.length, totalBytes: bytes(tools),
+  inputSchemaBytes: tools.reduce((total, tool) => total + bytes(tool.inputSchema), 0),
+  outputSchemaBytes: tools.reduce((total, tool) => total + bytes(tool.outputSchema), 0),
+};
 const samples = { readiness: [], recovery: [] };
 const measure = async detail => {
   const before = { requests: native.requests.length, connections };
   const start = performance.now();
-  const response = await client.callTool({ name: "status", arguments: { detail } });
+  const response = await client.callTool({ name: `status.${detail}`, arguments: {} });
   const elapsedMs = performance.now() - start;
   assert.notEqual(response.isError, true);
   const result = response.structuredContent;
@@ -76,7 +84,7 @@ try {
   console.log(JSON.stringify({
     observedAt: new Date().toISOString(), layer: "local MCP SDK with in-memory transport and deterministic native fetch fixture",
     node: process.version, fixture: { totalSessions: recent.length, selectedRecentSessions: selectedSessions, activeSessions: 0, messagesPerSession: 2, injectedLatencyMs: 0 },
-    readiness: summarize(samples.readiness), recovery: summarize(samples.recovery),
+    catalog, readiness: summarize(samples.readiness), recovery: summarize(samples.recovery),
     limitations: "Measures fixture processing and serialization, not network/service latency, ChatGPT routing, operator reasoning, browser health, live recovery or end-to-end workflow acceptance.",
   }, null, 2));
 } finally { await client.close(); await server.close(); }

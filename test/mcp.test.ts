@@ -89,6 +89,42 @@ test("focused host and command tools have unique purpose-specific schemas and tr
   } finally { await fixture.close(); }
 });
 
+
+test("focused output contracts reject unrelated operation results and retain typed errors", async () => {
+  const fixture = await mcpFixture(nativeFixture(() => { throw new Error("output discovery must not access runtime"); }));
+  const location = { directory: "/workspace" };
+  const page = { location, data: [], offset: 0, nextOffset: null, total: 0, fingerprint: "f", nextCall: null };
+  const command = { location, id: "job", cwd: location.directory, status: "running", pid: 1, exitCode: null, retention: "fixture", cursor: 0, cursorUnit: "bytes" };
+  const readiness = { detail: "readiness", ready: true, connector: { version: "1", buildId: "source", release: false }, components: { opencode: { ready: true, release: "2", serverPid: 1, error: null }, events: { enabled: false, storageFailed: null }, browser: null } };
+  const recovery = { ready: true, opencodeRelease: "2", serverPid: 1, workers: [], pendingActions: [] };
+  const cases = [
+    ["status.readiness", readiness, recovery],
+    ["status.recovery", recovery, readiness],
+    ["host.read", { type: "read", location, path: "/workspace/a", size: 0, fingerprint: "f", nextCall: null }, { type: "find", location, data: [], limit: 1, possiblyTruncated: false, search: "a", nextCall: null }],
+    ["host.list", { type: "list", ...page }, { type: "vcsStatus", ...page }],
+    ["host.worktreeList", { projectId: "p", ...page }, { action: "refresh", projectId: "p", persisted: true, data: [], offset: 0, nextOffset: null, total: 0, fingerprint: "f" }],
+    ["host.worktreeCreate", { action: "create", projectId: "p", directory: "/workspace/new", persisted: true }, { action: "remove", projectId: "p", directory: "/workspace/new", persisted: true, removed: true }],
+    ["command.startShell", { ...command, kind: "shell" }, { ...command, kind: "pty" }],
+    ["command.remove", { kind: "pty", location, id: "job", removed: true }, { kind: "pty", location, id: "job", cwd: "/workspace", status: "running", pid: 1, exitCode: null, resized: true }],
+    ["command.interrupt", { kind: "pty", location, id: "job", action: "interrupt", inputSent: true, acknowledged: false, delivery: "unacknowledged" }, { kind: "pty", location, id: "job", action: "ctrlD", inputSent: true, acknowledged: false, delivery: "unacknowledged" }],
+    ["opencode.cancelForm", { action: "cancelForm", sessionId: "s", formId: "f", cancelled: true }, { action: "delete", runtime: "opencode", sessionId: "s", deleted: true }],
+  ] as const;
+  try {
+    const { tools } = await fixture.client.listTools();
+    const provider = new AjvJsonSchemaValidator();
+    for (const [name, ownResult, unrelatedResult] of cases) {
+      const validate = provider.getValidator(tools.find(tool => tool.name === name)!.outputSchema! as JsonSchemaType);
+      assert.equal(validate(ownResult).valid, true, `${name} accepts its success result`);
+      assert.equal(validate(unrelatedResult).valid, false, `${name} rejects another operation's success result`);
+    }
+    for (const tool of tools) {
+      const validate = provider.getValidator(tool.outputSchema! as JsonSchemaType);
+      assert.equal(validate({ error: "safe failure", mutationMayHaveOccurred: false }).valid, true, tool.name);
+      assert.equal(validate({ error: 1 }).valid, false, `${tool.name} retains typed errors`);
+    }
+  } finally { await fixture.close(); }
+});
+
 test("session action tools expose selector-free contracts and dispatch each exact native action", async () => {
   class DispatchBackend extends OpenCodeBackend {
     readonly calls: Record<string, unknown>[] = [];

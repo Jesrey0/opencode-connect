@@ -173,7 +173,7 @@ export class OpenCodeBackend {
     if (!input.task.trim()) throw new Error("task must not be empty");
     if (input.sessionId && input.forkFromSessionId) throw new Error("sessionId and forkFromSessionId are mutually exclusive");
     if (input.beforeMessageId && !input.forkFromSessionId) throw new Error("beforeMessageId requires forkFromSessionId");
-    if (!input.sessionId && !input.forkFromSessionId && !input.cwd) throw new Error("fresh opencode.start requires an explicit cwd");
+    if (!input.sessionId && !input.forkFromSessionId && !input.cwd) throw new Error("fresh work requires an explicit cwd");
     if ((input.sessionId || input.forkFromSessionId) && input.cwd) throw new Error("resume and fork inherit cwd and reject cwd overrides");
     if ((input.sessionId || input.forkFromSessionId) && input.permissions) throw new Error("permissions are only valid for fresh sessions");
     if ((input.sessionId || input.forkFromSessionId) && input.variant !== undefined) throw new Error("resume and fork inherit canonical variant and reject overrides");
@@ -188,7 +188,7 @@ export class OpenCodeBackend {
     try {
     if (input.sessionId) {
       session = await client.session.get({ sessionID: input.sessionId });
-      if (active[session.id]) throw new Error("session is already running; use opencode.act steer or interrupt");
+      if (active[session.id]) throw new Error("session is already running; use opencode.steer or opencode.interrupt");
       if (input.model !== undefined && (!session.model || modelKey(session.model) !== input.model)) {
         throw new Error(`resume model must match canonical session model ${session.model ? modelKey(session.model) : "<unset>"}`);
       }
@@ -476,7 +476,7 @@ export class OpenCodeBackend {
     }
     if (input.action === "steer") {
       const active = await client.session.active();
-      if (!active[input.sessionId]) throw new Error("steer requires an active session; use opencode.start to continue an idle session");
+      if (!active[input.sessionId]) throw new Error("steer requires an active session; use opencode.continue for idle work");
       checkPromptSize(input.instruction, input);
       const prompt = await client.session.prompt({ sessionID: input.sessionId, text: input.instruction, ...attachments(input), delivery: "steer", resume: true });
       return { action: input.action, sessionId: input.sessionId, messageId: prompt.id };

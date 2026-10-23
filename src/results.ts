@@ -31,19 +31,22 @@ export const errorOutputSchema = z.object({
   mutationMayHaveOccurred: z.boolean().optional(),
 }).strict();
 
+const recoveryOutputSchema = z.object({ ready: z.literal(true), opencodeRelease: id, serverPid: z.number().int(), workers: z.array(z.object({ sessionId: id, cwd: id, status: session.shape.status, executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "nativeTurnHistory", "historyReplay"]), outcomeEvidence: nativeObject, retry, retryReadError: z.string().nullable(), nextCall }).loose()), pendingActions: z.array(nativeObject), events: nativeObject.optional() }).strict();
+const readinessOutputSchema = z.object({
+  detail: z.literal("readiness"), ready: z.boolean(),
+  connector: z.object({ version: id, buildId: id, release: z.boolean() }).strict(),
+  components: z.object({
+    opencode: z.object({ ready: z.boolean(), release: id.nullable(), serverPid: z.number().int().nullable(), error: z.string().nullable() }).strict(),
+    events: z.object({ enabled: z.boolean(), storageFailed: z.boolean().nullable() }).strict(),
+    browser: z.object({ scope: z.literal("supervisor"), enabled: z.boolean(), worker: z.enum(["running", "stopped"]), currentIssue: z.string().nullable() }).strict().nullable(),
+  }).strict(),
+}).strict();
+const worktreeListOutputSchema = z.object({ projectId: id, location, ...pageShape, nextCall }).strict();
+
 export const outputSchemas = {
-  status: z.union([
-    z.object({ ready: z.literal(true), opencodeRelease: id, serverPid: z.number().int(), workers: z.array(z.object({ sessionId: id, cwd: id, status: session.shape.status, executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "nativeTurnHistory", "historyReplay"]), outcomeEvidence: nativeObject, retry, retryReadError: z.string().nullable(), nextCall }).loose()), pendingActions: z.array(nativeObject), events: nativeObject.optional() }).strict(),
-    z.object({
-      detail: z.literal("readiness"), ready: z.boolean(),
-      connector: z.object({ version: id, buildId: id, release: z.boolean() }).strict(),
-      components: z.object({
-        opencode: z.object({ ready: z.boolean(), release: id.nullable(), serverPid: z.number().int().nullable(), error: z.string().nullable() }).strict(),
-        events: z.object({ enabled: z.boolean(), storageFailed: z.boolean().nullable() }).strict(),
-        browser: z.object({ scope: z.literal("supervisor"), enabled: z.boolean(), worker: z.enum(["running", "stopped"]), currentIssue: z.string().nullable() }).strict().nullable(),
-      }).strict(),
-    }).strict(),
-  ]),
+  status: z.union([recoveryOutputSchema, readinessOutputSchema]),
+  readiness: readinessOutputSchema,
+  recovery: recoveryOutputSchema,
   hostInspect: z.discriminatedUnion("type", [
     z.object({ type: z.enum(["list", "vcsStatus", "vcsBranch", "commands"]), location, ...pageShape, nextCall, shellListScope: z.string().optional(), search: z.string().nullable().optional() }).strict(),
     z.object({ type: z.literal("read"), location, path: id, size: count, fingerprint: id, nextCall, encoding: z.enum(["utf8", "base64"]).optional(), text: z.string().optional(), data: z.string().optional(), cursorUnit: z.literal("bytes").optional(), offset: count.optional(), nextOffset: count.nullable().optional() }).strict(),
@@ -53,8 +56,9 @@ export const outputSchemas = {
     z.object({ type: z.enum(["terminalScreen", "terminalSnapshot"]), location, nextCall, sessionId: id, available: z.boolean().optional(), id: id.optional(), view: z.enum(["renderedScreen", "renderedSnapshot"]).optional(), size: nativeObject.optional(), screenCursor: nativeObject.optional(), checkpointIncluded: z.literal(false).optional(), text: z.string().optional(), textPaging: textPaging.optional(), truncated: z.boolean().optional(), cwd: id.optional(), status: z.string().optional(), pid: z.number().optional(), exitCode: z.number().nullable().optional(), output: nativeObject.optional() }).strict(),
   ]),
   hostWrite: z.object({ location, path: id, created: z.boolean(), persisted: z.literal(true), size: count, fingerprint: id, atomicCAS: z.literal(false), containment: z.string() }).strict(),
+  worktreeList: worktreeListOutputSchema,
   hostWorktree: z.union([
-    z.object({ projectId: id, location, ...pageShape, nextCall }).strict(),
+    worktreeListOutputSchema,
     z.object({ action: z.enum(["create", "remove"]), projectId: id, directory: id, persisted: z.literal(true), removed: z.literal(true).optional() }).strict(),
     z.object({ action: z.literal("refresh"), projectId: id, persisted: z.literal(true), ...pageShape }).strict(),
   ]),
@@ -98,3 +102,14 @@ export const outputSchemas = {
     z.object({ action: z.literal("delete"), runtime: z.enum(["opencode", "codex"]), sessionId: id, deleted: z.literal(true) }).strict(),
   ]),
 };
+
+// Derive each public operation's output from the backend's authoritative union.
+// Shared enum variants are narrowed too, so another operation cannot validate.
+export function outputVariant(schema: z.ZodUnion, key: string, value: string | boolean): z.ZodObject {
+  const matches: z.ZodObject[] = [];
+  for (const option of schema.options) {
+    if (option instanceof z.ZodObject && option.shape[key]?.safeParse(value).success) matches.push(option);
+  }
+  if (matches.length !== 1) throw new Error(`Expected one output variant for ${key}=${value}`);
+  return matches[0]!.extend({ [key]: z.literal(value) });
+}

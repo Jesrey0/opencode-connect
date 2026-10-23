@@ -77,7 +77,7 @@ restart OpenCode.
    implementation. `/health` establishes connector identity/connectivity, not plugin identity.
 3. Independently verify native agent discovery, non-Codex session operations,
    Codex direct mode/approval behavior with harmless tasks, read-only quota, and
-   ChatGPT-to-MCP `status`/`opencode.query`. Record release and native process identities.
+   ChatGPT-to-MCP `status.readiness`, `opencode.runtime` and representative focused tools. Record release and native process identities.
 4. Accept only after both runtimes and representative end-to-end operations pass.
    Refresh the ChatGPT connector only if its connection/catalog is actually stale.
 

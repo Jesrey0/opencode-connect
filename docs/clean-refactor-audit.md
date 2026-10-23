@@ -1,5 +1,9 @@
 # Architecture and clean-refactor audit
 
+Status updated 2026-10-23: see the [modernization merge review](refactor-merge-review.md)
+for finishing changes, final verification and the source/deployment boundary. The
+checkpoint observations below retain their original scope and dates.
+
 Audit date: 2026-10-22. Source baseline: `3796624`, isolated branch
 `refactor/astra-clean-20261022`. Source, deterministic tests, installed contracts,
 and live observations are separate evidence below.

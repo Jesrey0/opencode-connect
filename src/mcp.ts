@@ -10,7 +10,7 @@ import { safeError, AdmissionError, ConnectorError, SessionDeleteError } from ".
 import { ProtocolErrorCode, ProtocolError } from "@modelcontextprotocol/server";
 import { Events, EVENT_NAME, eventArgumentsSchema } from "./events.js";
 import type { ServerContext, ContentBlock } from "@modelcontextprotocol/server";
-import { errorOutputSchema, outputSchemas } from "./results.js";
+import { errorOutputSchema, outputSchemas, outputVariant } from "./results.js";
 import { CODEX_MODES } from "./codex.js";
 import { BrowserBackend } from "./browser/backend.js";
 import { registerBrowserTools } from "./browser/tools.js";
@@ -179,7 +179,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   registerTool("status.readiness", {
     title: "Check Connector Readiness",
     description: "Check connector identity and OpenCode availability without reading worker history or probing browser readiness. Does not verify the Codex plugin or browser leases.",
-    inputSchema: z.object({}).strict(), outputSchema: outputSchemas.status,
+    inputSchema: z.object({}).strict(), outputSchema: outputSchemas.readiness,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async () => {
     const { version, buildId, release } = await loadBuildInfo();
@@ -202,7 +202,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   registerTool("status.recovery", {
     title: "Recover Worker Status",
     description: "Read active/recent native worker inventory and result evidence for the selected runtime. Execution termination does not prove assistant success.",
-    inputSchema: z.object({ runtime: runtimeSchema }).strict(), outputSchema: outputSchemas.status,
+    inputSchema: z.object({ runtime: runtimeSchema }).strict(), outputSchema: outputSchemas.recovery,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async ({ runtime }) => structuredResult({ ...await backend.status(runtime), ...(events ? { events: events.snapshot() } : {}) }));
 
@@ -222,7 +222,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     const variant = variantsOf(hostInspectSchema).find((schema) => (schema.shape as any).type.value === type)!;
     registerTool(name, {
       title: `Host ${type} inspection`, description,
-      inputSchema: variant.omit({ type: true } as never), outputSchema: outputSchemas.hostInspect,
+      inputSchema: variant.omit({ type: true } as never), outputSchema: outputVariant(outputSchemas.hostInspect, "type", type),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     }, async (input) => {
       const result = await host.inspect({ ...input, type } as any);
@@ -244,7 +244,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["host.worktreeRefresh", "refresh", "Refresh native project worktree inventory. This updates cached inventory but does not create or remove worktrees.", false, false],
   ] as const) {
     const variant = variantsOf(worktreeSchema).find((schema) => (schema.shape as any).action.value === action)!;
-    registerTool(name, { title: `Native worktree ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: outputSchemas.hostWorktree,
+    registerTool(name, { title: `Native worktree ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: action === "list" ? outputSchemas.worktreeList : outputVariant(outputSchemas.hostWorktree, "action", action),
       annotations: { readOnlyHint: readOnly, destructiveHint: destructive, openWorldHint: false, idempotentHint: readOnly || action === "refresh" },
     }, async (input) => structuredResult(await host.worktree({ ...input, action } as any)));
   }
@@ -254,7 +254,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["command.startPersistentPty", "persistentPty", "Start an experimental session-bound PTY. cwd must match the session; native retention and observer cleanup apply."],
   ] as const) {
     const variant = variantsOf(commandStartSchema).find((schema) => (schema.shape as any).kind.value === kind)!;
-    registerTool(name, { title: `Start ${kind} command`, description, inputSchema: variant.omit({ kind: true } as never), outputSchema: outputSchemas.commandStart,
+    registerTool(name, { title: `Start ${kind} command`, description, inputSchema: variant.omit({ kind: true } as never), outputSchema: outputSchemas.commandStart.extend({ kind: z.literal(kind) }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
     }, async (input) => structuredResult(await host.start({ ...input, kind } as any)));
   }
@@ -273,7 +273,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["command.ctrlD", "ctrlD", "Send Ctrl-D as a terminal character; it is not pipe EOF and has no durable acknowledgement."],
   ] as const) {
     const variant = variantsOf(commandControlSchema).find((schema) => (schema.shape as any).action.value === action)!;
-    registerTool(name, { title: `Command ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: outputSchemas.commandControl,
+    registerTool(name, { title: `Command ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: action === "remove" ? outputVariant(outputSchemas.commandControl, "removed", true) : action === "resize" ? outputVariant(outputSchemas.commandControl, "resized", true) : outputVariant(outputSchemas.commandControl, "action", action),
       annotations: { readOnlyHint: false, destructiveHint: action === "remove" || action === "input" || action === "interrupt" || action === "ctrlD", openWorldHint: action !== "resize", idempotentHint: action === "resize" },
     }, async (input) => structuredResult(await host.control({ ...input, action } as any)));
   }
@@ -408,7 +408,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       title: `OpenCode ${action}`,
       description,
       inputSchema,
-      outputSchema: outputSchemas.act,
+      outputSchema: outputVariant(outputSchemas.act, "action", action),
       annotations: { readOnlyHint, destructiveHint, openWorldHint, idempotentHint },
     }, async (input) => structuredResult(await backend.act({ ...input, action } as any)));
   }

@@ -93,9 +93,13 @@ echo "$@" >> ${JSON.stringify(log)}
 if [ "$2" = show ]; then printf 'MainPID=0\nActiveState=inactive\n'; exit 0; fi
 exit 17
 `, { mode: 0o755 });
+  const reserved = httpServer();
+  reserved.listen(0, "127.0.0.1"); await once(reserved, "listening");
+  const address = reserved.address(); assert.ok(address && typeof address !== "string");
+  await new Promise<void>(resolve => reserved.close(() => resolve()));
   const backend = new BrowserBackend({ enabled: true,
-    env: { ...process.env, PATH: temp + ":" + process.env.PATH,
-      OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT: "http://127.0.0.1:29999" } });
+    env: { ...process.env, PATH: temp + ":" + process.env.PATH, XDG_DATA_HOME: temp,
+      OPENCODE_CONNECT_BROWSER_LINUX_ENDPOINT: `http://127.0.0.1:${address.port}` } });
   t.after(() => backend.close());
   const result = await backend.call("close", {});
   assert.deepEqual(result, { browser: "linux", closed: true, alreadyClosed: true, reachable: false });
@@ -537,18 +541,24 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     await backend.call("detach", { leaseId }, "owner");
     assert.equal((await backend.call("status", {})).reachable, true);
   });
-  await t.test("redacted URL cannot confirm navigation without a document change", async () => {
+  await t.test("redacted URL cannot confirm navigation without a document change", async child => {
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
-    await act({ action: "navigate", url: pageUrl + "/?token=hidden#fragment", expected: { type: "readyState", value: "complete" } });
-    const observed = (await snapshot()).url;
-    assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "navigation", fromUrl: observed } }, "owner")).verification, "timed_out");
-    // A different query forces a document load while preserving the redacted
-    // URL. Repeating an identical fragment URL can be a same-document no-op.
-    assert.equal((await act({ action: "navigate", url: pageUrl + "/?token=changed#fragment", expected: { type: "navigation", fromUrl: observed } })).verification, "confirmed");
-    await backend.call("detach", { leaseId }, "owner");
+    const navigationLease = leaseId;
+    child.after(() => backend.call("detach", { leaseId: navigationLease }, "owner"));
+    for (let attempt = 0; attempt < 5; attempt++) {
+      const initial = await act({ action: "navigate", url: pageUrl + `/?token=hidden-${attempt}#fragment`, expected: { type: "readyState", value: "complete" } });
+      assert.equal(initial.verification, "confirmed", `Initial document ${attempt}: ${JSON.stringify(initial)}`);
+      const observed = (await snapshot()).url;
+      assert.equal((await backend.call("wait", { leaseId, timeoutMs: 300, condition: { type: "navigation", fromUrl: observed } }, "owner")).verification, "timed_out");
+      // A changed query loads a new document with the same public URL.
+      const changed = await act({ action: "navigate", url: pageUrl + `/?token=changed-${attempt}#fragment`, expected: { type: "navigation", fromUrl: observed } });
+      assert.equal(changed.verification, "confirmed", `Changed document ${attempt}: ${JSON.stringify(changed)}`);
+    }
   });
-  await t.test("an unrelated iframe reload cannot confirm main-document navigation", async () => {
+  await t.test("an unrelated iframe reload cannot confirm main-document navigation", async child => {
     attached = await backend.call("attach", { targetId: one.id, controlMode: "control" }, "owner"); leaseId = attached.leaseId as string;
+    const navigationLease = leaseId;
+    child.after(() => backend.call("detach", { leaseId: navigationLease }, "owner"));
     await act({ action: "navigate", url: pageUrl + "/ad-reload", expected: { type: "readyState", value: "complete" } });
     assert.ok(releaseIframe, "Iframe is loaded and waiting for the test trigger");
     const waiting = backend.call("wait", { leaseId, timeoutMs: 3000, condition: { type: "navigation", fromUrl: pageUrl + "/ad-reload" } }, "owner");
@@ -557,7 +567,6 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
     releaseIframe();
     assert.equal((await waiting).verification, "timed_out");
     assert.ok(iframeReloads > 0, "Fixture iframe actually reloaded");
-    await backend.call("detach", { leaseId }, "owner");
   });
   await t.test("separate HTTP requests share a lease and enforce verified ingress ownership", async () => {
     const events = await Events.open(join(temp, "events/store.json"), { authenticate: async context => ({ principal: context, clientId: "chatgpt", grantId: context, resource: "https://example.test/opencode-connect/mcp", scope: "opencode-connect:access", grantContext: "opaque" }) });
