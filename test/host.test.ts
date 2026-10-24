@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HostBackend, imageMime } from "../src/host.js";
 import { fingerprint, page } from "../src/bounds.js";
-import { nativeFixture, session } from "./native-fixture.js";
+import { nativeFixture } from "./native-fixture.js";
 
 test("shell native admission, byte cursors, exit/drain, timeout, remove and missing handle", async () => {
   let status: "running" | "exited" | "timeout" = "running";

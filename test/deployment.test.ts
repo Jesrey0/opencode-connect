@@ -554,7 +554,6 @@ test("prepare never replaces corrupt immutable builds, including missing records
   const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
   const base = await tempDir("opencode-deploy-protected-");
   try {
-    const { buildId } = await hashSourceTree(src);
     const { path: dir } = await seedBuild(base, "unused", src);
     const paths = deploymentPaths(base);
     await pointLinkAtomically(paths.currentLink, dir);

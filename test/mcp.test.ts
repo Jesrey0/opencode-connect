@@ -472,8 +472,8 @@ test("Codex start rejects OpenCode-only fields at MCP admission while OpenCode t
 test("focused start and inspect schemas reject cross-purpose and runtime-invalid inputs before dispatch", async () => {
   let starts = 0, inspects = 0;
   class DispatchBackend extends OpenCodeBackend {
-    override async start(input: Parameters<OpenCodeBackend["start"]>[0]): Promise<never> { starts++; throw new Error("start dispatched"); }
-    override async inspect(input: Parameters<OpenCodeBackend["inspect"]>[0]): Promise<never> { inspects++; throw new Error("inspect dispatched"); }
+    override async start(): Promise<never> { starts++; throw new Error("start dispatched"); }
+    override async inspect(): Promise<never> { inspects++; throw new Error("inspect dispatched"); }
   }
   const native = nativeFixture(() => { throw new Error("invalid schema input reached native access"); });
   const fixture = await mcpFixture(native, new DispatchBackend(native.connect));
