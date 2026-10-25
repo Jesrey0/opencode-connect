@@ -21,6 +21,32 @@ ChatGPT / 0xOperator
         -> codex-sessions plugin RPC -> native Codex ACP sessions
 ```
 
+## Deployment scope
+
+OpenCode Connect is a **self-hosted, single-user integration**, not a hosted
+service or one-click MCP installation. The diagram above shows one deployment
+topology: `host-ingress` is a separately managed service, not part of this
+repository, and its route and port are deployment-specific examples. Discovering
+the MCP tool schema does not establish that the backing system is deployable.
+
+Operators must independently provide and maintain:
+
+- **Host and OpenCode:** A persistent host with Node 24+ running the connector,
+  plus a private OpenCode service compatible with the pinned 2.0.24 client.
+- **ChatGPT connectivity:** An HTTPS ingress with appropriate OAuth/authentication
+  and routing to the connector's private `/mcp` endpoint. Never expose the
+  loopback connector or native OpenCode API as an unauthenticated public service.
+- **Workers:** OpenCode's provider/model configuration and permissions. Direct
+  Codex sessions additionally require loading the included native plugin into
+  OpenCode and configuring its Codex runtime; connector and plugin lifecycles
+  remain independent.
+- **Optional browser access:** A separately configured Chrome environment;
+  see [Browser capability](docs/browser-capability.md).
+
+See [Architecture](docs/architecture.md), [MCP contract](docs/mcp-contract.md)
+and [Release lifecycle](docs/release-cutover.md) for component boundaries and
+validation. Local development does not require the public ChatGPT ingress.
+
 ## General Chat workflow
 
 Enable OpenCode Connect in the conversation and state the objective, authorized
