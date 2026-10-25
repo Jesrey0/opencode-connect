@@ -40,6 +40,7 @@ the explicit setup environment lives outside immutable builds. See
 
 ## Dependency rules
 - The root package pins @opencode/client and the plugin pins @opencode/plugin to exactly the same 2.0.24 release; scripts/verify-integration.mjs enforces this.
+- A root override makes the pinned plugin use the connector's patched Zod range, replacing its vulnerable exact dependency without changing the native OpenCode version.
 - The connector must not import the plugin's implementation to run a Codex turn; RPC remains the sole runtime interface. The source verifier imports the real connector declaration using Node 24's native type stripping and the installed workspace's authoritative direct.js definition without running setup, checks installed/locked versions and exact method sets. test/codex.test.ts crosses the real native client/MCP boundary into injected plugin handlers, without a model turn. Plugin helper imports also go directly to their owners, not through index.js or direct.js aliases.
 - The root package-lock.json owns both package dependency trees. Avoid reintroducing a nested lockfile.
 - Hashing and copying share one inventory: root manifests/tsconfig, all regular files under src/ and scripts/, and the plugin manifest and src/. Tests/docs/node_modules/dist are not staged. Runtime assets cannot be shipped unhashed; symlinked source inputs fail explicitly. Plugin code changes require a new release ID.

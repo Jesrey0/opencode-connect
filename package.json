@@ -34,7 +34,7 @@
     "@modelcontextprotocol/server": "2.3.1",
     "@opencode/client": "2.0.24",
     "express": "5.2.1",
-    "zod": "^4.6.5"
+    "zod": "^4.6.6"
   },
   "devDependencies": {
     "@modelcontextprotocol/client": "2.3.1",
@@ -42,6 +42,11 @@
     "@types/node": "^26.6.3",
     "tsx": "^4.23.15",
     "typescript": "^7.0.2"
+  },
+  "overrides": {
+    "@opencode/plugin@2.0.24": {
+      "zod": "$zod"
+    }
   },
   "workspaces": [
     "packages/codex-plugin"
