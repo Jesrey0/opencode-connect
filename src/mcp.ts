@@ -20,7 +20,7 @@ const opencodeRuntimeSchema = z.literal("opencode").optional().describe("OpenCod
 const codexUnsupportedStartFields = ["model", "agent", "variant", "permissions", "forkFromSessionId", "beforeMessageId", "title", "files", "agents", "skills"] as const;
 
 const pageShape = { offset: z.number().int().min(0).optional().meta({ default: 0 }), limit: z.number().int().min(1).max(50).optional().describe("Page size: integer 1..50; defaults to 25.").meta({ default: 25 }), fingerprint: z.string().min(1).optional() };
-const textShape = { textOffset: z.number().int().min(0).optional().describe("UTF-16 text offset; nonzero continuation requires textFingerprint.").meta({ default: 0 }), textLimit: z.number().int().min(1).max(12000).optional().meta({ default: 12000 }), textFingerprint: z.string().min(1).optional() };
+const textShape = { textOffset: z.number().int().min(0).optional().describe("UTF-16 text offset; nonzero continuation requires textFingerprint.").meta({ default: 0 }), textLimit: z.number().int().min(1).max(12000).optional().describe("Text page size: integer 1..12,000 UTF-16 code units; defaults to 12,000.").meta({ default: 12000 }), textFingerprint: z.string().min(1).optional() };
 const mentionSchema = z.object({ start: z.number().int().min(0), end: z.number().int().min(0), text: z.string().max(65536) }).strict();
 const attachmentShape = {
   files: z.array(z.object({ uri: z.string().min(1).max(90000), name: z.string().max(4096).optional(), description: z.string().max(2000).optional(), mention: mentionSchema.optional() }).strict()).max(20).optional(),
@@ -282,7 +282,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
     }, async (input) => structuredResult(await host.start({ ...input, kind } as any)));
   }
-  const commandReadShape = { cwd: handleShape.cwd, id: handleShape.id, cursor: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(65536).optional(), waitMs: z.number().int().min(0).max(2000).optional() };
+  const commandReadShape = { cwd: handleShape.cwd, id: handleShape.id, cursor: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(65536).optional(), waitMs: z.number().int().min(0).max(2000).optional().describe("PTY wait in milliseconds: integer 0..2,000; defaults to 250. Ignored for shell reads.") };
   registerTool("command.read", {
     title: "Read Native OpenCode Command",
     description: "Read bounded shell or ordinary PTY replay by saved handle/cursor. Detach or unverified metadata never proves exit or drain. Persistent PTYs require command.observePersistentPty.",

@@ -91,6 +91,28 @@ test("focused host and command tools have unique purpose-specific schemas and tr
   } finally { await fixture.close(); }
 });
 
+test("discovery states text and command wait limits in field descriptions as well as JSON Schema", async () => {
+  const fixture = await mcpFixture(nativeFixture(() => { throw new Error("discovery must not access runtime"); }));
+  try {
+    const { tools } = await fixture.client.listTools();
+    for (const name of ["opencode.skill", "opencode.message", "opencode.inspectResult"]) {
+      const property = tools.find(tool => tool.name === name)!.inputSchema.properties!.textLimit as { minimum: number; maximum: number; default: number; description: string };
+      assert.equal(property.minimum, 1, name);
+      assert.equal(property.maximum, 12_000, name);
+      assert.equal(property.default, 12_000, name);
+      assert.match(property.description, /12,?000/);
+      assert.match(property.description, /UTF-16/);
+    }
+    for (const name of ["command.read", "command.observePersistentPty"]) {
+      const property = tools.find(tool => tool.name === name)!.inputSchema.properties!.waitMs as { minimum: number; maximum: number; description: string };
+      assert.equal(property.minimum, 0, name);
+      assert.equal(property.maximum, 2_000, name);
+      assert.match(property.description, /2,?000/);
+      assert.match(property.description, /250/);
+    }
+  } finally { await fixture.close(); }
+});
+
 
 test("focused output contracts reject unrelated operation results and retain typed errors", async () => {
   const fixture = await mcpFixture(nativeFixture(() => { throw new Error("output discovery must not access runtime"); }));

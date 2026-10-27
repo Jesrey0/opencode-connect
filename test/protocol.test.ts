@@ -445,6 +445,49 @@ function pngChunk(name: string, bytes: Buffer) {
   return Buffer.concat([size, payload, checksum]);
 }
 
+test("concurrent HTTP file reads keep responses isolated, including when one native read fails", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "opencode-concurrent-read-"));
+  const files = Array.from({ length: 5 }, (_, index) => `file-${index}.txt`);
+  await Promise.all(files.map(file => writeFile(join(cwd, file), file)));
+  let active = 0, peak = 0, failFile: string | null = null;
+  const native = nativeFixture(async request => {
+    if (request.path === "/api/location") return { directory: cwd, project: { id: "p", directory: cwd, canonical: cwd } };
+    if (!request.path.startsWith("/api/fs/read/")) throw new Error(`unexpected request ${request.path}`);
+    const file = files.find(name => request.path.includes(name));
+    assert.ok(file);
+    active += 1; peak = Math.max(peak, active);
+    try {
+      await new Promise(resolve => setTimeout(resolve, 20));
+      if (file === failFile) throw new Error("private upstream failure");
+      return new Response(`content for ${file}`, { headers: { "content-type": "application/octet-stream" } });
+    } finally { active -= 1; }
+  });
+  const http = await httpFixture(native);
+  try {
+    const readAll = () => Promise.all(files.map(path => http.send("tools/call", { name: "host.read", arguments: { cwd, path } })));
+    const successful = await readAll();
+    assert.ok(peak > 1, "native reads actually overlapped");
+    for (const [index, response] of successful.entries()) {
+      assert.equal(response.status, 200);
+      assert.notEqual(response.reply.result.isError, true);
+      assert.equal(response.reply.result.structuredContent.text, `content for ${files[index]}`);
+    }
+    failFile = files[2];
+    const mixed = await readAll();
+    for (const [index, response] of mixed.entries()) {
+      assert.equal(response.status, 200);
+      if (index === 2) {
+        assert.equal(response.reply.result.isError, true);
+        assert.match(response.reply.result.structuredContent.error, /native operation failed/);
+        assert.equal(JSON.stringify(response.reply).includes("private upstream failure"), false);
+      } else {
+        assert.notEqual(response.reply.result.isError, true);
+        assert.equal(response.reply.result.structuredContent.text, `content for ${files[index]}`);
+      }
+    }
+  } finally { await http.close(); await rm(cwd, { recursive: true, force: true }); }
+});
+
 test("HTTP image tool retains its separate 1 MiB media allowance above the structured JSON ceiling", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "opencode-protocol-image-"));
   await writeFile(join(cwd, "image.png"), "fixture");

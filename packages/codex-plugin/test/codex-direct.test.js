@@ -49,7 +49,7 @@ function turnReader(turns = {}, metadata = {}) {
   }
 }
 
-function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, permissions, toolCall, permissionSessionId, deleteNoop = false } = {}) {
+function backend({ outputOverride, outputMessages, omitMessageIds = false, initialModeId = "agent", modes = ALL_MODES, permissions, toolCall, permissionSessionId, deleteNoop = false } = {}) {
   const persisted = new Map(), calls = [], cancels = new Map(), modeState = new Map(), permissionRequests = []
   let sequence = 0
   const app = new AgentApp({ name: "persistent-codex-test" })
@@ -69,7 +69,10 @@ function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, p
   app.onRequest("session/load", async ({ params, client }) => {
     const s = persisted.get(params.sessionId)
     if (!s) throw new RequestError(-32000, "missing")
-    for (const m of s.messages) await client.notify("session/update", { sessionId: s.sessionId, update: { sessionUpdate: `${m.role}_message_chunk`, messageId: m.id, content: { type: "text", text: m.text } } })
+    for (const m of s.messages) {
+      const role = m.role === "assistant" ? "agent" : m.role
+      await client.notify("session/update", { sessionId: s.sessionId, update: { sessionUpdate: `${role}_message_chunk`, ...(m.id ? { messageId: m.id } : {}), content: { type: "text", text: m.text } } })
+    }
     // A loaded session resets to the initial mode regardless of what it ran under.
     modeState.set(s.sessionId, initialModeId)
     return { modes: modeStateFor(s.sessionId) }
@@ -123,10 +126,12 @@ function backend({ outputOverride, initialModeId = "agent", modes = ALL_MODES, p
       }
       if (outcomes.some(o => o.outcome.outcome === "cancelled")) return { stopReason: "cancelled" }
     }
-    const output = outputOverride ?? (text === "recall" ? s.messages[0].text : text)
-    const id = `assistant-${++sequence}`
-    for (const text of [output.slice(0, 2), output.slice(2)]) await client.notify("session/update", { sessionId: s.sessionId, update: { sessionUpdate: "agent_message_chunk", messageId: id, content: { type: "text", text } } })
-    s.messages.push({ role: "agent", id, text: output })
+    const outputs = outputMessages ?? [outputOverride ?? (text === "recall" ? s.messages[0].text : text)]
+    for (const output of outputs) {
+      const id = `assistant-${++sequence}`
+      for (const text of [output.slice(0, 2), output.slice(2)]) await client.notify("session/update", { sessionId: s.sessionId, update: { sessionUpdate: "agent_message_chunk", ...(omitMessageIds ? {} : { messageId: id }), content: { type: "text", text } } })
+      s.messages.push({ role: "agent", id, text: output })
+    }
     return { stopReason: "end_turn" }
   })
   return { open: async () => ({ target: app, close: async () => {} }), persisted, calls, modeStateFor, permissionRequests }
@@ -991,6 +996,204 @@ test("large streamed answers stay bounded and report truncation", async () => {
   assert.equal(result.output.length, 65_536)
   assert.equal(result.outputTruncated, true)
   await sessions.dispose()
+})
+
+test("turn results select the latest native assistant message, while retaining earlier messages in history", async () => {
+  const native = backend({ outputMessages: ["Checking the files.", "The final answer."] }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    const result = await sessions.wait(admitted)
+    const final = native.persisted.get(admitted.sessionId).messages.at(-1)
+    assert.equal(result.assistantMessageId, final.id)
+    assert.equal(result.output, "The final answer.")
+    assert.equal(result.outputTruncated, false)
+    const history = await sessions.messages(admitted)
+    assert.deepEqual(history.messages.filter(message => message.role === "assistant").map(message => message.text), ["Checking the files.", "The final answer."])
+    assert.equal((await sessions.inspect(admitted)).output, "The final answer.")
+  } finally { await sessions.dispose() }
+})
+
+test("an earlier truncated assistant message does not truncate a later complete result", async () => {
+  const native = backend({ outputMessages: ["x".repeat(90_000), "Complete."] }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    const result = await sessions.wait(admitted)
+    assert.equal(result.output, "Complete.")
+    assert.equal(result.outputTruncated, false)
+    const history = await sessions.messages(admitted)
+    assert.equal(history.messages.find(message => message.role === "assistant").truncated, true)
+  } finally { await sessions.dispose() }
+})
+
+test("assistant chunks without native message IDs remain grouped", async () => {
+  const native = backend({ outputOverride: "Split answer.", omitMessageIds: true }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    const result = await sessions.wait(admitted)
+    assert.equal(result.assistantMessageId, null)
+    assert.equal(result.output, "Split answer.")
+    assert.equal(result.outputTruncated, false)
+  } finally { await sessions.dispose() }
+})
+
+test("two missing assistant IDs do not prove a changed replay belongs to the supervised result", async () => {
+  const native = backend({ outputOverride: "Original result.", omitMessageIds: true }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    assert.equal((await sessions.wait(admitted)).assistantMessageId, null)
+    const persisted = native.persisted.get(admitted.sessionId).messages.at(-1)
+    persisted.id = null
+    persisted.text = "Changed history."
+    await sessions.messages(admitted)
+    const replayed = await sessions.inspect(admitted)
+    assert.equal(replayed.executionKnown, false)
+    assert.equal(replayed.output, "Changed history.")
+  } finally { await sessions.dispose() }
+})
+
+test("a replay that ends at an observed earlier message reports incomplete history without losing the result", async () => {
+  const native = backend({ outputMessages: ["Checking.", "The final answer."] }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    const finished = await sessions.wait(admitted)
+    const persisted = native.persisted.get(admitted.sessionId).messages
+    const final = persisted.pop()
+    const lagging = await sessions.messages(admitted)
+    assert.equal(lagging.historyComplete, false)
+    assert.equal(lagging.messages.some(message => message.id === final.id), false)
+    const observed = await sessions.inspect(admitted)
+    assert.equal(observed.executionKnown, true)
+    assert.equal(observed.assistantMessageId, finished.assistantMessageId)
+    assert.equal(observed.output, "The final answer.")
+    persisted.push(final)
+    const caughtUp = await sessions.messages(admitted)
+    assert.equal(caughtUp.historyComplete, true)
+    assert.equal(caughtUp.messages.at(-1).id, final.id)
+    assert.equal((await sessions.inspect(admitted)).output, "The final answer.")
+  } finally { await sessions.dispose() }
+})
+
+test("a replay that contains only the current prompt retains the observed result", async () => {
+  const native = backend({ outputMessages: ["Checking.", "The final answer."] }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    const finished = await sessions.wait(admitted)
+    const persisted = native.persisted.get(admitted.sessionId).messages
+    const assistants = persisted.splice(1)
+    const lagging = await sessions.messages(admitted)
+    assert.equal(lagging.historyComplete, false)
+    assert.equal(lagging.messages.length, 1)
+    const observed = await sessions.inspect(admitted)
+    assert.equal(observed.executionKnown, true)
+    assert.equal(observed.assistantMessageId, finished.assistantMessageId)
+    assert.equal(observed.output, "The final answer.")
+    persisted.push(...assistants)
+    assert.equal((await sessions.messages(admitted)).historyComplete, true)
+    assert.equal((await sessions.inspect(admitted)).output, "The final answer.")
+  } finally { await sessions.dispose() }
+})
+
+test("changed native history is not mistaken for a lagging replay", async () => {
+  for (const change of [
+    messages => { messages.at(-1).text = "Changed by another client." },
+    messages => { messages.push({ role: "user", id: "new-user", text: "New request" }) },
+  ]) {
+    const native = backend({ outputMessages: ["Checking.", "The final answer."] }), sessions = codexSessions(native)
+    try {
+      const admitted = await sessions.start({ cwd, task: "review" })
+      await sessions.wait(admitted)
+      const persisted = native.persisted.get(admitted.sessionId).messages
+      persisted.pop()
+      change(persisted)
+      const history = await sessions.messages(admitted)
+      assert.equal(history.historyComplete, true)
+      assert.equal((await sessions.inspect(admitted)).executionKnown, false)
+    } finally { await sessions.dispose() }
+  }
+})
+
+test("an edited earlier user message cannot make changed history look like a lagging replay", async () => {
+  const native = backend({ outputMessages: ["Checking.", "The final answer."] }), sessions = codexSessions(native)
+  try {
+    const first = await sessions.start({ cwd, task: "Original request" })
+    await sessions.wait(first)
+    const second = await sessions.start({ sessionId: first.sessionId, task: "Next request" })
+    await sessions.wait(second)
+    const persisted = native.persisted.get(first.sessionId).messages
+    persisted.pop()
+    persisted[0].text = "An edited earlier request"
+    const history = await sessions.messages(second)
+    assert.equal(history.historyComplete, true)
+    assert.equal((await sessions.inspect(second)).executionKnown, false)
+  } finally { await sessions.dispose() }
+})
+
+test("an edited current user prompt cannot make changed history look like a lagging replay", async () => {
+  const native = backend({ outputMessages: ["Checking.", "The final answer."] }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "Original request" })
+    await sessions.wait(admitted)
+    const persisted = native.persisted.get(admitted.sessionId).messages
+    persisted.pop()
+    persisted[0].text = "An edited request"
+    const history = await sessions.messages(admitted)
+    assert.equal(history.historyComplete, true)
+    assert.equal((await sessions.inspect(admitted)).executionKnown, false)
+  } finally { await sessions.dispose() }
+})
+
+test("a changed final message with the same ID cannot inherit supervised execution evidence", async () => {
+  const native = backend({ outputMessages: ["Checking.", "The final answer."] }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    await sessions.wait(admitted)
+    native.persisted.get(admitted.sessionId).messages.at(-1).text = "Changed answer."
+    await sessions.messages(admitted)
+    const replayed = await sessions.inspect(admitted)
+    assert.equal(replayed.executionKnown, false)
+    assert.equal(replayed.output, "Changed answer.")
+  } finally { await sessions.dispose() }
+})
+
+test("changed or extended history cannot inherit a same-ID unchanged result", async () => {
+  for (const change of [
+    messages => { messages[0].text = "Edited request" },
+    messages => { messages.push({ role: "user", id: "new-user", text: "New request" }) },
+  ]) {
+    const native = backend({ outputMessages: ["Checking.", "The final answer."] }), sessions = codexSessions(native)
+    try {
+      const admitted = await sessions.start({ cwd, task: "review" })
+      await sessions.wait(admitted)
+      change(native.persisted.get(admitted.sessionId).messages)
+      await sessions.messages(admitted)
+      assert.equal((await sessions.inspect(admitted)).executionKnown, false)
+    } finally { await sessions.dispose() }
+  }
+})
+
+test("truncated message prefixes cannot establish an unchanged conversation", async () => {
+  const native = backend({ outputMessages: ["x".repeat(90_000), "The final answer."] }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    await sessions.wait(admitted)
+    native.persisted.get(admitted.sessionId).messages[1].text = "x".repeat(65_536) + "different suffix"
+    const history = await sessions.messages(admitted)
+    assert.equal(history.messages[1].truncated, true)
+    assert.equal((await sessions.inspect(admitted)).executionKnown, false)
+  } finally { await sessions.dispose() }
+})
+
+test("a bounded replay that dropped older messages cannot establish an unchanged conversation", async () => {
+  const outputs = Array.from({ length: 127 }, (_, index) => `message ${index}`)
+  const native = backend({ outputMessages: outputs }), sessions = codexSessions(native)
+  try {
+    const admitted = await sessions.start({ cwd, task: "review" })
+    await sessions.wait(admitted)
+    native.persisted.get(admitted.sessionId).messages.unshift({ role: "user", id: "unseen-user", text: "Unseen older request" })
+    const history = await sessions.messages(admitted)
+    assert.equal(history.historyComplete, false)
+    assert.equal((await sessions.inspect(admitted)).executionKnown, false)
+  } finally { await sessions.dispose() }
 })
 
 

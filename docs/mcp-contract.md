@@ -616,6 +616,17 @@ in-progress or mismatched evidence leaves outcome unknown and wait returns
 `executionUnavailable`. Recovered mode remains unknown even when a turn outcome
 is verified.
 
+For a supervised turn, result text and `assistantMessageId` refer to the latest
+native assistant message; earlier assistant messages remain in the session
+history. When the native stream omits message IDs, consecutive assistant chunks
+cannot be separated into distinct messages and remain grouped.
+If replay ends before the observed result but matches the complete retained
+baseline, prompt, and streamed assistant prefix, history is reported incomplete
+and the supervised result is retained until replay catches up. Supervised
+execution evidence is carried into a complete replay only when that same full
+conversation and result match. Truncated messages, incomplete retained history,
+and other mismatches remain unverified.
+
 Continue an idle session with `opencode.continue runtime: "codex" sessionId task`.
 Continuation inherits cwd and the locally known mode. If selection was lost
 after cache eviction or restart, continuation requires an explicit `mode`;

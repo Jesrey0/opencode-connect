@@ -84,10 +84,35 @@ function collect(record, notification) {
     record.messages.shift(); record.historyComplete = false
   }
   if (record.status === "inProgress" && role === "assistant") {
-    record.outputTruncated ||= record.output.length + update.content.text.length > MAX_OUTPUT
-    record.output += update.content.text.slice(0, Math.max(0, MAX_OUTPUT - record.output.length))
-    if (id) record.assistantMessageId = id
+    // Result text and its native ID must describe the same assistant message.
+    // Earlier messages remain in history; chunks without IDs stay grouped.
+    record.output = message.text
+    record.outputTruncated = message.truncated
+    record.assistantMessageId = id
   }
+}
+
+function sameMessage(a, b) {
+  return !!a?.id && a.id === b?.id && !a.truncated && !b.truncated && a.role === b.role && a.text === b.text
+}
+
+function matchObservedReplay(current, recovered) {
+  const context = current?.turnContext
+  if (!context?.complete || !recovered.historyComplete || !current.executionKnown || !current.assistantMessageId) return null
+  const baseline = context.messages
+  if (!baseline.every((message, index) => sameMessage(message, current.messages[index]) && sameMessage(message, recovered.messages[index]))) return null
+  const prompt = recovered.messages[baseline.length]
+  if (!prompt?.id || prompt.role !== "user" || prompt.text !== context.prompt || prompt.truncated) return null
+  const observed = current.messages.slice(baseline.length)
+  if (observed[0]?.role === "user") {
+    if (!sameMessage(observed[0], prompt)) return null
+    observed.shift()
+  }
+  if (observed.some(message => message.role !== "assistant" || !message.id) || observed.at(-1)?.id !== current.assistantMessageId) return null
+  const replayed = recovered.messages.slice(baseline.length + 1)
+  if (replayed.length > observed.length || !replayed.every((message, index) => sameMessage(message, observed[index]))) return null
+  if (replayed.length === observed.length) return "complete"
+  return observed.slice(replayed.length).every(message => !recovered.messages.some(item => item.id === message.id)) ? "partial" : null
 }
 
 // Codex asks the ACP client to resolve each approval. This adapter never
@@ -512,6 +537,9 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
       }
       await applySessionMode(null, record.sessionId, selected.mode, modes, { call: (_client, method, params) => conn.request(method, params, admissionSignal) })
       admissionSignal.throwIfAborted()
+      // Retain the exact observed baseline and prompt so a later partial
+      // history replay cannot be confused with an edited conversation.
+      record.turnContext = { complete: record.historyComplete, messages: record.messages.map(message => ({ ...message })), prompt: input.task }
       record.status = "inProgress"; record.executionKnown = true; record.basis = "nativePromptResponse"
       record.close = () => conn.close()
       record.conn = conn
@@ -633,11 +661,20 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
     }
     recovered.mode = current?.mode ?? null
     applyThreadMetadata(recovered, current)
-    if (current?.executionKnown && current.assistantMessageId === recovered.assistantMessageId) {
+    // Match the full retained baseline, prompt and streamed assistant messages
+    // before carrying supervised evidence into any native history replay.
+    const match = matchObservedReplay(current, recovered)
+    if (match === "partial") {
+      current.historyComplete = false
+      remember(current)
+      return { sessionId, messages: recovered.messages, historyComplete: false }
+    }
+    if (match === "complete") {
       recovered.status = current.status; recovered.outcome = current.outcome; recovered.executionKnown = true
       recovered.basis = current.basis; recovered.turn = current.turn
       recovered.output = current.output; recovered.outputTruncated = current.outputTruncated
       recovered.stopReason = current.stopReason; recovered.error = current.error; recovered.completedAtMs = current.completedAtMs
+      recovered.turnContext = current.turnContext
     }
     return { sessionId, messages: recovered.messages, historyComplete: recovered.historyComplete }
   }
