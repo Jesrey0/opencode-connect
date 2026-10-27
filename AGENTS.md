@@ -1,7 +1,7 @@
 # Agent repository guide
 
 ## Mission and ownership
-ChatGPT 0xOperator owns the orchestration of native HostPlane and WorkerPlane work. The principal owns scope and acceptance. OpenCode Connect is a Node 24 MCP connector. The Codex plugin is a native OpenCode extension inside the SAME repository; it is not an independent MCP server.
+ChatGPT 0xOperator owns the orchestration of native HostPlane and WorkerPlane work. The principal owns scope and acceptance. PlatformPlane is the isolated ChatGPT app/web environment. HostPlane is this MCP integration and Linux environment. WorkerPlane lives on HostPlane in separate OpenCode/Codex runtime contexts; these are not blanket OS sandbox boundaries. OpenCode Connect is a Node 24 MCP connector. The Codex plugin is a native OpenCode extension inside the SAME repository; it is not an independent MCP server.
 
 ## Entry points
 - src/server.ts, src/http.ts, src/mcp.ts: the external MCP/HTTP boundary.
@@ -20,7 +20,7 @@ ChatGPT 0xOperator owns the orchestration of native HostPlane and WorkerPlane wo
 - test/ and packages/codex-plugin/test/: independent and integration contracts.
 
 ## Contracts
-OpenCode is authoritative for its own native session, agent, model and subagent behavior. Codex conversations retain native IDs; the plugin owns direct Codex ACP processes and mode selection, the connector owns MCP translation. Never substitute a Codex CLI model turn for connector RPC, or treat OpenCode token totals as ChatGPT Codex quota. Plugin and connector must agree on the codex-sessions method set and pinned OpenCode version.
+Native services own authoritative execution and conversation evidence. Bounded composition of native primitives is allowed; never introduce a competing process/session engine or invent native identity, capability or success. OpenCode is authoritative for its own native session, agent, model and subagent behavior. Codex conversations retain native IDs; the plugin owns direct Codex ACP processes and mode selection, the connector owns MCP translation. Never substitute a Codex CLI model turn for connector RPC, or treat OpenCode token totals as ChatGPT Codex quota. Retain runtime with session IDs and canonical prompt IDs where supported. A worker's native tools are not the PlatformPlane MCP catalog. Codex control depends on OpenCode's plugin lifecycle; reload/disposal closes supervised Codex children. Plugin and connector must agree on the codex-sessions method set and pinned OpenCode version.
 
 ## Working on this repository
 Run npm ci --include=dev from the repository root. Run npm run check:all, npm run test:all and npm run build before a release. Run npm run verify:integration for the source/install RPC/version/loader check (no live service access). Do not edit generated dist/, node_modules/, or immutable release builds. If a console is active, use an isolated source copy rather than replace its toolchain/artifacts. Preserve installed configuration; connector activation does not migrate or reload the native plugin. Live MCP deployment, plugin loading and Git publication are distinct decisions. Every supported release contains the plugin workspace; native local loading uses its src/ directory. Any retained standalone plugin checkout is superseded, not a parallel source owner; retirement requires separate operator acceptance and authorization.

@@ -3,8 +3,8 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.15.1** projects native OpenCode HostPlane operations
-and WorkerPlane execution into MCP for ChatGPT's **0xOperator**.
+OpenCode Connect **0.16.0** projects native host operations and runtime-scoped
+worker execution into MCP for ChatGPT's **0xOperator**.
 It pins `@opencode/client` to **2.0.24**.
 
 The connector provides bounded host files, commands, worktrees and native sessions,
@@ -20,6 +20,22 @@ ChatGPT / 0xOperator
         -> native OpenCode sessions
         -> codex-sessions plugin RPC -> native Codex ACP sessions
 ```
+
+## Plane boundaries
+
+**PlatformPlane** is the isolated ChatGPT app or web environment. **HostPlane** is
+this MCP integration and its Linux execution environment. **WorkerPlane** is hosted
+on HostPlane, with separate OpenCode Runtime and Codex Runtime contexts and native
+tool surfaces. A worker's tools are not the PlatformPlane MCP catalog. Context
+separation does not imply a separate Linux user, filesystem or container.
+
+The connector may compose bounded native calls while preserving native execution
+ownership, identities and evidence. It owns explicit transport, observation,
+leases and delivery state. Direct host work does not require a model worker.
+
+Codex has a separate worker runtime but its connector control path depends on the
+OpenCode service and plugin RPC. Plugin reload/disposal can stop supervised Codex
+children; restarting the connector alone does not reload the plugin.
 
 ## Deployment scope
 
@@ -57,11 +73,11 @@ recover existing identities before creating replacement work.
 | Intent | Starting point | Evidence to retain |
 | --- | --- | --- |
 | Find and read project content | `host.list`, `host.find`, `host.read` | Canonical `cwd`, file path, fingerprint and returned `nextCall` |
-| Search contents or run a check | `command.startShell`, then `command.read` | `kind`, native handle `id`, canonical `cwd`, cursor, exit/drain evidence |
+| Search contents or run a check | `command.run`; follow returned `command.read` continuation | `kind`, native handle `id`, canonical `cwd`, cursor, exit/drain evidence |
 | Delegate fresh work | `opencode.create` with `cwd` and `task` | `runtime`, `sessionId`, OpenCode user `messageId` |
 | Continue or fork known work | `opencode.continue`; `opencode.fork` for OpenCode | Existing session identity and returned admission identity |
 | Follow or recover a worker | `opencode.wait`, `opencode.inspectActivity`, `opencode.inspectResult` | Exact prompt identity, outcome evidence and returned continuations |
-| Learn native capabilities | `opencode.skills`, `opencode.skill`, current model/agent/runtime catalogs | Canonical IDs in the task's native location |
+| Inspect runtime context and API capabilities | `opencode.runtime` with the intended runtime | Connector capability scope, native inventory, Codex loaded-plugin identity, supported correlation |
 | Read Codex quota | `codex.quota {}` | Native quota windows and reset timestamps |
 | Operate a browser | `browser.tabs`, exact `browser.attach`, `browser.snapshot` | Target, lease, current element references and application postconditions |
 
@@ -76,11 +92,18 @@ For a bounded file read, call `host.read`:
 {"cwd":"/absolute/project","path":"README.md","limit":2000}
 ```
 
-For a verification command, call `command.startShell`, then read its returned handle:
+For a verification command, call `command.run`:
 
 ```json
-{"cwd":"/absolute/project","command":"npm run check"}
+{"cwd":"/absolute/project","command":"npm run check","waitMs":10000}
 ```
+
+A short command returns output, native exit status and drain evidence in one call.
+If it is still running, output is undrained, or observation failed, retain its
+native handle and follow `nextCall`. `waitMs` bounds observation after admission;
+`timeoutMs` independently limits process execution. Wait expiry or cancellation
+does not kill or restart the command. Use `command.startShell` for explicit
+admission without foreground observation and the existing PTY tools for terminals.
 
 For fresh OpenCode work, call `opencode.create`:
 
@@ -116,6 +139,7 @@ the returned skill path. Neither installed skill library is mirrored here.
 OpenCode owns its catalogs, defaults, permissions, sessions, messages, inbox,
 ordering and lifecycle. The connector preserves those facts and adds bounded
 projection, sanitized errors, exact identity recovery and mutation readback.
+Bounded composition does not introduce a second process registry or session engine.
 Canonical native IDs and cursor units remain distinct; prompt attachments do
 not create subagents or select the executing agent.
 
@@ -165,4 +189,6 @@ Source validation, Git publication, immutable release preparation, connector
 activation, native plugin loading and live ChatGPT acceptance are distinct gates.
 Follow the [release runbook](docs/release-cutover.md); preserve installed configuration
 and the matching connector/plugin rollback pair. `/health` proves connector
-identity and native connectivity, not loaded Codex plugin identity or quota.
+identity and native connectivity. Use `opencode.runtime` with `runtime: "codex"`
+for loaded package/build-record identity and capability evidence; this is separate
+from release integrity verification and quota.

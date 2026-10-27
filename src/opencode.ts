@@ -231,6 +231,7 @@ export class OpenCodeBackend {
     stage = "selectionReadback";
     session = await client.session.get({ sessionID: session.id });
     return {
+      runtime: "opencode" as const,
       sessionId: session.id,
       messageId: prompt.id,
       cwd: session.location.directory,
@@ -319,10 +320,10 @@ export class OpenCodeBackend {
         // A new execution may start while result selection is reading persisted messages.
         const after = await client.session.active({ signal });
         if (after[sessionId]) return { kind: "waiting" as const, semantic: await this.inspectSemantic(client, await client.session.get({ sessionID: sessionId }, { signal }), after, undefined, signal) };
-        return { kind: "terminal" as const, response: { sessionId, messageId, state: "terminal" as const, wakeReason: "terminal" as const, session: projectSession(session, after, result), result } };
+        return { kind: "terminal" as const, response: { runtime: "opencode" as const, sessionId, messageId, state: "terminal" as const, wakeReason: "terminal" as const, session: projectSession(session, after, result), result } };
       }
       const semantic = await this.inspectSemantic(client, session, active, messageId, signal);
-      if (semantic.pendingActions.length > 0) return { kind: "action" as const, response: { sessionId, messageId, state: "active" as const, wakeReason: "actionRequired" as const, ...semantic } };
+      if (semantic.pendingActions.length > 0) return { kind: "action" as const, response: { runtime: "opencode" as const, sessionId, messageId, state: "active" as const, wakeReason: "actionRequired" as const, ...semantic } };
       return { kind: "waiting" as const, semantic };
     };
     const initial = await synchronize();
@@ -362,7 +363,7 @@ export class OpenCodeBackend {
     signal?.throwIfAborted();
     const final = await synchronize();
     if (final.kind !== "waiting") return final.response;
-    return { sessionId, messageId, state: "active" as const, wakeReason: "timeout" as const, ...final.semantic };
+    return { runtime: "opencode" as const, sessionId, messageId, state: "active" as const, wakeReason: "timeout" as const, ...final.semantic };
   }
 
   // Request envelope only: runtime dispatch, per-entry error capture, and

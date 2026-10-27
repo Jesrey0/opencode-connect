@@ -6,7 +6,7 @@ type ReadTool =
   | "opencode.providers" | "opencode.usage" | "opencode.sessions" | "opencode.session"
   | "host.list" | "host.read" | "host.find" | "host.vcs" | "host.vcsStatus"
   | "host.vcsBranch" | "host.vcsDiff" | "host.commands" | "host.terminalScreen"
-  | "host.terminalSnapshot" | "host.worktreeList";
+  | "host.terminalSnapshot" | "host.worktreeList" | "command.read";
 type QueryTool = Exclude<Extract<ReadTool, `opencode.${string}`>, "opencode.inspectResult">;
 
 const queryTools = {

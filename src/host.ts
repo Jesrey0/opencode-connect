@@ -1,5 +1,6 @@
 import { realpath, lstat } from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { type OpenCodeClient, type ShellInfo1, type Pty, type PersistentPtyInfo } from "@opencode/client";
 import { checkFingerprint, fingerprint, integer, OUTPUT_LIMIT, page, textPage, type PageInput } from "./bounds.js";
 import { connectNative, type Connect } from "./native.js";
@@ -33,6 +34,17 @@ export type CommandStartInput = { cwd: string; command: string; title?: string }
   | { kind: "persistentPty"; sessionId: string; args?: string[]; rows?: number; cols?: number }
 );
 export type CommandReadInput = CommandHandle & { cursor?: number; limit?: number; waitMs?: number };
+export type CommandRunInput = { cwd: string; command: string; timeoutMs?: number; waitMs?: number; limit?: number };
+export type CommandRunResult = Awaited<ReturnType<HostBackend["run"]>>;
+export class CommandAdmissionError extends Error {
+  readonly code = "COMMAND_ADMISSION_UNCERTAIN";
+  readonly mutationMayHaveOccurred = true;
+  readonly admission = "mayHaveOccurred";
+  readonly kind = "shell";
+  constructor(readonly cwd: string) {
+    super("Native shell admission may have occurred without a known handle. Inspect native command state; an absent running entry does not prove nonexecution. Do not automatically retry command.run.");
+  }
+}
 export type CommandControlInput = CommandHandle & (
   | { action: "remove" }
   | { action: "resize"; rows: number; cols: number }
@@ -44,6 +56,19 @@ const retention = {
   pty: "Native location registry; 2 Mi UTF-16 code units retained while running, at most 25 exited PTYs. No replay attachment after exit; metadata remains until removal/eviction/restart.",
   persistentPty: "Experimental native session-bound daemon retention with byte head/tail and replay-loss metadata. An attached observer seeing exit triggers native removal; removal/daemon loss can invalidate the handle. No connector restart-durability promise.",
 };
+const shellDecodingLimit = "Native shell slices bytes and independently decodes each page as UTF-8; split multibyte characters can be replaced. Cursor is still bytes; exact byte recovery is not promised.";
+// Pass cancellation to native IO as well as bounding the await: a stalled transport
+// must not hold the observation open, even if it fails to settle on cancellation.
+async function observeShell<T>(signal: AbortSignal, read: () => Promise<T>): Promise<T> {
+  signal.throwIfAborted();
+  let abort!: () => void;
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+  try { return await Promise.race([read(), cancelled]); }
+  finally { signal.removeEventListener("abort", abort); }
+}
 export function projectShell(info: ShellInfo1) {
   return { id: info.id, status: info.status, cwd: info.cwd, pid: info.pid ?? null, exitCode: info.exit ?? null, signal: info.signal ?? null, time: info.time };
 }
@@ -68,9 +93,9 @@ export function imageMime(bytes: Uint8Array): string {
 }
 export class HostBackend {
   constructor(private readonly connect: Connect = connectNative, private readonly sockets: SocketFactory = (url) => new WebSocket(url)) {}
-  private async location(client: OpenCodeClient, cwd: string) {
+  private async location(client: OpenCodeClient, cwd: string, signal?: AbortSignal) {
     if (!path.isAbsolute(cwd)) throw new Error("cwd must be absolute");
-    const location = await client.location.get({ location: { directory: cwd } });
+    const location = await client.location.get({ location: { directory: cwd } }, { signal });
     return { directory: location.directory };
   }
   async inspect(input: HostInspectInput) {
@@ -222,6 +247,91 @@ export class HostBackend {
     }
     return { action: input.action, projectId, persisted: true, ...page(await client.worktree.list({ projectID: projectId })) };
   }
+  async run(input: CommandRunInput, signal?: AbortSignal) {
+    const timeout = integer(input.timeoutMs, 120_000, 86_400_000, 1, "timeoutMs");
+    const waitMs = integer(input.waitMs, 10_000, 20_000, 0, "waitMs");
+    const limit = integer(input.limit, 12_000, OUTPUT_LIMIT, 1, "limit");
+    signal?.throwIfAborted();
+    const { client } = await this.connect();
+    signal?.throwIfAborted();
+    const canonical = await this.location(client, input.cwd, signal);
+    signal?.throwIfAborted();
+    let admitted;
+    try {
+      // Exactly one mutation. An ambiguous response never authorizes a replay.
+      const create = () => client.shell.create({ location: canonical, cwd: canonical.directory, command: input.command, timeout }, { signal });
+      admitted = signal ? await observeShell(signal, create) : await create();
+    } catch { throw new CommandAdmissionError(canonical.directory); }
+
+    const location = admitted.location;
+    let info = admitted.data;
+    const id = info.id;
+    let metadataSource: "admission" | "get" = "admission";
+    let metadataVerified = false;
+    let output = "";
+    let cursor = 0;
+    let size: number | null = null;
+    let truncated: boolean | null = null;
+    let drained = false;
+    let reason: "terminal" | "outputLimit" | "waitTimeout" | "cancelled" | "observationError" = "waitTimeout";
+    let stage: "get" | "output" | "wait" = "wait";
+    let observationError: { type: string | null; message: string } | null = null;
+    // The observation budget starts after admission and never changes the native
+    // process timeout. Zero budget admits only, without issuing speculative reads.
+    const deadline = performance.now() + waitMs;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), waitMs);
+    const observer = signal ? AbortSignal.any([signal, controller.signal]) : controller.signal;
+    try {
+      while (waitMs > 0 && performance.now() < deadline) {
+        stage = "get";
+        metadataVerified = false;
+        info = (await observeShell(observer, () => client.shell.get({ location, id }, { signal: observer }))).data;
+        metadataSource = "get";
+        metadataVerified = true;
+        stage = "output";
+        // JSON escaping can expand a source byte to six bytes. Budget before
+        // reading so the result always retains its handle and never discards
+        // already-consumed bytes to fit the MCP envelope.
+        const jsonRemaining = 192_000 - Buffer.byteLength(JSON.stringify(output));
+        const readLimit = Math.min(limit - cursor, Math.floor(jsonRemaining / 6));
+        if (readLimit <= 0) { reason = "outputLimit"; break; }
+        const page = (await observeShell(observer, () => client.shell.output({ location, id, cursor, limit: readLimit }, { signal: observer }))).data;
+        // Native cursors measure source bytes, not re-encoded decoded text. Never
+        // crop text and then advance past bytes that the caller did not receive.
+        output += page.output;
+        cursor = page.cursor;
+        size = page.size;
+        truncated = page.truncated;
+        // Terminal metadata must precede this output read. A later terminal get
+        // cannot make an older output snapshot drained.
+        drained = info.status !== "running" && cursor >= size;
+        if (info.status !== "running") { reason = "terminal"; break; }
+        if (cursor >= limit) { reason = "outputLimit"; break; }
+        stage = "wait";
+        await delay(Math.max(0, Math.min(100, deadline - performance.now())), undefined, { signal: observer });
+      }
+    } catch (error) {
+      drained = false;
+      if (signal?.aborted) reason = "cancelled";
+      else if (controller.signal.aborted) reason = "waitTimeout";
+      else {
+        reason = "observationError";
+        observationError = { type: nativeErrorType(error), message: "Native shell observation failed; last confirmed metadata and output retained. Continue with command.read." };
+      }
+    } finally {
+      clearTimeout(timer);
+      controller.abort();
+    }
+    if (signal?.aborted) { reason = "cancelled"; drained = false; }
+    return {
+      kind: "shell" as const, location, ...projectShell(info), output, cursor, size, truncated,
+      cursorUnit: "bytes" as const, encoding: "nativeUtf8" as const, decodingLimit: shellDecodingLimit,
+      drained, retention: retention.shell, metadataSource, metadataVerified,
+      observation: { reason, stage, error: observationError },
+      nextCall: drained ? null : { tool: "command.read" as const, arguments: { kind: "shell" as const, cwd: admitted.data.cwd, id, cursor, limit: Math.min(limit, 32_000) } },
+    };
+  }
   async start(input: CommandStartInput) {
     const { client } = await this.connect();
     const location = await this.location(client, input.cwd);
@@ -262,7 +372,9 @@ export class HostBackend {
     if (input.kind === "shell") {
       // Read terminal state BEFORE output, so a racing exit never declares older output drained.
       const result = await client.shell.output({ location, id: input.id, cursor, limit });
-      return { kind: input.kind, location: result.location, ...projectShell(info as ShellInfo1), ...result.data, encoding: "nativeUtf8", decodingLimit: "Native shell slices bytes and independently decodes each page as UTF-8; split multibyte characters can be replaced. Cursor is still bytes; exact byte recovery is not promised.", cursorUnit: "bytes", drained: info.status !== "running" && result.data.cursor >= result.data.size, retention: retention.shell };
+      const drained = info.status !== "running" && result.data.cursor >= result.data.size;
+      return { kind: input.kind, location: result.location, ...projectShell(info as ShellInfo1), ...result.data, encoding: "nativeUtf8", decodingLimit: shellDecodingLimit, cursorUnit: "bytes", drained, retention: retention.shell,
+        nextCall: drained ? null : { tool: "command.read" as const, arguments: { kind: "shell" as const, cwd: result.location.directory, id: input.id, cursor: result.data.cursor, limit: Math.min(limit, 32_000) } } };
     }
     if (input.kind === "pty" && info.status === "exited") return { kind: input.kind, location, ...projectPty(info as Pty), cursor, cursorUnit: "utf16CodeUnits", output: "", replayAvailable: false, drained: false, retention: retention.pty };
     const result = await terminalSocket(connection, { ...input, kind: input.kind, cwd: location.directory, cursor, limit, waitMs: integer(input.waitMs, 250, 2000) }, this.sockets);

@@ -3,6 +3,7 @@ import type { OpenCodeClient } from "@opencode/client";
 import { AdmissionError, ConnectorError, SessionDeleteError, page, textPage, type PageInput } from "./bounds.js";
 import { pageNextCall, queryToolName } from "./continuation.js";
 import { CodexSessionsDefinition } from "./codexRpc.js";
+import { runtimeDiagnostics } from "./runtime/capabilities.js";
 
 export type Runtime = "opencode" | "codex";
 export const CODEX_MODES = ["read-only", "workspace-write", "agent", "agent-full-access"] as const;
@@ -66,6 +67,25 @@ function capabilities(value: unknown) {
     return { id: mode(m.id), name: id(m.name), sandboxPolicy: id(m.sandboxPolicy), approvalPolicy: id(m.approvalPolicy), approvalsReviewer: id(m.approvalsReviewer) };
   });
   return { continuation: native.continuation === true, exactPromptWait: false, modelSelection: false, permissions: "operator-selected" as const, modes, defaultMode: mode(native.defaultMode), events: false, filesystemClient: false, terminalClient: false, ...(native.usageQuota === "codex-app-server" ? { usageQuota: "codex-app-server" as const } : {}) };
+}
+const packageVersion = z.string().max(128).regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
+const pluginIdentitySchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("unavailable"), reason: z.enum(["not-reported", "package-metadata-unavailable"]) }),
+  z.object({
+    status: z.literal("available"), packageVersion, nativeVersion: packageVersion,
+    build: z.discriminatedUnion("kind", [
+      z.object({ kind: z.literal("source"), buildId: z.null(), evidence: z.literal("package-relative-source") }),
+      z.object({ kind: z.literal("immutable"), buildId: z.string().regex(/^[0-9a-f]{16}$/), evidence: z.literal("package-relative-build-record") }),
+      z.object({ kind: z.literal("unavailable"), buildId: z.null(), reason: z.enum(["package-layout-unrecognized", "release-record-missing", "release-record-invalid"]) }),
+    ]),
+  }),
+]);
+export type CodexPluginIdentity = z.infer<typeof pluginIdentitySchema>;
+function pluginIdentity(value: unknown): CodexPluginIdentity {
+  if (value === undefined) return { status: "unavailable", reason: "not-reported" };
+  const parsed = pluginIdentitySchema.safeParse(value);
+  if (!parsed.success) throw new ConnectorError("Codex returned invalid plugin identity metadata; details omitted");
+  return parsed.data;
 }
 // Validate and strip unknown fields at the RPC boundary too: an older or
 // misconfigured installed plugin must not turn a quota read into identity data.
@@ -208,7 +228,10 @@ export async function codexQuery(client: OpenCodeClient, input: { type: string; 
        };
     }), cursor: { next: value.nextCursor === null ? null : id(value.nextCursor) } };
   }
-  if (input.type === "runtime") return { runtime: "codex", capabilities: capabilities((await call(client, "status", {}, signal)).capabilities) };
+  if (input.type === "runtime") {
+    const value = await call(client, "status", {}, signal);
+    return { runtime: "codex", diagnostics: runtimeDiagnostics("codex"), capabilities: capabilities(value.capabilities), pluginIdentity: pluginIdentity(value.pluginIdentity) };
+  }
   if (input.type === "session") return (await codexInspect(client, { sessionId: id(input.sessionId) }, signal)).session;
   if (input.type === "permissions") {
     if (input.section !== "pending") throw new ConnectorError("Codex exposes native pending requests, not OpenCode permission rules");

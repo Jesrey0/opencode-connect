@@ -14,6 +14,7 @@ import { OPENCODE_RELEASE } from "../native.js";
 import { page, textPage, integer, fingerprint, CatalogError, ConnectorError as Error, MESSAGE_PREVIEW_LIMIT, type PageInput } from "../bounds.js";
 import { pageNextCall, queryToolName } from "../continuation.js";
 import { compactAgent, contextualPage } from "../catalog.js";
+import { runtimeDiagnostics } from "./capabilities.js";
 import {
   modelKey,
   projectAgent,
@@ -214,7 +215,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
       ...mcp.data.map((server) => ({ type: "mcp", name: server.name, status: server.status.status })),
       ...commands.data.map((command) => ({ type: "command", name: command.name })),
     ];
-    return { location: { directory: runtime.directory }, projectId: runtime.project.id, opencodeRelease: OPENCODE_RELEASE, ...page(inventory, query) };
+    return { runtime: "opencode", diagnostics: runtimeDiagnostics("opencode"), location: { directory: runtime.directory }, projectId: runtime.project.id, opencodeRelease: OPENCODE_RELEASE, ...page(inventory, query) };
   }
   if (query.type === "session") {
     const [session, active] = await Promise.all([
