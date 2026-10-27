@@ -176,7 +176,7 @@ test("Codex runtime routing keeps colliding session IDs and ignores OpenCode del
   }, () => {});
   await observer.refresh();
   assert.equal(state.transcript?.[0].text, "Codex prompt");
-  assert.match(state.transcript![1].text, /preview truncated/);
+  assert.equal(state.transcript![1].previewTruncated, true);
   assert.equal(observer.applyEvent({ id: "e", created: 1, type: "session.text.delta", data: { sessionID: "s", assistantMessageID: "ca", ordinal: 0, delta: "WRONG RUNTIME" } } as never), false);
   const detail = plain(renderFrame(snapshot, null, state, 80, 24));
   assert.match(detail, /Codex worker/);
@@ -185,7 +185,9 @@ test("Codex runtime routing keeps colliding session IDs and ignores OpenCode del
   // Replayed bounded snapshots with null IDs must not duplicate cached history.
   await observer.refresh();
   assert.equal(state.transcript?.length, 2);
-  assert.equal((await fetchRuntimeTranscript(native.client, "opencode", "s"))[1].text, "OpenCode answer");
+  const nativeTranscript = await fetchRuntimeTranscript(native.client, "opencode", "s");
+  assert.ok(Array.isArray(nativeTranscript));
+  assert.equal(nativeTranscript[1].text, "OpenCode answer");
   observer.applyKeys([{ kind: "escape" }, { kind: "down" }, { kind: "enter" }]);
   assert.deepEqual(state.view, { kind: "session", runtime: "opencode", sessionId: "s" });
   await observer.refresh();
@@ -320,7 +322,8 @@ test("reopening Codex transcript after cancellation does not reuse an aborted ca
   oldSignal.abort();
   await assert.rejects(first);
   const second = await view.transcript("worker", true, "codex", new AbortController().signal);
-  assert.equal(second[0].text, "NEW_VIEW");
+  assert.ok(!Array.isArray(second));
+  assert.equal(second.entries[0].text, "NEW_VIEW");
   assert.equal(reads, 2);
 });
 
@@ -363,4 +366,72 @@ test("overlapping Codex inventories deduplicate native IDs and pending actions s
   assert.doesNotMatch(plain(renderFrame(snapshot, null, state, 80, 24)), /Codex-only request|Pending 1/);
   state.view = { kind: "session", runtime: "codex", sessionId: "s" };
   assert.match(plain(renderFrame(snapshot, null, state, 80, 24)), /Pending 1.*Codex-only request/);
+});
+
+test("Codex replay independently reports native completeness, page bounds, and both truncation sources", async () => {
+  for (const complete of [true, false]) {
+    for (const count of [3, 30]) {
+      const native = fixture(request => {
+        if (!request.path.endsWith("/messages")) return { output: { sessions: [] } };
+        return { output: { sessionId: "history", historyComplete: complete, messages: Array.from({ length: count }, (_, index) => ({
+          id: `m${index}`, role: "assistant", text: index === count - 1 ? "x".repeat(600) : `message ${index}`,
+          truncated: index === count - 2,
+        })) } };
+      });
+      const result = await fetchRuntimeTranscript(native.client, "codex", "history");
+      assert.ok(!Array.isArray(result));
+      assert.deepEqual(result.history, { historyComplete: complete, pageComplete: count <= 25 });
+      assert.equal(result.entries.length, Math.min(count, 25));
+      assert.equal(result.entries.at(-1)?.previewTruncated, true);
+      assert.equal(result.entries.at(-1)?.outputTruncated, false);
+      assert.equal(result.entries.at(-2)?.outputTruncated, true);
+      assert.equal(result.entries.at(-2)?.previewTruncated, false);
+      const state = emptyState();
+      state.view = { kind: "session", runtime: "codex", sessionId: "history" };
+      state.transcript = result.entries; state.codexHistory = result.history;
+      const snap = await observe(native.client);
+      const text = plain(renderFrame(snap, null, state, 100, 30));
+      assert.match(text, new RegExp(`History · native ${complete ? "complete" : "incomplete"} · page ${count <= 25 ? "complete" : "limited"}`));
+      assert.match(text, /Page truncation · native output 1 · preview 1/);
+      assert.match(text, /\[native output truncated\]/);
+      assert.match(text, /\[preview truncated\]/);
+      assert.match(text, /Execution evidence · unavailable/);
+      assert.doesNotMatch(text, /running · live/);
+    }
+  }
+});
+
+test("Codex inspector refreshes evidence, retains stale empty replay and resets on reopen", async () => {
+  let now = 0;
+  let fail = false;
+  const native = fixture(request => {
+    if (request.path.endsWith("/list")) return { output: { sessions: [{ sessionId: "history", cwd: "/history", capabilities }], nextCursor: null } };
+    if (request.path.endsWith("/status")) return { output: { sessions: [] } };
+    if (fail) return unavailable();
+    return { output: { sessionId: "history", messages: [], historyComplete: true } };
+  });
+  const state = emptyState();
+  const observer = new ConsoleObserver(state, consoleReads(native.client, () => now), () => {});
+  await observer.refresh();
+  state.selected = observer.snapshot!.sessions.findIndex(entry => entry.id === "history");
+  observer.applyKeys([{ kind: "enter" }]);
+  await observer.refresh();
+  let text = plain(renderFrame(observer.snapshot, null, state, 100, 24));
+  assert.match(text, /Execution evidence · unknown/);
+  assert.match(text, /History · native complete · page complete/);
+  assert.match(text, /No messages in this bounded replay/);
+  fail = true; now = 5000;
+  await observer.refresh();
+  text = plain(renderFrame(observer.snapshot, null, state, 100, 24));
+  assert.match(text, /History · native complete · page complete · stale/);
+  assert.match(text, /Transcript stale:/);
+  observer.applyKeys([{ kind: "escape" }, { kind: "enter" }]);
+  assert.equal(state.codexHistory, null);
+  assert.equal(state.transcript, null);
+  await observer.refresh();
+  text = plain(renderFrame(observer.snapshot, null, state, 100, 24));
+  assert.match(text, /History · unavailable/);
+  assert.match(text, /Transcript unavailable:/);
+  assert.doesNotMatch(text, /native complete/);
+  observer.stop();
 });

@@ -72,13 +72,17 @@ export type TranscriptEntry = {
   completed?: boolean;
   tools?: { id: string; name: string; status: string }[];
   reasoningParts?: { ordinal: number; status: "active" | "ended" | "observed" }[];
+  outputTruncated?: boolean;
+  previewTruncated?: boolean;
 };
 
-export type View = { kind: "dashboard" } | { kind: "session"; runtime: Runtime; sessionId: string };
+export type CodexHistory = { historyComplete: boolean; pageComplete: boolean };
+export type View = { kind: "dashboard" } | { kind: "attention" } | { kind: "session"; runtime: Runtime; sessionId: string; fromAttention?: boolean };
 
 export type ConsoleState = {
   view: View;
   selected: number;
+  attentionSelected: number;
   activeOnly: boolean;
   scope: "all" | Runtime;
   filter: string;
@@ -90,10 +94,11 @@ export type ConsoleState = {
   pageSize: number;
   transcript: TranscriptEntry[] | null;
   transcriptError: string | null;
+  codexHistory: CodexHistory | null;
 };
 
 export function emptyState(): ConsoleState {
-  return { view: { kind: "dashboard" }, selected: 0, activeOnly: false, scope: "all", filter: "", filtering: false, help: false, quit: false, scroll: 0, follow: true, pageSize: 1, transcript: null, transcriptError: null };
+  return { view: { kind: "dashboard" }, selected: 0, attentionSelected: 0, activeOnly: false, scope: "all", filter: "", filtering: false, help: false, quit: false, scroll: 0, follow: true, pageSize: 1, transcript: null, transcriptError: null, codexHistory: null };
 }
 
 export function visibleSessions(snapshot: ConsoleSnapshot | null, activeOnly: boolean, scope: ConsoleState["scope"] = "all", filter = ""): ConsoleSession[] {
@@ -251,12 +256,36 @@ export function handleKey(state: ConsoleState, snapshot: ConsoleSnapshot | null,
     if (key.kind === "escape" || (key.kind === "char" && key.value === "q")) { state.help = false; return true; }
     return false;
   }
+  if (state.view.kind === "attention") {
+    const pending = snapshot?.pending ?? [];
+    state.attentionSelected = Math.max(0, Math.min(state.attentionSelected, pending.length - 1));
+    const previous = state.attentionSelected;
+    const char = key.kind === "char" ? key.value : "";
+    if (key.kind === "escape" || key.kind === "left" || char === "b" || char === "q" || char === "t") { state.view = { kind: "dashboard" }; return true; }
+    if (key.kind === "enter" || key.kind === "right") {
+      const target = pending[state.attentionSelected];
+      if (!target) return false;
+      state.view = { kind: "session", runtime: target.runtime, sessionId: target.sessionId, fromAttention: true };
+      state.transcript = null; state.transcriptError = null; state.codexHistory = null; state.scroll = 0; state.follow = true;
+      return true;
+    }
+    if (key.kind === "up" || char === "k") state.attentionSelected--;
+    else if (key.kind === "down" || char === "j") state.attentionSelected++;
+    else if (key.kind === "pageUp") state.attentionSelected -= state.pageSize;
+    else if (key.kind === "pageDown") state.attentionSelected += state.pageSize;
+    else if (key.kind === "home" || char === "g") state.attentionSelected = 0;
+    else if (key.kind === "end" || char === "G") state.attentionSelected = pending.length - 1;
+    else return false;
+    state.attentionSelected = Math.max(0, Math.min(state.attentionSelected, pending.length - 1));
+    return previous !== state.attentionSelected;
+  }
   const sessions = stateSessions(snapshot, state);
   syncSelection(state, sessions);
   if (state.view.kind === "dashboard") {
     const lastIndex = Math.max(0, sessions.length - 1);
     if (key.kind === "char" && key.value === "q") { state.quit = true; return true; }
     if (key.kind === "char" && key.value === "/") { state.filtering = true; return true; }
+    if (key.kind === "char" && key.value === "t") { state.view = { kind: "attention" }; return true; }
     if (key.kind === "escape" && state.filter) { state.filter = ""; refilter(state, snapshot, sessions[state.selected]); return true; }
     if (key.kind === "char" && ["1", "2", "3"].includes(key.value)) {
       state.scope = key.value === "1" ? "all" : key.value === "2" ? "opencode" : "codex";
@@ -296,6 +325,7 @@ export function handleKey(state: ConsoleState, snapshot: ConsoleSnapshot | null,
         state.view = { kind: "session", runtime: target.runtime, sessionId: target.id };
         state.transcript = null;
         state.transcriptError = null;
+        state.codexHistory = null;
         state.scroll = 0;
         state.follow = true;
         return true;
@@ -308,7 +338,7 @@ export function handleKey(state: ConsoleState, snapshot: ConsoleSnapshot | null,
   const char2 = key.kind === "char" ? key.value : "";
   switch (key.kind) {
     case "escape": case "left":
-      state.view = { kind: "dashboard" };
+      state.view = state.view.fromAttention ? { kind: "attention" } : { kind: "dashboard" };
       state.transcriptError = null;
       return true;
     case "down":
@@ -324,7 +354,7 @@ export function handleKey(state: ConsoleState, snapshot: ConsoleSnapshot | null,
     case "home":
       state.scroll = 0; state.follow = false; return true;
     case "char":
-      if (char2 === "b" || char2 === "q") { state.view = { kind: "dashboard" }; state.transcriptError = null; return true; }
+      if (char2 === "b" || char2 === "q") { state.view = state.view.fromAttention ? { kind: "attention" } : { kind: "dashboard" }; state.transcriptError = null; return true; }
       if (char2 === "j") { state.scroll += 1; state.follow = false; return true; }
       if (char2 === "k") { state.scroll = Math.max(0, state.scroll - 1); state.follow = false; return true; }
       if (char2 === "G") { state.follow = true; return true; }
@@ -550,7 +580,7 @@ export function transcriptLines(entries: TranscriptEntry[], width: number, runni
   if (width <= 0) return [];
   const lines: string[] = [];
   for (const [index, entry] of entries.entries()) {
-    if (!entry.text && !entry.tools?.length && !entry.reasoningParts?.length && entry.completed !== false) continue;
+    if (!entry.text && !entry.tools?.length && !entry.reasoningParts?.length && !entry.outputTruncated && !entry.previewTruncated && entry.completed !== false) continue;
     const operator = entry.role === "user";
     const label = operator ? "0xOperator" : entry.role === "assistant" ? `${runtime === "codex" ? "Codex" : "OpenCode"} worker${runtime === "opencode" && agent && width >= 60 ? ` · ${oneLine(agent)}` : ""}` : entry.role === "system" ? "System" : "Event";
     const live = running && index === entries.length - 1 && entry.role === "assistant" && entry.completed === false;
@@ -566,6 +596,8 @@ export function transcriptLines(entries: TranscriptEntry[], width: number, runni
       // viewport, rather than repeatedly measuring every cached history row.
       lines.push(styled(width <= prefix.length ? elide(prefix + line, width) : prefix + line, operator ? CYAN : TEXT));
     }
+    if (entry.outputTruncated) lines.push(styled(row("  [native output truncated]", width), YELLOW));
+    if (entry.previewTruncated) lines.push(styled(row("  [preview truncated]", width), YELLOW));
     lines.push("");
   }
   return lines;
@@ -605,10 +637,14 @@ function filterLabel(state: ConsoleState): string {
 function dashboardFooter(state: ConsoleState, width: number): string {
   const choices = state.filtering
     ? [" Enter apply · Esc clear · Backspace edit", "Enter apply · Esc clear", "Enter · Esc"]
-    : [" 1/2/3 scope · / filter · a running · ↑/↓ select · Enter open · r refresh · ? help · q exit",
-      " 1/2/3 scope · / filter · ↑/↓ select · Enter open · ? help · q exit",
-      "↑/↓ Enter · / filter · ? help", "↑/↓ Enter · / · ? help"];
+    : [" 1/2/3 scope · / filter · t attention · a running · ↑/↓ select · Enter open · r refresh · ? help · q exit",
+      " 1/2/3 scope · / filter · t attention · ↑/↓ select · Enter open · ? help · q exit",
+      "↑/↓ Enter · t attention · / · ?", "↑/↓ Enter · t · / · ?"];
   return choices.find(label => displayWidth(label) <= width) ?? choices.at(-1)!;
+}
+
+function attentionFooter(width: number): string {
+  return [" ↑/↓ select · Enter inspect · Esc back · ? help", "↑/↓ Enter · Esc back · ?", "Enter · Esc back"].find(label => displayWidth(label) <= width) ?? "Enter · Esc";
 }
 
 function sessionFooter(state: ConsoleState, width: number): string {
@@ -626,11 +662,13 @@ export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | nul
   if (height === 1) return lines;
   const room = Math.max(0, height - 2);
   if (state.help) {
-    const labels = width < 32 ? ["1 all · 2 OC · 3 Codex", "/ filter · Enter apply", "Esc clear · Backspace", "↑/↓ select · Enter open", "a running · r refresh", "? help · q exit"]
-      : ["1 all · 2 OpenCode · 3 Codex", "/ filter · Enter apply · Esc clear", "↑/↓ select · Enter open · a running", "r refresh · ? help · q exit"];
+    const labels = width < 32 ? ["1 all · 2 OC · 3 Codex", "/ filter · Enter apply", "Esc clear · Backspace", "t attention · Enter inspect", "↑/↓ select · Enter open", "a running · r refresh", "? help · q exit"]
+      : ["1 all · 2 OpenCode · 3 Codex", "/ filter · Enter apply · Esc clear", "t attention · Enter inspect only", "↑/↓ select · Enter open · a running", "r refresh · ? help · q exit"];
     for (const label of labels) lines.push(row(label, width));
   } else if (state.view.kind === "session") {
     renderSessionView(lines, state, snapshot, width, room, true, !error && Boolean(snapshot?.ready));
+  } else if (state.view.kind === "attention") {
+    renderAttention(lines, state, snapshot, width, room, Boolean(error || (snapshot && !snapshot.ready)));
   } else {
     const sessions = stateSessions(snapshot, state);
     syncSelection(state, sessions);
@@ -667,6 +705,7 @@ export function renderTiny(snapshot: ConsoleSnapshot | null, error: string | nul
   while (lines.length < height - 1) lines.push(row("", width));
   const footer = state.help ? "? / Esc close help"
     : state.view.kind === "session" ? sessionFooter(state, width)
+      : state.view.kind === "attention" ? attentionFooter(width)
       : dashboardFooter(state, width);
   lines.push(styled(row(footer, width), DIM));
   return lines;
@@ -691,6 +730,7 @@ export function renderFrame(snapshot: ConsoleSnapshot | null, error: string | nu
     for (const label of [
       " shortcuts",
       " 1 all · 2 OpenCode · 3 Codex · a running",
+      " t attention · inspect pending requests only",
       " / filter · Enter apply · Esc clear",
       " Backspace edit · ↑/↓ or j/k select",
       " Enter open · PgUp/PgDn page",
@@ -704,6 +744,8 @@ export function renderFrame(snapshot: ConsoleSnapshot | null, error: string | nu
     }
   } else if (state.view.kind === "session") {
     renderSessionView(lines, state, snapshot, width, bodyHeight, false, !error && Boolean(snapshot?.ready));
+  } else if (state.view.kind === "attention") {
+    renderAttention(lines, state, snapshot, width, bodyHeight, Boolean(error || (snapshot && !snapshot.ready)));
   } else {
     renderDashboard(lines, state, snapshot, sessions, width, bodyHeight, quota);
   }
@@ -720,9 +762,31 @@ export function renderFrame(snapshot: ConsoleSnapshot | null, error: string | nu
     ? " ? / Esc close help"
     : state.view.kind === "session"
       ? sessionFooter(state, width)
+      : state.view.kind === "attention" ? attentionFooter(width)
       : dashboardFooter(state, width);
   lines.push(styled(row(footer, width), DIM));
   return lines;
+}
+
+function renderAttention(lines: string[], state: ConsoleState, snapshot: ConsoleSnapshot | null, width: number, height: number, stale: boolean): void {
+  const start = lines.length;
+  const pending = snapshot?.pending ?? [];
+  state.attentionSelected = Math.max(0, Math.min(state.attentionSelected, pending.length - 1));
+  lines.push(styled(row(` Attention${stale ? " stale" : ""} · ${snapshot ? pending.length : "?"} observed`, width), BOLD));
+  lines.push(styled(row(width >= 60 ? " Partial visibility · OpenCode active only · Codex supervised only · inspect only" : " Partial · inspect only", width), YELLOW));
+  if (!snapshot) lines.push(styled(row(" Pending requests unavailable", width), DIM));
+  else if (!pending.length) lines.push(styled(row(" No pending requests observed", width), DIM));
+  else {
+    const capacity = Math.max(1, height - (lines.length - start));
+    state.pageSize = capacity;
+    const first = Math.max(0, Math.min(state.attentionSelected - capacity + 1, pending.length - capacity));
+    for (let index = first; index < Math.min(first + capacity, pending.length); index++) {
+      const item = pending[index];
+      const session = snapshot.sessions.find(entry => entry.runtime === item.runtime && entry.id === item.sessionId);
+      const label = width < 32 ? `${item.runtime === "opencode" ? "OC" : "Codex"} ${item.kind} ${session?.title ?? item.sessionId}` : `${item.runtime} · ${item.kind} · ${session?.title ?? item.sessionId}`;
+      lines.push(styled(row(`${index === state.attentionSelected ? ">" : " "} ${label}`, width), index === state.attentionSelected ? BOLD : TEXT));
+    }
+  }
 }
 
 function renderDashboard(lines: string[], state: ConsoleState, snapshot: ConsoleSnapshot | null, sessions: ConsoleSession[], width: number, height: number, quota: ConsoleQuota | null): void {
@@ -808,8 +872,19 @@ function renderSessionView(lines: string[], state: ConsoleState, snapshot: Conso
     ? latest.reasoningParts?.some(part => part.status === "active") ? " · reasoning"
       : latest.tools?.some(tool => tool.status === "running" || tool.status === "pending") ? " · tools" : ""
     : "";
-  lines.push(styled(rowLeftRight(` ${runtime} · ${session?.title ?? (state.view.kind === "session" ? state.view.sessionId : "?")}`, live ? `running · live${phase} ` : `${session ? sessionStatus(session) : "unavailable"}${running && !fresh ? " · stale" : ""} `, width), BOLD));
-  if (runtime === "codex") lines.push(styled(row(" Bounded history previews · no live deltas", width), DIM));
+  lines.push(styled(rowLeftRight(` ${runtime} · ${session?.title ?? (state.view.kind === "session" ? state.view.sessionId : "?")}`, live ? `running · live${phase} ` : `${session ? sessionStatus(session) : "unavailable"}${session && !fresh ? " · stale" : ""} `, width), BOLD));
+  if (runtime === "codex") {
+    lines.push(styled(row(" Bounded history previews · no live deltas", width), DIM));
+    lines.push(styled(row(` Execution evidence · ${!session ? "unavailable" : session.running === null ? "unknown" : "verified"}${session && !fresh ? " · stale" : ""}`, width), DIM));
+    const history = state.codexHistory;
+    const status = history ? `native ${history.historyComplete ? "complete" : "incomplete"} · page ${history.pageComplete ? "complete" : "limited"}` : state.transcriptError ? "unavailable" : "loading";
+    lines.push(styled(row(` History · ${status}${history && state.transcriptError ? " · stale" : ""}`, width), DIM));
+    if (state.transcript && !compact) {
+      const output = state.transcript.filter(entry => entry.outputTruncated).length;
+      const preview = state.transcript.filter(entry => entry.previewTruncated).length;
+      lines.push(styled(row(` Page truncation · native output ${output} · preview ${preview}`, width), DIM));
+    }
+  }
   if (!compact && runtime === "codex" && session?.running === null) {
     lines.push(styled(row(" Codex · execution outcome unverified", width), YELLOW));
   }
@@ -823,7 +898,7 @@ function renderSessionView(lines: string[], state: ConsoleState, snapshot: Conso
   const pending = (snapshot?.pending ?? []).filter((action) => session && action.runtime === session.runtime && action.sessionId === session.id);
   if (pending.length) lines.push(styled(row(` Pending ${pending.length} · ${pending[0].kind}: ${pending[0].label}`, width), YELLOW));
   if (state.transcriptError) {
-    lines.push(styled(row(` Transcript ${state.transcript?.length ? "stale" : "unavailable"}: ${oneLine(state.transcriptError)}`, width), RED));
+    lines.push(styled(row(` Transcript ${state.transcript !== null ? "stale" : "unavailable"}: ${oneLine(state.transcriptError)}`, width), RED));
   }
   if (!compact) lines.push(styled(rule(width), DIM));
   const rendered = transcriptLines(state.transcript ?? [], width, live, session?.agent ?? null, runtime);
@@ -835,7 +910,7 @@ function renderSessionView(lines: string[], state: ConsoleState, snapshot: Conso
   const shown = rendered.slice(offset, offset + room);
   if (shown.length === 0) {
     if (!state.transcriptError) {
-      lines.push(styled(row(state.transcript === null ? " Loading transcript…" : " No messages recorded yet.", width), DIM));
+      lines.push(styled(row(state.transcript === null ? " Loading transcript…" : runtime === "codex" ? " No messages in this bounded replay." : " No messages recorded yet.", width), DIM));
     }
   } else {
     for (const line of shown) {

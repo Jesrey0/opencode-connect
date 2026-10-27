@@ -78,6 +78,12 @@ with runtime-labeled rows and runtime-specific detail routing. On the dashboard,
 filters title, ID, cwd, model, agent, mode, or effort, with Backspace to edit,
 Enter to finish, and Esc to clear. `a` restricts the list to verified running
 sessions, `?` opens local help, and the footer shows context-sensitive commands.
+`t` opens an inspect-only attention list of observed `pending` requests; arrows,
+page keys, or j/k navigate, Enter opens the associated session, and Esc returns.
+It never approves or answers requests. Counts are observed requests, not a global
+queue: OpenCode pending reads cover observed active sessions on a best-effort
+basis, and Codex pending reads cover supervised sessions only. Failed reads and
+stale snapshots can leave the list incomplete.
 Counts describe the observed inventory, not all historical sessions. OpenCode
 usage totals and Codex quota are separate measurements. Codex combines one
 native history page with supervised workers, including workers absent from that
@@ -98,8 +104,11 @@ expensive native Codex history discovery is cached for five minutes (including
 failed reads). Dashboard `r` explicitly refreshes history and quota. Native Codex history reads have a twelve-second deadline to accommodate
 ACP startup, while supervised status keeps a three-second deadline. The plugin
 releases metadata-read ownership on cancellation. Codex detail shows the latest 25 bounded native
-message previews (up to 512 characters each, with truncation markers), replaces
-each history snapshot, and never advertises live deltas. No quota reads or
+message previews (up to 512 characters each), replaces each history snapshot,
+and never advertises live deltas. The inspector separates verified/unknown session
+execution evidence from replay, native history completeness from the console page
+limit, and native output truncation from preview truncation. Failed reads retain
+and mark prior replay stale, including an empty replay. No quota reads or
 session mutations are performed by this inventory view.
 
 The console also resolves active OpenCode sessions missing from the bounded

@@ -21,6 +21,7 @@ import {
   visibleSessions,
   type TranscriptEntry,
   type ConsoleQuota,
+  type CodexHistory,
 } from "./consoleView.js";
 
 const REFRESH_THROTTLE_MS = 750;
@@ -246,25 +247,28 @@ export async function fetchTranscript(client: OpenCodeClient, sessionId: string,
   return entries.reverse();
 }
 
-export async function fetchRuntimeTranscript(client: OpenCodeClient, runtime: Runtime, sessionId: string, includePrompt = true, signal?: AbortSignal): Promise<TranscriptEntry[]> {
+type TranscriptRead = TranscriptEntry[] | { entries: TranscriptEntry[]; history: CodexHistory };
+
+export async function fetchRuntimeTranscript(client: OpenCodeClient, runtime: Runtime, sessionId: string, includePrompt = true, signal?: AbortSignal): Promise<TranscriptRead> {
   if (runtime === "opencode") return fetchTranscript(client, sessionId, includePrompt, signal);
   const querySignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(3000)]) : AbortSignal.timeout(3000);
   const history = await codexQuery(client, { type: "messages", sessionId, limit: TRANSCRIPT_LIMIT }, querySignal);
-  if (!("data" in history)) throw new ConnectorError("Codex history unavailable");
+  if (!("data" in history) || !("historyComplete" in history) || !("nextOffset" in history)) throw new ConnectorError("Codex history unavailable");
   // Native messages are bounded previews, not live activity or completion evidence.
-  return history.data.map((entry): TranscriptEntry => {
+  const entries = history.data.map((entry): TranscriptEntry => {
     if (!("text" in entry) || !("previewTruncated" in entry)) throw new ConnectorError("Codex history unavailable");
     return {
       role: entry.type as "user" | "assistant",
-      text: entry.text + (entry.previewTruncated || entry.outputTruncated ? "\n[preview truncated]" : ""),
+      text: entry.text, previewTruncated: entry.previewTruncated, outputTruncated: entry.outputTruncated,
       ...(entry.id ? { messageId: entry.id } : {}),
     };
   }).reverse();
+  return { entries, history: { historyComplete: history.historyComplete, pageComplete: history.nextOffset === null } };
 }
 
 export type ConsoleReads = {
   snapshot: (refreshHistory?: boolean, signal?: AbortSignal) => Promise<ConsoleSnapshot>;
-  transcript: (sessionId: string, includePrompt: boolean, runtime: Runtime, signal?: AbortSignal) => Promise<TranscriptEntry[]>;
+  transcript: (sessionId: string, includePrompt: boolean, runtime: Runtime, signal?: AbortSignal) => Promise<TranscriptRead>;
 };
 
 // OpenCode events may refresh the dashboard frequently. Codex has no event API:
@@ -273,7 +277,7 @@ export type ConsoleReads = {
 export function consoleReads(client: OpenCodeClient, now = Date.now): ConsoleReads {
   let history: { readAt: number; result: ReturnType<typeof codexQuery> } | undefined;
   let inventory: { readAt: number; result: Promise<CodexInventory>; settled: boolean } | undefined;
-  let transcript: { sessionId: string; readAt: number; result: Promise<TranscriptEntry[]>; signal?: AbortSignal } | undefined;
+  let transcript: { sessionId: string; readAt: number; result: Promise<TranscriptRead>; signal?: AbortSignal } | undefined;
   const readHistory = () => {
     if (!history || now() - history.readAt >= CODEX_HISTORY_REFRESH_MS) {
       history = { readAt: now(), result: codexQuery(client, { type: "sessions" }, AbortSignal.timeout(CODEX_HISTORY_TIMEOUT_MS)) };
@@ -497,11 +501,14 @@ export class ConsoleObserver {
       const snapshot = await this.reads.snapshot(refreshHistory, this.abort.signal);
       if (this.state.quit) return;
       const selected = visibleSessions(this.snapshot, this.state.activeOnly, this.state.scope, this.state.filter)[this.state.selected];
+      const selectedPending = this.snapshot?.pending[this.state.attentionSelected];
       this.snapshot = snapshot;
       const visible = visibleSessions(snapshot, this.state.activeOnly, this.state.scope, this.state.filter);
       const selectedIndex = selected && visible.findIndex(session => session.runtime === selected.runtime && session.id === selected.id);
       if (selectedIndex !== undefined && selectedIndex >= 0) this.state.selected = selectedIndex;
       else syncSelection(this.state, visible);
+      const pendingIndex = selectedPending ? snapshot.pending.findIndex(action => action.runtime === selectedPending.runtime && action.sessionId === selectedPending.sessionId && action.kind === selectedPending.kind && action.id === selectedPending.id) : -1;
+      this.state.attentionSelected = pendingIndex >= 0 ? pendingIndex : Math.max(0, Math.min(this.state.attentionSelected, snapshot.pending.length - 1));
       this.error = null;
     } catch (cause) {
       if (this.state.quit) return;
@@ -513,12 +520,14 @@ export class ConsoleObserver {
       try {
         const readRevision = this.eventRevision;
         const transcriptSignal = AbortSignal.any([this.abort.signal, this.transcriptAbort.signal]);
-        const entries = await this.reads.transcript(view.sessionId, this.transcriptBase === null, view.runtime, transcriptSignal);
+        const result = await this.reads.transcript(view.sessionId, this.transcriptBase === null, view.runtime, transcriptSignal);
+        const entries = Array.isArray(result) ? result : result.entries;
         if (!this.state.quit && this.state.view === view) {
           if (view.runtime === "codex") {
             // Replace each bounded snapshot: null message IDs cannot be merged
             // by identity, and history replay does not provide live deltas.
             this.transcriptBase = entries;
+            this.state.codexHistory = Array.isArray(result) ? null : result.history;
             this.publishTranscript();
             this.state.transcriptError = null;
             this.redraw();

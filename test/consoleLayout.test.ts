@@ -66,8 +66,8 @@ for (const [width, height] of [[80, 24], [120, 32]]) {
     while (expected.length < height - 6) expected.push("");
     expected.push(rule(width), " Model  openai/gpt-6.1-sol#high",
       splitRow(" Agent  build", "s1 ", width), " Cwd    /home/operator/projects/opencode-connect", rule(width),
-      width === 80 ? " 1/2/3 scope · / filter · ↑/↓ select · Enter open · ? help · q exit"
-        : " 1/2/3 scope · / filter · a running · ↑/↓ select · Enter open · r refresh · ? help · q exit");
+      width === 80 ? "↑/↓ Enter · t attention · / · ?"
+        : " 1/2/3 scope · / filter · t attention · a running · ↑/↓ select · Enter open · r refresh · ? help · q exit");
     assert.deepEqual(plain(frame), expected);
     assert.deepEqual(renderFrame(snapshot(), null, state, width, height), frame);
     assert.ok(state.pageSize >= 8);
@@ -85,7 +85,7 @@ test("40x10 tiny dashboard keeps status, selected context and navigation", () =>
     "> opencode · running · Refine the conso…",
     "Model openai/gpt-6.1-sol#high",
     "Cwd …/operator/projects/opencode-connect",
-    "Codex · recent + supervised", "", "", "↑/↓ Enter · / filter · ? help",
+    "Codex · recent + supervised", "", "", "↑/↓ Enter · t attention · / · ?",
   ]);
   assert.equal(state.pageSize, 1);
   handleKey(state, snapshot(), { kind: "down" });
