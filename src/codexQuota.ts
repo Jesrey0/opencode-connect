@@ -1,7 +1,7 @@
 import { watch as fsWatch } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
-import { readCodexUsage } from "../packages/codex-plugin/src/usage.js";
+import { readCodexUsage } from "opencode-codex-subagent/usage";
 import type { ConsoleQuota } from "./consoleView.js";
 
 const DEBOUNCE_MS = 500;

@@ -220,10 +220,22 @@ async function acquireDeploymentLock(paths: DeploymentPaths): Promise<() => void
   return acquireFileLock(path.join(paths.baseDir, "deploy.lock.sqlite"), "deployment");
 }
 
+// A new release must be able to load its compiled console before publication.
+// Keep the import test in the preparation gate: activation still verifies the
+// integrity of the pre-cutover rollback candidate without imposing a newer
+ // console entrypoint contract on a previously sealed release.
+async function verifyPackagedConsole(buildDir: string, exec: ExecFn): Promise<void> {
+  await exec("node", ["--input-type=module", "-e",
+    "import { observeCodexQuota } from './dist/src/codexQuota.js'; if (typeof observeCodexQuota !== 'function') throw new Error('compiled console quota loader unavailable');",
+  ], buildDir);
+}
+
 async function verifyInstalledBuild(buildDir: string, record: BuildRecord, exec: ExecFn): Promise<void> {
   if ((await hashSourceTree(buildDir)).sourceHash !== record.integrity.sourceHash) throw new Error(`source integrity mismatch in build ${record.buildId}`);
   if (await readSourceVersion(buildDir) !== record.version) throw new Error(`build.json version mismatch in build ${record.buildId}`);
-  if (!(await fs.lstat(path.join(buildDir, "dist/src/server.js"))).isFile()) throw new Error("missing regular dist/src/server.js");
+  for (const name of ["server.js", "console.js", "codexQuota.js"]) {
+    if (!(await fs.lstat(path.join(buildDir, "dist/src", name))).isFile()) throw new Error(`missing regular dist/src/${name}`);
+  }
   if (await hashRuntimeTree(buildDir) !== record.integrity.runtimeHash) throw new Error(`runtime integrity mismatch in build ${record.buildId}`);
   // Run only after checksums pass. These imports never start the connector,
   // plugin setup, native service or a model turn. Verify the compiled identity
@@ -300,6 +312,7 @@ export async function prepareBuild(options: {
     try {
       const record = await assertRunnableBuild(target, exec);
       if (record.integrity.sourceHash !== sourceHash) throw new Error("source integrity mismatch with requested snapshot");
+      await verifyPackagedConsole(target, exec);
       return { buildId, path: target, reused: true, record };
     } catch (error) {
       throw new Error(`refusing to reuse corrupt build ${buildId}`, { cause: error });
@@ -335,6 +348,7 @@ export async function prepareBuild(options: {
     // is checked before publication as well as before any later activation.
     await fs.writeFile(path.join(stage, "build.json"), `${JSON.stringify(record, null, 2)}\n`);
     await verifyInstalledBuild(stage, record, exec);
+    await verifyPackagedConsole(stage, exec);
     await fs.rename(stage, target);
     return { buildId, path: target, reused: false, record };
   } finally {

@@ -57,6 +57,9 @@ concurrent operations; different ownership protocols cannot coordinate.
    release. Preparation does not activate or reload either runtime.
 3. Inspect `build.json`, connector output, plugin source, installed workspace exports,
    native directory resolution, RPC/version parity, and production dependencies.
+   Preparation must also import the compiled console quota observer through the
+   plugin workspace export. Activation rechecks sealed integrity and connector
+   identity while preserving the already accepted rollback build's contract.
    Record the immutable build ID/path and intended rollback target.
 4. Preserve the prior connector identity and exact native plugin path/options in a
    protected rollback record. Never log secrets. Validate that the rollback target

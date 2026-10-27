@@ -64,6 +64,8 @@ const fixtureExec: ExecFn = async (cmd, args, cwd) => {
   } else if (args[0] === "run") {
     await mkdir(path.join(cwd, "dist/src"), { recursive: true });
     await writeFile(path.join(cwd, "dist/src/server.js"), "built\n");
+    await writeFile(path.join(cwd, "dist/src/console.js"), "export {};\n");
+    await writeFile(path.join(cwd, "dist/src/codexQuota.js"), "export function observeCodexQuota() {}\n");
     const { version } = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
     await writeFile(path.join(cwd, "dist/src/buildInfo.js"), `
       import { readFile } from 'node:fs/promises';
@@ -490,8 +492,10 @@ test("prepare reuses an identical build only after installed integration and com
       { cmd: "node", args: ["scripts/verify-release-version.mjs"], cwd: src },
       { cmd: "node", args: ["scripts/verify-integration.mjs"], cwd: result.path },
     ]);
-    assert.equal(calls.length, 3);
+    assert.equal(calls.length, 4);
     assert.equal(calls[2].args[0], "--input-type=module");
+    assert.equal(calls[3].args[0], "--input-type=module");
+    assert.match(calls[3].args[2], /codexQuota/);
     const record = await loadBuildRecord(result.path);
     assert.equal(record.buildId, buildId);
   } finally {
@@ -520,9 +524,10 @@ test("fresh prepare builds with the locked toolchain before pruning dev dependen
       { cmd: "npm", args: ["prune", "--omit=dev"] },
       { cmd: "node", args: ["scripts/verify-integration.mjs"] },
     ]);
-    assert.equal(calls.length, 6);
+    assert.equal(calls.length, 7);
     assert.equal(calls[5].cmd, "node");
     assert.equal(calls[5].args[0], "--input-type=module");
+    assert.match(calls[6].args[2], /codexQuota/);
     assert.equal(await readFile(path.join(result.path, "dist", "src", "server.js"), "utf8"), "built\n");
     assert.equal((await loadBuildRecord(result.path)).buildId, result.buildId);
   } finally {
@@ -692,5 +697,27 @@ test("source metadata never throws outside git", async () => {
     assert.equal(meta.available, false);
   } finally {
     await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("prepare rejects a compiled console whose package dependency cannot be resolved", async () => {
+  const src = await fakeSource({ "src/a.ts": "export const a = 1;\n" });
+  const base = await tempDir("opencode-deploy-console-import-");
+  try {
+    const { buildId } = await hashSourceTree(src);
+    await assert.rejects(prepareBuild({
+      sourceDir: src, baseDir: base,
+      exec: async (cmd, args, cwd) => {
+        await fixtureExec(cmd, args, cwd);
+        if (cmd === "npm" && args[0] === "run" && args[1] === "build") {
+          await writeFile(path.join(cwd, "dist/src/codexQuota.js"),
+            "import '../missing-usage.js'; export function observeCodexQuota() {}\n");
+        }
+      },
+    }), /ERR_MODULE_NOT_FOUND/);
+    await assert.rejects(stat(buildDirFor(deploymentPaths(base), buildId)), { code: "ENOENT" });
+    assert.equal(await readLinkState(deploymentPaths(base).currentLink), null);
+  } finally {
+    await Promise.all([rm(src, { recursive: true, force: true }), rm(base, { recursive: true, force: true })]);
   }
 });
