@@ -51,13 +51,13 @@ for (const [width, height] of [[80, 24], [120, 32]]) {
     const expected = [
       splitRow("  opencode connect", "observer · connected · read-only ", width),
       rule(width),
-      splitRow(" 1 running · 1 pending", "opencode 2.0.24 · pid 7 ", width),
+      width === 80 ? " OpenCode 3 · Codex 0 · 1 running · 1 pending" : splitRow(" OpenCode 3 · Codex 0 · 1 running · 1 pending", "opencode 2.0.24 · pid 7 ", width),
       " Codex · recent + supervised",
       " Needs 0xOperator · permission: native permission request",
-      splitRow(" Usage  234.5k tokens · $2.34 · 48 prompts · 136 steps", "4 days · 3 streak ", width),
+      width === 80 ? " OpenCode usage 234.5k tokens · $2.34 · 48 prompts · 136 steps" : splitRow(" OpenCode usage 234.5k tokens · $2.34 · 48 prompts · 136 steps", "4 days · 3 streak ", width),
       " Models openai/gpt-6.1-sol, anthropic/claude-sonnet-4-6, google/gemini-3.1-pro",
       "",
-      splitRow(" Sessions", "3 recent ", width),
+      " Sessions  [1 All] 2 OpenCode 3 Codex · 3 shown",
       splitRow("> opencode running     Refine the console", "pending ", width),
       "  opencode succeeded   Verify the parser",
       "  opencode failed      Review native events",
@@ -66,8 +66,8 @@ for (const [width, height] of [[80, 24], [120, 32]]) {
     while (expected.length < height - 6) expected.push("");
     expected.push(rule(width), " Model  openai/gpt-6.1-sol#high",
       splitRow(" Agent  build", "s1 ", width), " Cwd    /home/operator/projects/opencode-connect", rule(width),
-      width === 80 ? " ↑/↓ select · Enter open · a active/all · ? help · q exit"
-        : " ↑/↓ select · Enter open · a active/all · PgUp/PgDn page · ? help · q exit");
+      width === 80 ? " 1/2/3 scope · / filter · ↑/↓ select · Enter open · ? help · q exit"
+        : " 1/2/3 scope · / filter · a running · ↑/↓ select · Enter open · r refresh · ? help · q exit");
     assert.deepEqual(plain(frame), expected);
     assert.deepEqual(renderFrame(snapshot(), null, state, width, height), frame);
     assert.ok(state.pageSize >= 8);
@@ -80,11 +80,12 @@ test("40x10 tiny dashboard keeps status, selected context and navigation", () =>
   assertFrame(frame, 40, 10);
   assert.deepEqual(plain(frame), [
     "opencode connect · read-only",
-    "3 sessions · 1 running · 1 pending",
+    "OC 3 · Codex 0 · 1 running · 1 pending",
+    "[1 All] 2 OpenCode 3 Codex",
     "> opencode · running · Refine the conso…",
     "Model openai/gpt-6.1-sol#high",
     "Cwd …/operator/projects/opencode-connect",
-    "Codex · recent + supervised", "", "", "", "↑/↓ select · Enter open · ? help",
+    "Codex · recent + supervised", "", "", "↑/↓ Enter · / filter · ? help",
   ]);
   assert.equal(state.pageSize, 1);
   handleKey(state, snapshot(), { kind: "down" });
@@ -102,6 +103,61 @@ test("empty inventory navigation keeps a valid selection", () => {
   state.selected = -4;
   assertFrame(renderFrame(snap, null, state, 80, 24), 80, 24);
   assert.equal(state.selected, 0);
+});
+
+test("filtered dashboards show scope, query and no matches without claiming a global empty inventory", () => {
+  const snap = snapshot();
+  snap.sessions.push({ ...snap.sessions[0], runtime: "codex", id: "c", title: "History", running: null });
+  const state = emptyState();
+  state.scope = "codex";
+  state.activeOnly = true;
+  state.filter = "missing";
+  for (const [width, height] of [[40, 10], [44, 14], [80, 24], [120, 32]]) {
+    const frame = renderFrame(snap, null, state, width, height, { status: "connecting", usage: null });
+    assertFrame(frame, width, height);
+    const text = plain(frame).join("\n");
+    assert.match(text, /\[3 Codex\]/);
+    assert.match(text, /missing/);
+    assert.match(text, /running only/);
+    assert.match(text, /No sessions match active filters/);
+    assert.doesNotMatch(text, /No sessions observed yet/);
+    assert.match(text, /1 running/); // The unverified Codex history is not counted as running.
+  }
+});
+
+test("search and local help stay within terminal dimensions and sanitize query text", () => {
+  for (const [width, height] of [[24, 8], [40, 10], [44, 14], [80, 24], [120, 32]]) {
+    const state = emptyState();
+    state.filtering = true;
+    state.filter = "safe\x1b]0;PRIVATE\x07\nnext";
+    const frame = renderFrame(snapshot(), null, state, width, height);
+    assertFrame(frame, width, height);
+    assert.doesNotMatch(plain(frame).join("\n"), /PRIVATE/);
+    assert.match(plain(frame).join("\n"), /safe next/);
+    state.filtering = false;
+    state.help = true;
+    assertFrame(renderFrame(snapshot(), null, state, width, height), width, height);
+  }
+});
+
+test("context footers fit without ellipses and compact counts remain readable", () => {
+  const snap = snapshot();
+  for (const [width, height] of [[24, 8], [40, 10], [44, 14], [60, 24], [80, 24], [120, 32]]) {
+    const state = emptyState();
+    for (const mode of ["dashboard", "filter", "help", "session", "paused"] as const) {
+      state.filtering = mode === "filter";
+      state.help = mode === "help";
+      state.view = mode === "session" || mode === "paused" ? { kind: "session", runtime: "opencode", sessionId: "s1" } : { kind: "dashboard" };
+      state.follow = mode !== "paused";
+      const frame = renderFrame(snap, null, state, width, height);
+      assertFrame(frame, width, height);
+      assert.doesNotMatch(plain(frame).at(-1)!, /…/);
+    }
+  }
+  const narrow = plain(renderFrame(snap, null, emptyState(), 24, 8)).join("\n");
+  assert.match(narrow, /OC:3 C:0 run:1 pend:1/);
+  const normal = plain(renderFrame(snap, null, emptyState(), 44, 14)).join("\n");
+  assert.match(normal, /OC 3 · Codex 0 · 1 running · 1 pending/);
 });
 
 test("bracketed paste ignores shortcuts and recognizes split end markers", () => {
@@ -211,7 +267,7 @@ test("the dashboard renders sanitized Codex quota windows and labels retained da
   };
   const frame = renderFrame(snapshot(), null, emptyState(), 80, 24, quota);
   const text = plain(frame).join("\n");
-  assert.match(text, /Codex stale · 5h 31% · wk 72% · stale · unknown age/);
+  assert.match(text, /Codex quota stale · 5h 31% · wk 72% · stale · unknown age/);
   assert.equal(frame.length, 24);
 });
 
@@ -233,12 +289,12 @@ test("combined dashboard quota never attributes another bucket to Codex", () => 
       const frame = renderFrame(snapshot(), null, emptyState(), width, height, quota);
       assertFrame(frame, width, height);
       const text = plain(frame).join("\n");
-      if (bucketKey === "codex") assert.match(text, /Codex · 5h 31%/);
+      if (bucketKey === "codex") assert.match(text, /Codex quota · 5h 31%/);
       else {
         assert.match(text, width < 32 ? /Codex · no Codex bucket/ : /Codex quota · no codex-labeled bucket/);
         assert.doesNotMatch(text, /31%|72%/);
       }
-      if (width >= 44) assert.match(text, /Usage/);
+      if (width >= 44) assert.match(text, /OpenCode usage/);
     }
   }
 });
@@ -381,7 +437,8 @@ test("long model summaries disclose overflow instead of cutting off the last mod
     const frame = renderFrame(snap, null, emptyState(), width, 24);
     assertFrame(frame, width, 24);
     assert.match(plain(frame)[6], /^ Models provider\/.*…  \+2 more$/);
-    assert.match(plain(frame)[5], /234\.5k tokens.*\$2\.34.*48 prompts.*136 steps.*4 days.*3 streak/);
+    assert.match(plain(frame)[5], /OpenCode usage.*234\.5k tokens.*\$2\.34.*48 prompts.*136 steps/);
+    if (width >= 90) assert.match(plain(frame)[5], /4 days.*3 streak/);
   }
 });
 
@@ -453,4 +510,16 @@ test("usage model summary does not repeat identical model labels", () => {
   assert.equal(modelRow.match(/openai\/gpt-6\.1-sol/g)?.length, 1);
   assert.match(modelRow, /opencode\/space-bunny-free/);
   assert.doesNotMatch(modelRow, /\+\d+ more/);
+});
+
+
+test("medium terminals prioritize visible session rows over optional details", () => {
+  const state = emptyState();
+  const frame = renderFrame(snapshot(), null, state, 52, 16);
+  assertFrame(frame, 52, 16);
+  const text = plain(frame).join("\n");
+  assert.match(text, /Refine the console/);
+  assert.match(text, /Verify the parser/);
+  assert.match(text, /Review native events/);
+  assert.doesNotMatch(text, / Cwd    /);
 });

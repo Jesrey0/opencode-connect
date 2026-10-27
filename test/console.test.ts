@@ -27,6 +27,72 @@ test("visibleSessions honors the active-only filter", () => {
   assert.deepEqual(visibleSessions(snap, true).map((s) => s.id), ["s1"]);
 });
 
+test("scope and incremental search constrain navigation and preserve a matching selection", () => {
+  const snap = snapshot();
+  snap.sessions.push({ ...snap.sessions[1], runtime: "codex", id: "c1", title: "Parser history", cwd: "/work/codex", agent: null, model: "gpt-codex", mode: "workspace-write", reasoningEffort: "high", running: null, outcome: null });
+  const state = emptyState();
+  const char = (value: string) => handleKey(state, snap, { kind: "char", value });
+  state.selected = 1;
+  char("/");
+  char("b"); // s2 still matches by agent/model/cwd
+  assert.equal(visibleSessions(snap, state.activeOnly, state.scope, state.filter)[state.selected].id, "s2");
+  handleKey(state, snap, { kind: "backspace" });
+  assert.equal(visibleSessions(snap, state.activeOnly, state.scope, state.filter)[state.selected].id, "s2");
+  for (const c of "PARSER") char(c);
+  assert.deepEqual(visibleSessions(snap, false, state.scope, state.filter).map(s => s.id), ["s1", "c1"]);
+  handleKey(state, snap, { kind: "enter" });
+  char("3");
+  assert.deepEqual(visibleSessions(snap, false, state.scope, state.filter).map(s => s.id), ["c1"]);
+  handleKey(state, snap, { kind: "end" });
+  handleKey(state, snap, { kind: "enter" });
+  assert.deepEqual(state.view, { kind: "session", runtime: "codex", sessionId: "c1" });
+  handleKey(state, snap, { kind: "escape" });
+  char("2");
+  handleKey(state, snap, { kind: "enter" });
+  assert.deepEqual(state.view, { kind: "session", runtime: "opencode", sessionId: "s1" });
+});
+
+test("search matches sanitized native fields, is bounded, and never executes typed shortcuts", () => {
+  const snap = snapshot();
+  snap.sessions[1] = { ...snap.sessions[1], title: "Hi\x1b[31mThere", mode: "workspace-write", reasoningEffort: "high" };
+  snap.sessions.push({ ...snap.sessions[1], runtime: "codex", id: "c1", model: "gpt-codex", modelProvider: "openai", variant: null });
+  for (const query of ["s2", "/TMP/B", "OPENAI/B", "BUILD", "workspace-WRITE", "HIGH", "hithere"]) {
+    assert.ok(visibleSessions(snap, false, "all", query).some(s => s.id === "s2"), query);
+  }
+  assert.deepEqual(visibleSessions(snap, false, "all", "31m"), []);
+  assert.deepEqual(visibleSessions(snap, false, "codex", "OPENAI/GPT-CODEX").map(s => s.id), ["c1"]);
+  const state = emptyState();
+  handleKey(state, snap, { kind: "char", value: "/" });
+  for (const value of "rq?123a") handleKey(state, snap, { kind: "char", value });
+  assert.equal(state.filter, "rq?123a");
+  assert.equal(state.scope, "all");
+  assert.equal(state.help, false);
+  assert.equal(state.quit, false);
+  assert.equal(state.activeOnly, false);
+  handleKey(state, snap, { kind: "backspace" });
+  assert.equal(state.filter, "rq?123");
+  for (let i = 0; i < 150; i++) handleKey(state, snap, { kind: "char", value: "x" });
+  assert.equal(String(state.filter).length, 128);
+  handleKey(state, snap, { kind: "escape" });
+  assert.equal(state.filter, "");
+  assert.equal(state.filtering, false);
+});
+
+test("empty filtered results cannot open hidden sessions and Esc clears the filter", () => {
+  const snap = snapshot();
+  const state = emptyState();
+  handleKey(state, snap, { kind: "char", value: "3" });
+  assert.equal(handleKey(state, snap, { kind: "enter" }), false);
+  assert.deepEqual(state.view, { kind: "dashboard" });
+  handleKey(state, snap, { kind: "char", value: "/" });
+  handleKey(state, snap, { kind: "char", value: "z" });
+  handleKey(state, snap, { kind: "enter" });
+  assert.equal(handleKey(state, snap, { kind: "enter" }), false);
+  handleKey(state, snap, { kind: "escape" });
+  assert.equal(state.filter, "");
+  assert.equal(state.scope, "codex");
+});
+
 test("sessionStatus prefers running, then outcome, then idle", () => {
   const snap = snapshot();
   assert.equal(sessionStatus(snap.sessions[0]), "running");
@@ -87,6 +153,8 @@ test("InputDecoder decodes arrows, enter, paging, and standalone escape", () => 
   const decoder = new InputDecoder();
   assert.deepEqual(decoder.push(0x1b).concat(decoder.push(0x5b)).concat(decoder.push(0x42)), [{ kind: "down" }]);
   assert.deepEqual(decoder.push(0x0d), [{ kind: "enter" }]);
+  assert.deepEqual(decoder.push(0x7f), [{ kind: "backspace" }]);
+  assert.deepEqual(decoder.push(0x08), [{ kind: "backspace" }]);
   assert.deepEqual(decoder.push(0x1b).concat(decoder.push(0x5b)).concat(decoder.push(0x35)).concat(decoder.push(0x7e)), [{ kind: "pageUp" }]);
   assert.deepEqual(decoder.push(0x61), [{ kind: "char", value: "a" }]);
   assert.deepEqual([...Buffer.from("é")].flatMap((byte) => decoder.push(byte)), []);
@@ -303,6 +371,39 @@ test("refresh keeps the selected session when the inventory reorders", async () 
   assert.deepEqual(state.view, { kind: "session", runtime: "opencode", sessionId: "s2" });
 });
 
+test("refresh retains the selected filtered runtime and identity after reordering", async () => {
+  const state = emptyState();
+  state.scope = "codex";
+  state.filter = "work";
+  let moved = false;
+  const first = { ...snapshot().sessions[0], runtime: "codex" as const, title: "work one" };
+  const second = { ...first, id: "s2", title: "work two" };
+  const observer = new ConsoleObserver(state, {
+    snapshot: async () => ({ ...snapshot(), sessions: moved ? [second, snapshot().sessions[0], first] : [first, second, snapshot().sessions[0]] }),
+    transcript: async () => [],
+  }, () => {});
+  await observer.refresh();
+  observer.applyKeys([{ kind: "down" }]);
+  moved = true;
+  await observer.refresh();
+  observer.applyKeys([{ kind: "enter" }]);
+  assert.deepEqual(state.view, { kind: "session", runtime: "codex", sessionId: "s2" });
+});
+
+test("typing r in a filter does not schedule a history refresh", async () => {
+  const state = emptyState();
+  const historyFlags: boolean[] = [];
+  const observer = new ConsoleObserver(state, {
+    snapshot: async (refreshHistory) => { historyFlags.push(Boolean(refreshHistory)); return snapshot(); },
+    transcript: async () => [],
+  }, () => {});
+  await observer.refresh();
+  assert.equal(observer.applyKeys([{ kind: "char", value: "/" }, { kind: "char", value: "r" }]), false);
+  await observer.refresh();
+  assert.deepEqual(historyFlags, [false, false]);
+  assert.equal(state.filter, "r");
+});
+
 test("stream outage remains visible after a successful snapshot and suppresses live mode", async () => {
   const state = emptyState();
   state.view = { kind: "session", runtime: "opencode", sessionId: "s1" };
@@ -498,6 +599,35 @@ test("help overlay blocks dashboard r from refreshing quota", () => {
   `], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
   assert.equal(result.status, 0, result.stderr);
   assert.doesNotMatch(result.stdout, /QUOTA_REFRESH/);
+  assert.match(result.stdout, /\x1b\[\?1049l/);
+});
+
+test("filter input blocks dashboard r from refreshing quota", () => {
+  const result = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "--eval", `
+    import { registerHooks } from "node:module";
+    registerHooks({ load(url, context, nextLoad) {
+      if (url.endsWith("/src/native.ts")) return {
+        format: "module", shortCircuit: true,
+        source: 'export async function connectNative() { return { client: { server: { info: async () => ({ version: "2.0.24", pid: 1 }) }, session: { active: async () => ({}), list: async () => ({ data: [], cursor: { next: null } }), stats: async () => null }, event: { subscribe: async function* () { await new Promise(() => {}); } } } }; }',
+      };
+      if (url.endsWith("/src/codexQuota.ts")) return {
+        format: "module", shortCircuit: true,
+        source: 'export function observeCodexQuota() { return { refresh() { process.stdout.write("QUOTA_REFRESH"); }, async close() {} }; }',
+      };
+      return nextLoad(url, context);
+    } });
+    Object.defineProperty(process.stdout, "isTTY", { value: true });
+    Object.defineProperty(process.stdin, "isTTY", { value: true });
+    process.stdin.setRawMode = () => {};
+    const { run } = await import("./src/console.ts");
+    void run();
+    setTimeout(() => process.stdin.emit("data", Buffer.from("/r?q")), 200);
+    setTimeout(() => process.stdin.emit("data", Buffer.from("\\r")), 300);
+    setTimeout(() => process.stdin.emit("data", Buffer.from("q")), 400);
+  `], { cwd: process.cwd(), encoding: "utf8", timeout: 10000 });
+  assert.equal(result.status, 0, result.stderr);
+  assert.doesNotMatch(result.stdout, /QUOTA_REFRESH/);
+  assert.match(result.stdout, /r\?q/);
   assert.match(result.stdout, /\x1b\[\?1049l/);
 });
 

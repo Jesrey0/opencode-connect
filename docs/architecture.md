@@ -73,7 +73,13 @@ Rollback automation swaps connector current/previous only. Restore the correspon
 ## Live console
 
 The read-only terminal console shows both OpenCode and Codex native inventories,
-with runtime-labeled rows and runtime-specific detail routing. Codex combines one
+with runtime-labeled rows and runtime-specific detail routing. On the dashboard,
+`1`, `2`, and `3` select all, OpenCode, or Codex sessions; `/` incrementally
+filters title, ID, cwd, model, agent, mode, or effort, with Backspace to edit,
+Enter to finish, and Esc to clear. `a` restricts the list to verified running
+sessions, `?` opens local help, and the footer shows context-sensitive commands.
+Counts describe the observed inventory, not all historical sessions. OpenCode
+usage totals and Codex quota are separate measurements. Codex combines one
 native history page with supervised workers, including workers absent from that
 page. Native ACP history alone has no turn outcome; the bounded, read-only Codex
 App Server lookup correlates `thread/read` metadata with the newest native turn.

@@ -496,9 +496,9 @@ export class ConsoleObserver {
       this.refreshHistory = false;
       const snapshot = await this.reads.snapshot(refreshHistory, this.abort.signal);
       if (this.state.quit) return;
-      const selected = visibleSessions(this.snapshot, this.state.activeOnly)[this.state.selected];
+      const selected = visibleSessions(this.snapshot, this.state.activeOnly, this.state.scope, this.state.filter)[this.state.selected];
       this.snapshot = snapshot;
-      const visible = visibleSessions(snapshot, this.state.activeOnly);
+      const visible = visibleSessions(snapshot, this.state.activeOnly, this.state.scope, this.state.filter);
       const selectedIndex = selected && visible.findIndex(session => session.runtime === selected.runtime && session.id === selected.id);
       if (selectedIndex !== undefined && selectedIndex >= 0) this.state.selected = selectedIndex;
       else syncSelection(this.state, visible);
@@ -598,7 +598,7 @@ export class ConsoleObserver {
     let changed = false;
     let manualRefresh = false;
     for (const key of keys) {
-      if (!this.state.help && this.state.view.kind === "dashboard" && key.kind === "char" && key.value.toLowerCase() === "r") {
+      if (!this.state.help && !this.state.filtering && this.state.view.kind === "dashboard" && key.kind === "char" && key.value.toLowerCase() === "r") {
         this.refreshHistory = true;
         manualRefresh = true;
       }
@@ -741,7 +741,7 @@ export async function run(): Promise<void> {
     let needsRefresh = false;
     let refreshQuota = false;
     for (const key of keys) {
-      if (!state.help && state.view.kind === "dashboard" && key.kind === "char" && key.value.toLowerCase() === "r") refreshQuota = true;
+      if (!state.help && !state.filtering && state.view.kind === "dashboard" && key.kind === "char" && key.value.toLowerCase() === "r") refreshQuota = true;
       needsRefresh = observer.applyKeys([key]) || needsRefresh;
       if (state.quit) break;
     }
@@ -801,7 +801,7 @@ export async function run(): Promise<void> {
       },
     });
     await observer.refresh();
-    syncSelection(state, visibleSessions(observer.snapshot, state.activeOnly));
+    syncSelection(state, visibleSessions(observer.snapshot, state.activeOnly, state.scope, state.filter));
     redraw();
     // Keep the loop alive until quit; raw stdin and timers hold the event loop.
     await new Promise<void>(() => {});
