@@ -6,7 +6,7 @@ const location = z.object({ directory: id }).loose();
 // Native projections vary by operation. Their fields remain data, not another
 // connector-owned schema for OpenCode's evolving runtime objects.
 const nativeObject = z.record(z.string(), z.unknown());
-const nextCall = z.object({ tool: z.enum(["opencode.inspectResult", "opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session", "host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList"]), arguments: nativeObject }).strict().nullable();
+const nextCall = z.object({ tool: z.enum(["opencode.inspectResult", "opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session", "host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "command.read"]), arguments: nativeObject }).strict().nullable();
 const outcome = z.enum(["completed", "failed", "incomplete", "unknown"]);
 const retry = z.object({ assistantMessageId: id, attempt: z.number().int().positive(), nextAttemptAtMs: count, error: z.object({ type: id, status: z.number().nullable(), messageOmitted: z.literal(true) }).strict() }).strict().nullable();
 const session = z.object({ sessionId: id, cwd: id, status: z.enum(["inProgress", "completed", "failed", "interrupted", "idle"]), executionOutcome: z.string().nullable(), outcome, outcomeBasis: z.enum(["selectedAssistantMessage", "nativePromptResponse", "nativeTurnHistory", "historyReplay"]), model: z.string().nullable(), modelVariant: z.string().nullable(), agent: z.string().nullable() }).loose();
@@ -26,6 +26,7 @@ const codexInspection = z.object({ session, result: codexResult, pendingActions:
 export const errorOutputSchema = z.object({
   error: z.string(),
   recovery: z.object({ sessionId: id, stage: z.string(), promptSubmitted: z.union([z.literal(false), z.null()]) }).strict().optional(),
+  commandRecovery: z.object({ kind: z.literal("shell"), cwd: id, admission: z.literal("mayHaveOccurred") }).strict().optional(),
   errorCode: z.string().optional(),
   reason: z.string().optional(),
   mutationMayHaveOccurred: z.boolean().optional(),
@@ -62,21 +63,22 @@ export const outputSchemas = {
     z.object({ action: z.enum(["create", "remove"]), projectId: id, directory: id, persisted: z.literal(true), removed: z.literal(true).optional() }).strict(),
     z.object({ action: z.literal("refresh"), projectId: id, persisted: z.literal(true), ...pageShape }).strict(),
   ]),
+  commandRun: z.object({ ...commandShape, kind: z.literal("shell"), cursor: count, cursorUnit: z.literal("bytes"), output: z.string(), size: count.nullable(), truncated: z.boolean().nullable(), drained: z.boolean(), encoding: z.literal("nativeUtf8"), decodingLimit: z.string(), signal: z.string().nullable().optional(), time: nativeObject.optional(), metadataSource: z.enum(["admission", "get"]), metadataVerified: z.boolean(), observation: z.object({ reason: z.enum(["terminal", "outputLimit", "waitTimeout", "cancelled", "observationError"]), stage: z.enum(["get", "output", "wait"]), error: z.object({ type: z.string().nullable(), message: z.string() }).strict().nullable() }).strict(), nextCall }).strict(),
   commandStart: z.object({ ...commandShape, ...cursorShape, signal: z.string().nullable().optional(), time: nativeObject.optional(), sessionId: id.optional(), size: nativeObject.optional(), output: nativeObject.optional() }).strict(),
-  commandRead: z.object({ ...commandShape, ...cursorShape, output: z.string().nullable(), drained: z.boolean(), signal: z.string().nullable().optional(), time: nativeObject.optional(), size: z.union([count, nativeObject]).optional(), truncated: z.boolean().optional(), encoding: z.enum(["nativeUtf8", "utf8", "base64"]).optional(), data: z.string().optional(), decodingLimit: z.string().optional(), replayAvailable: z.boolean().optional(), replay: nativeObject.optional(), replayComplete: z.boolean().optional(), inputSent: z.boolean().optional(), detached: z.literal(true).optional(), sessionId: id.optional(), lastConfirmedInfo: nativeObject.optional(), metadataVerified: z.boolean().optional(), metadataReadError: nativeObject.nullable().optional(), handleAvailable: z.boolean().nullable().optional() }).strict(),
+  commandRead: z.object({ ...commandShape, ...cursorShape, output: z.string().nullable(), drained: z.boolean(), signal: z.string().nullable().optional(), time: nativeObject.optional(), size: z.union([count, nativeObject]).optional(), truncated: z.boolean().optional(), encoding: z.enum(["nativeUtf8", "utf8", "base64"]).optional(), data: z.string().optional(), decodingLimit: z.string().optional(), replayAvailable: z.boolean().optional(), replay: nativeObject.optional(), replayComplete: z.boolean().optional(), inputSent: z.boolean().optional(), detached: z.literal(true).optional(), sessionId: id.optional(), lastConfirmedInfo: nativeObject.optional(), metadataVerified: z.boolean().optional(), metadataReadError: nativeObject.nullable().optional(), handleAvailable: z.boolean().nullable().optional(), nextCall: nextCall.optional() }).strict(),
   commandControl: z.union([
     z.object({ kind: commandShape.kind, location, id, removed: z.literal(true) }).strict(),
     z.object({ kind: commandShape.kind, location, id, action: z.enum(["input", "interrupt", "ctrlD"]), inputSent: z.boolean(), acknowledged: z.literal(false), delivery: z.string() }).strict(),
     z.object({ kind: commandShape.kind, location, id, cwd: id, status: commandShape.status, pid: z.number(), exitCode: z.number().nullable(), resized: z.literal(true), sessionId: id.optional(), size: nativeObject.optional(), output: nativeObject.optional() }).strict(),
   ]),
   start: z.union([
-    z.object({ sessionId: id, messageId: id, cwd: id, model: id.nullable(), modelVariant: id.nullable(), agent: id.nullable(), status: z.literal("inProgress") }).strict(),
+    z.object({ runtime: z.literal("opencode"), sessionId: id, messageId: id, cwd: id, model: id.nullable(), modelVariant: id.nullable(), agent: id.nullable(), status: z.literal("inProgress") }).strict(),
     z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), cwd: id, model: id.nullable(), modelProvider: id.nullable(), reasoningEffort: id.nullable(), modelVariant: z.null(), agent: z.literal("codex"), status: z.literal("inProgress"), mode: z.string().nullable(), capabilities: nativeObject }).strict(),
   ]),
   wait: z.union([
     z.object({ runtime: z.literal("codex"), sessionId: id, messageId: z.null(), state: z.enum(["active", "terminal", "unknown"]), wakeReason: z.enum(["timeout", "terminal", "executionUnavailable", "actionRequired"]), session, result: codexResult, pendingActions: z.array(nativeObject) }).strict(),
-    z.object({ sessionId: id, messageId: id, state: z.literal("terminal"), wakeReason: z.literal("terminal"), session, result }).strict(),
-    z.object({ sessionId: id, messageId: id, state: z.literal("active"), wakeReason: z.enum(["actionRequired", "timeout"]), ...semanticShape }).strict(),
+    z.object({ runtime: z.literal("opencode"), sessionId: id, messageId: id, state: z.literal("terminal"), wakeReason: z.literal("terminal"), session, result }).strict(),
+    z.object({ runtime: z.literal("opencode"), sessionId: id, messageId: id, state: z.literal("active"), wakeReason: z.enum(["actionRequired", "timeout"]), ...semanticShape }).strict(),
   ]),
   inspectActivity: z.union([codexInspection, z.object(semanticShape).strict()]),
   inspectResult: z.union([codexInspection, z.object({ session, result }).strict()]),

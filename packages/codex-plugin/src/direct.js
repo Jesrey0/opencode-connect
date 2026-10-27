@@ -14,6 +14,7 @@ import {
 } from "./codex.js"
 import { UsageUnavailableError, readCodexUsage } from "./usage.js"
 import { MAX_OUTCOME_ROWS, createTurnOutcomeReader } from "./outcomes.js"
+import { loadedPluginIdentity } from "./identity.js"
 
 export const SESSION_RPC_ID = "codex-sessions"
 const MAX_OUTPUT = 65_536
@@ -834,7 +835,7 @@ export function createCodexSessions({ open, connect = openCodexConnection, timeo
   }
   return { start, inspect, wait, interrupt, messages, delete: remove, permissions, respondPermission, usage,
     list,
-    status: () => ({ sessions: [...records.values()].map(r => ({ ...view(r), output: "" })), capabilities: CAPABILITIES, pendingActions: [...records.values()].flatMap(pendingActions) }), dispose }
+    status: () => ({ sessions: [...records.values()].map(r => ({ ...view(r), output: "" })), capabilities: CAPABILITIES, pluginIdentity: loadedPluginIdentity, pendingActions: [...records.values()].flatMap(pendingActions) }), dispose }
 }
 
 const id = Schema.String

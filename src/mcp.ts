@@ -2,7 +2,7 @@ import { EventErrorCode } from "./eventsErrors.js";
 import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { OpenCodeBackend, type QueryInput } from "./opencode.js";
-import { HostBackend } from "./host.js";
+import { HostBackend, CommandAdmissionError } from "./host.js";
 import { exposedUnion, variantsOf, withoutFields } from "./schema.js";
 import { VERSION } from "./version.js";
 import { loadBuildInfo } from "./buildInfo.js";
@@ -15,7 +15,7 @@ import { CODEX_MODES, CODEX_ACTIONS, CODEX_QUERY_TYPES } from "./codex.js";
 import { BrowserBackend } from "./browser/backend.js";
 import { registerBrowserTools } from "./browser/tools.js";
 
-const runtimeSchema = z.enum(["opencode", "codex"]).optional().describe("Session runtime; omission selects OpenCode. Codex uses native ACP session IDs and advertises its narrower capabilities.");
+const runtimeSchema = z.enum(["opencode", "codex"]).optional().describe("Worker runtime; omission selects OpenCode. Retain runtime with sessionId. Codex uses native ACP identities and has a narrower connector API.");
 const opencodeRuntimeSchema = z.literal("opencode").optional().describe("OpenCode-only operation; omission selects OpenCode.");
 const codexUnsupportedStartFields = ["model", "agent", "variant", "permissions", "forkFromSessionId", "beforeMessageId", "title", "files", "agents", "skills"] as const;
 
@@ -52,10 +52,17 @@ const handleShape = { kind: z.enum(["shell", "pty", "persistentPty"]), cwd: z.st
 const ptyHandleShape = { ...handleShape, kind: z.enum(["pty", "persistentPty"]) };
 const commandShape = { cwd: z.string().min(1), command: z.string().min(1).max(65536), title: z.string().max(2000).optional() };
 export const commandStartSchema = exposedUnion("kind", [
-  z.object({ kind: z.literal("shell").describe("Run a shell command string; timeout applies and exited output is not attachable after exit."), ...commandShape, timeoutMs: z.number().int().min(1).max(86400000).optional() }),
+  z.object({ kind: z.literal("shell").describe("Run a native shell command string; timeout limits execution and retained output is read separately."), ...commandShape, timeoutMs: z.number().int().min(1).max(86400000).optional() }),
   z.object({ kind: z.literal("pty").describe("Run an executable with separate args in an ordinary PTY; replay attachment ends at exit."), ...commandShape, args: z.array(z.string().max(4096)).max(100).optional() }),
   z.object({ kind: z.literal("persistentPty").describe("Experimental session-bound PTY; cwd must match the session and native retention/observer cleanup applies."), ...commandShape, sessionId: z.string().min(1), args: z.array(z.string().max(4096)).max(100).optional(), rows: z.number().int().min(1).max(1000).optional(), cols: z.number().int().min(1).max(1000).optional() }),
 ]);
+export const commandRunSchema = z.object({
+  cwd: z.string().min(1).describe("Absolute working directory; returned native canonical cwd owns the handle."),
+  command: z.string().min(1).max(65536),
+  timeoutMs: z.number().int().min(1).max(86400000).optional().describe("Native process timeout in milliseconds: 1..86,400,000; defaults to 120,000. Independent of waitMs.").meta({ default: 120000 }),
+  waitMs: z.number().int().min(0).max(20000).optional().describe("Observation budget after admission: 0..20,000 ms; defaults to 10,000. Expiry leaves the native process running.").meta({ default: 10000 }),
+  limit: z.number().int().min(1).max(65536).optional().describe("Maximum source-output bytes: 1..65,536; defaults to 12,000. JSON bounds may return an earlier read continuation.").meta({ default: 12000 }),
+}).strict();
 export const commandControlSchema = exposedUnion("action", [
   z.object({ ...handleShape, action: z.literal("remove").describe("Terminate and forget this native handle.") }),
   z.object({ ...ptyHandleShape, action: z.literal("resize").describe("Resize a PTY; dimensions are required."), rows: z.number().int().min(1).max(1000), cols: z.number().int().min(1).max(1000) }),
@@ -161,7 +168,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     // Bounds recursive validation work independently of serialized string size.
     // Full permission/attachment sets and 12-step browser workflows fit this budget.
     maxToolInputElements: 4096,
-      instructions: "Use purpose-specific tools; no generic runners. Readiness/recovery, create/continue/fork and activity/result inspection are distinct. Preserve native IDs and canonical cwd; follow nextCall. Reconcile uncertain mutations; worker termination is not task success. Start commands with command.startShell, command.startPty or command.startPersistentPty. Read ordinary handles with command.read; persistent observers use command.observePersistentPty.",
+      instructions: "PlatformPlane is isolated ChatGPT; HostPlane is MCP/Linux; WorkerPlane is hosted OpenCode/Codex contexts. Use purpose-specific tools: command.run for foreground output; command.startShell/startPty/startPersistentPty for admission. Follow command.read nextCall continuations. Preserve runtime/session/prompt IDs, canonical cwd and handles. Reconcile uncertain mutations without replay. Worker tools differ from this catalog; opencode.runtime describes API capabilities. Termination is not success.",
   });
   if (events) {
     const authenticated = async (extra: ServerContext) => {
@@ -196,7 +203,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     const definition = config as Record<string, unknown> & { outputSchema: z.ZodType };
     return register(name, { ...definition, outputSchema: z.union([definition.outputSchema, errorOutputSchema]) } as never, (async (...args: unknown[]) => {
       try { return await callback(...args); }
-      catch (error) { return { ...structuredResult({ error: safeError(error), ...(error instanceof AdmissionError ? { recovery: error.recovery } : {}), ...(error instanceof SessionDeleteError ? { errorCode: error.code, reason: error.reason, mutationMayHaveOccurred: error.mutationMayHaveOccurred } : {}) }), isError: true }; }
+      catch (error) { return { ...structuredResult({ error: safeError(error), ...(error instanceof AdmissionError ? { recovery: error.recovery } : {}), ...(error instanceof CommandAdmissionError ? { errorCode: error.code, reason: error.message, mutationMayHaveOccurred: true, commandRecovery: { kind: error.kind, cwd: error.cwd, admission: error.admission } } : {}), ...(error instanceof SessionDeleteError ? { errorCode: error.code, reason: error.reason, mutationMayHaveOccurred: error.mutationMayHaveOccurred } : {}) }), isError: true }; }
     }) as never);
   }) as typeof server.registerTool;
 
@@ -272,6 +279,16 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       annotations: { readOnlyHint: readOnly, destructiveHint: destructive, openWorldHint: false, idempotentHint: readOnly || action === "refresh" },
     }, async (input) => structuredResult(await host.worktree({ ...input, action } as any)));
   }
+  registerTool("command.run", {
+    title: "Run Native Shell and Observe",
+    description: "Run one native shell command and return bounded foreground output. waitMs bounds observation after admission; timeoutMs independently limits the process. Follow nextCall for running or undrained output. Cancellation stops observation, not execution. Never replay uncertain admission.",
+    inputSchema: commandRunSchema, outputSchema: outputSchemas.commandRun,
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
+  }, async (input, context) => {
+    const result = await host.run(input, context.mcpReq.signal);
+    const failed = result.observation.reason === "observationError" || result.status === "timeout" || result.status === "killed" || result.status === "exited" && result.exitCode !== null && result.exitCode !== 0;
+    return { ...structuredResult(result), ...(failed ? { isError: true } : {}) };
+  });
   for (const [name, kind, description] of [
     ["command.startShell", "shell", "Run a shell command string with a timeout. Then use command.read with the returned handle and cursor."],
     ["command.startPty", "pty", "Run an executable with separate args in an ordinary PTY. Replay attachment ends at exit; then use command.read."],
@@ -333,13 +350,13 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ] });
   const forkSchema = z.object({ runtime: z.literal("opencode").optional(), ...taskShape, forkFromSessionId: z.string().min(1), beforeMessageId: z.string().min(1).optional(), ...modelShape, ...agentShape, ...attachmentShape }).strict();
   for (const [name, title, description, inputSchema] of [
-    ["opencode.create", "Create OpenCode Work", "Create a fresh native session and submit its first task. Omit model/agent for native defaults; reconcile uncertain admission using returned canonical IDs.", createSchema],
-    ["opencode.continue", "Continue OpenCode Work", "Submit a task to one idle native session. Cwd, permissions and variant are inherited; model/agent overrides must match persisted selection. Codex may require mode after restart.", continueSchema],
+    ["opencode.create", "Create Native Worker", "Create a fresh OpenCode or Codex worker and submit its first task. Retain runtime, sessionId and the returned prompt identity. OpenCode accepts model/agent; Codex accepts native mode. Reconcile uncertain admission.", createSchema],
+    ["opencode.continue", "Continue Native Worker", "Submit a task to one idle native session. Cwd, permissions and variant are inherited; model/agent overrides must match persisted selection. Codex may require mode after restart.", continueSchema],
     ["opencode.fork", "Fork OpenCode Work", "Fork an OpenCode session at an optional canonical message boundary, then submit the task. Runtime is OpenCode only; cwd and configuration inherit from the source.", forkSchema],
   ] as const) registerTool(name, { title, description, inputSchema, outputSchema: outputSchemas.start, annotations: startAnnotations }, async (input: any) => structuredResult(await backend.start(input)));
 
   registerTool("opencode.wait", {
-    title: "Wait for OpenCode Work",
+    title: "Wait for Native Worker",
     description: "Synchronize one OpenCode canonical user prompt or the current Codex session turn until execution ends, input is required or timeout. Codex cannot recover execution termination after adapter restart. Terminal execution does not imply assistant success; inspect outcome evidence. Do not poll repeatedly.",
     inputSchema: z.object({
       sessionId: z.string().min(1),
@@ -378,7 +395,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["opencode.sessionDiff", "sessionDiff", "Read a session's native file diff, optionally paged or narrowed to one file patch."],
     ["opencode.inbox", "inbox", "Read pending session inbox entries, or the bounded text of one exact inbox entry."],
     ["opencode.skill", "skill", "Read one canonical skill and its bounded content; cwd selects project context."],
-    ["opencode.tools", "tools", "List native tool-call evidence from one canonical assistant message."],
+    ["opencode.tools", "tools", "List executed tool-call evidence from one canonical assistant message. This does not discover the tools available to a worker."],
     ["opencode.tool", "tool", "Read one exact native tool call's input, error summary, or selected content part."],
     ["opencode.models", "models", "List the native model catalog; compact view omits full specifications."],
     ["opencode.agents", "agents", "List the effective native agent catalog. Defaults to compact view and excludes hidden entries."],
@@ -387,7 +404,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["opencode.message", "message", "Read one exact native message or recover its full text/compaction field by fingerprinted pages."],
     ["opencode.permissions", "permissions", "Read ordered session permission rules or native pending requests. Codex supports pending only."],
     ["opencode.savedApprovals", "savedApprovals", "List project saved permission approvals for the target session."],
-    ["opencode.runtime", "runtime", "Read native runtime capabilities and plugin/MCP/command inventory for cwd."],
+    ["opencode.runtime", "runtime", "Inspect connector API capabilities and runtime context for cwd. OpenCode includes paged plugin/MCP/command inventory; Codex reads plugin RPC capability and loaded identity evidence. This is not the effective agent-tool catalog or an OS-isolation attestation."],
     ["opencode.skills", "skills", "List canonical native skills, optionally in project context."],
     ["opencode.providers", "providers", "List native provider identities and activation state for optional cwd context."],
     ["opencode.usage", "usage", "Read OpenCode cumulative session token activity. Codex quota windows and reset times are read separately with codex.quota."],

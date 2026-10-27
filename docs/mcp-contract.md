@@ -3,7 +3,7 @@
 This document owns the connector's public transport, tool, projection and recovery
 contracts. Live MCP discovery owns the exact deployed schemas. OpenCode owns its
 native catalogs, selection, permissions, lifecycle, ordering and identities; the
-connector does not add another native policy layer. Native browser operations have
+connector does not add another native policy layer. The [architecture topology](architecture.md#environment-topology-and-native-ownership) defines PlatformPlane as isolated ChatGPT, HostPlane as MCP/Linux, and WorkerPlane as hosted runtime contexts. Bounded native-call composition preserves those boundaries. Native browser operations have
 their own [browser contract](browser-capability.md).
 
 ## OpenAI requirements and interface design
@@ -156,7 +156,8 @@ post-turn chat acceptance. See the
 | `host.list`, `host.read`, `host.find`, `host.vcs`, `host.vcsStatus`, `host.vcsBranch`, `host.vcsDiff`, `host.commands`, `host.terminalScreen`, `host.terminalSnapshot` | One purpose-specific native host read each |
 | `host.write` | Native bounded UTF-8/base64 file write, explicit overwrite/fingerprint, persisted readback |
 | `host.worktreeList`, `host.worktreeCreate`, `host.worktreeRemove`, `host.worktreeRefresh` | One purpose-specific native project worktree operation each |
-| `command.startShell`, `command.startPty`, `command.startPersistentPty` | Start one native command kind |
+| `command.run` | Admit one native shell and observe bounded foreground output; preserve the handle and return read-only continuation |
+| `command.startShell`, `command.startPty`, `command.startPersistentPty` | Start one native command kind without foreground observation |
 | `command.read` | Read-only shell/ordinary PTY replay; native handle + canonical cwd/location + saved cursor |
 | `command.observePersistentPty` | Persistent replay with native observer exit cleanup; can remove the exited handle |
 | `command.remove`, `command.resize`, `command.input`, `command.interrupt`, `command.ctrlD` | One purpose-specific native command control each |
@@ -184,7 +185,7 @@ native shell command such as `rg --line-number --glob '*.ts' 'pattern' src`.
 For patching, use native shell `git apply --check` followed by `git apply` with
 a deliberately quoted patch/heredoc. Inspect conflicts and reread VCS state.
 These run through the same command lifecycle; there is no second search/patch
-engine or duplicate exec tool. Exact-version public APIs provide no live LSP,
+engine or competing command execution lifecycle. `command.run` is bounded composition of the same native shell primitives. Exact-version public APIs provide no live LSP,
 symbol lookup, or formatter surface; the connector does not invent one.
 
 Files are read with native `file.read`; file/list paths are checked against the
@@ -236,6 +237,53 @@ The serialized `{ structuredContent }` projection has a repository-policy
 Oversized JSON results fail explicitly; narrow the page or detail. OpenAI's
 256 KiB requirement applies to complete outbound **event request bodies**, not
 tool images or this repository's JSON projection policy.
+
+## Bounded foreground shell composition
+
+`command.run {cwd,command,timeoutMs?,waitMs?,limit?}` calls native shell admission
+exactly once, then observes native status and output. It has no connector-owned
+job registry, subprocess runner or automatic replay. Process timeout defaults to
+120,000 ms and accepts 1..86,400,000. Observation starts after known admission,
+defaults to 10,000 ms and accepts 0..20,000. Zero observation budget admits only.
+The budgets are independent: an observation timeout leaves execution untouched.
+Admission/service-connect time is not included in `waitMs`.
+
+Output defaults to at most 12,000 source bytes and accepts 1..65,536. JSON escape
+expansion can cause earlier continuation so an accepted handle is not discarded
+by the 256 KiB envelope limit. Native byte cursors and decoding caveats still
+apply. Generated shell-read continuations may reduce their page limit for the
+same reason. No read-ahead bytes are silently dropped.
+
+The result retains native kind, canonical cwd/location, id, metadata, output,
+cursor, nullable size/truncated fields, encoding and drain evidence. Before the
+first output read, size and truncation are unknown rather than zero. Metadata
+records whether the last successful observation came from admission or status
+readback, and whether current status observation succeeded. `observation.reason`
+is `terminal`, `outputLimit`, `waitTimeout`, `cancelled` or
+`observationError`; these describe observation, separately from native process
+status/exit code. Terminal output can still be undrained.
+
+If the process is running, output is undrained, or observation fails, `nextCall`
+selects read-only `command.read` with the exact native handle and unread cursor.
+A stalled status/output read is cancelled at the observation deadline. Caller
+cancellation releases observation without killing/removing/restarting execution;
+a disconnected caller may not receive the final handle-bearing response and
+must reconcile uncertainty. No completion is inferred from cancellation.
+
+A failed/lost admission response returns `COMMAND_ADMISSION_UNCERTAIN`,
+`mutationMayHaveOccurred: true` and a `commandRecovery` object containing kind,
+canonical cwd and `admission: "mayHaveOccurred"`. It does not invent a handle.
+Running inventory can assist reconciliation, but an absent running entry does not
+prove nonexecution or rediscover an already exited command. Never automatically
+retry admission. Failures after known admission retain its handle and a read
+continuation. Process failure or observation error sets MCP `isError: true`
+without discarding structured execution evidence; ordinary wait expiry is not
+classified as process failure.
+
+`command.run` is mutating, destructive/open-world and non-idempotent, like shell
+admission. It is a different bounded workflow from explicit `command.startShell`.
+A one-call MCP result does not imply a single internal native request or prove
+end-to-end latency improvement.
 
 ## Command retention and cursor contracts
 
@@ -293,6 +341,21 @@ and cap at 65,536 bytes/code units; live read waits cap at 2 s, attachment/repla
 at 5 s. Shell timeout defaults to 120 s and caps at 24 hours.
 
 ## WorkerPlane
+
+Workers are runtime contexts hosted on HostPlane. The shared facade preserves
+runtime-specific identities and capability restrictions; it does not forward the
+PlatformPlane tool catalog into those contexts. OpenCode admission and wait
+responses explicitly identify `runtime: "opencode"`; Codex retains its own runtime
+field. Save runtime with sessionId, and OpenCode's canonical user messageId where
+required. `opencode.tools` lists past calls, not effective available tools.
+
+`opencode.runtime` exposes bounded `diagnostics` with connector capability scope,
+control dependency and correlation/settings support. OpenCode inventory remains
+paged; Codex uses status RPC and reports optional `pluginIdentity`. Old plugins
+report unavailable identity. Package/native manifest versions and package-relative
+build records identify the loaded implementation but do not attest current file
+integrity, effective worker tools, activity or OS isolation. See the architecture
+capability matrix for supported runtime differences.
 
 `status.readiness`, `status.recovery`, `opencode.create`, `opencode.continue`,
 `opencode.fork`, `opencode.wait`, `opencode.inspectActivity`, `opencode.inspectResult`, individually

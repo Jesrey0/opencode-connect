@@ -17,6 +17,31 @@ The plugin registers only the `codex-sessions` RPC definition. A native OpenCode
 agent named `codex`, like every other native agent, is handled by OpenCode's
 built-in subagent implementation without plugin routing or permission evaluation.
 
+## Runtime context and loaded identity
+
+Codex workers are hosted in the Linux HostPlane with their own native runtime
+context. The connector reaches this plugin through the OpenCode service; an
+OpenCode outage affects that control path, and plugin disposal/reload closes
+supervised Codex executions. Drain active workers before a plugin reload. A
+connector restart alone does not reload the plugin.
+
+ACP admission supplies no PlatformPlane MCP servers and declines filesystem and
+terminal client delegation. Codex uses its own native tools. Runtime-context
+separation does not imply a separate Linux account or container; the selected
+native mode owns its sandbox and approval restrictions.
+
+Plugin `0.4.0` adds `pluginIdentity` to the existing status RPC without changing
+the method set or admitting a model turn. Identity is captured from the loaded
+module's package at import time, independent of cwd or moving release pointers.
+It reports package version, the declared `nativeVersion` pin, and source or
+package-relative build-record evidence. Missing/malformed metadata is explicit;
+a record identity is not a fresh integrity hash or security attestation. The
+connector validates and sanitizes this optional field. Older plugins leave
+identity unavailable rather than inventing loaded-version evidence.
+
+Use `opencode.runtime` with `runtime: "codex"` for this evidence and the current
+connector API capability flags. Effective tools remain session/model scoped.
+
 ## Safety model
 
 Codex is external to OpenCode's command permission system, so direct-session
@@ -83,6 +108,7 @@ is never used, so the backend does not depend on the OpenCode runtime's binary.
 ```
 src/index.js        plugin registration for direct codex-sessions RPC
 src/direct.js       native Codex session supervision and codex-sessions RPC
+src/identity.js     package-relative loaded implementation identity
 src/codex.js        ACP client app, safety envelope, and transport
 src/usage.js        bounded read-only Codex App Server quota reader
 src/stdio.js        shared owned-process shutdown and bounded stderr

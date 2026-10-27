@@ -1,5 +1,68 @@
 # Architecture and operator navigation
 
+## Environment topology and native ownership
+
+- **PlatformPlane** is the isolated ChatGPT app or web environment where the operator runs.
+- **HostPlane** is OpenCode Connect's MCP integration and Linux execution environment.
+- **WorkerPlane** consists of worker contexts hosted on HostPlane, with their respective OpenCode Runtime or Codex Runtime. Their native tools and policies are scoped to those runtime contexts.
+
+```text
+PlatformPlane: isolated ChatGPT / MCP client
+  -> authenticated ingress
+    -> HostPlane: OpenCode Connect MCP adapter / Linux
+      -> native OpenCode location APIs (files, processes, Git, worktrees)
+      -> OpenCode service -> WorkerPlane: OpenCode agent sessions
+                          -> codex-sessions plugin -> WorkerPlane: Codex ACP sessions
+      -> connector browser adapter -> Python / Nodriver / Chrome CDP
+```
+
+Planes describe environments and execution contexts, not tool-name prefixes or
+independent OS security domains. OpenCode and Codex worker tools do not become
+direct MCP operations merely because they are hosted on the same Linux account.
+Native sandbox/approval modes and workspace controls define restrictions.
+
+The integration projects native capabilities and permits bounded composition of
+native calls. Native services retain authoritative execution, conversation and
+turn evidence. Adapters explicitly own transport, observation, leases,
+subscriptions, delivery and bounded supervision. Adapter-owned identities are
+labeled; they never fabricate native runtime identities, supported permissions,
+capabilities or successful outcomes. This architecture includes native OpenCode
+API projection, Codex ACP/plugin supervision and a separate browser adapter.
+
+For deterministic work, `command.run` composes native shell admission and bounded
+observation without allocating an AI worker or a second process registry. A
+worker's foreground shell is a separate agent interface. No public session-free
+agent-tool invocation is assumed. Native start/read/control remain available.
+
+### Runtime capability evidence
+
+`opencode.runtime` describes the connector API in the requested runtime context.
+Its diagnostics state the HostPlane interface, control dependency, session identity
+and supported correlation/settings. OpenCode retains paged plugin/MCP/command
+inventory. Codex retains native capability flags and adds loaded-plugin identity.
+Neither inventory nor static API support is an effective model/agent-tool catalog,
+a current execution-state observation, or an OS-sandbox attestation.
+
+| Connector capability | OpenCode | Codex |
+| --- | --- | --- |
+| Native session identity | runtime + sessionId | runtime + native ACP sessionId |
+| Wait correlation | Canonical user messageId | Current session turn; no exact-prompt correlation |
+| Continuation | Native session | Native session; mode must be known or explicitly supplied after recovery |
+| Model/agent selection, fork, prompt attachments | Supported by native routes | Unsupported by this bridge |
+| Permission configuration | Native ordered rules and pending requests | Native mode and exact advertised approval options |
+| Control path | OpenCode native API | OpenCode service -> codex-sessions plugin RPC -> ACP |
+| Tool surface | Selected native agent/model context | Native Codex runtime; PlatformPlane MCPs are not forwarded by ACP admission |
+
+The shared `opencode.*` facade selects a runtime; it does not assert capability
+parity. Published schemas reject unsupported combinations. Preserve the runtime
+with every saved session reference and the canonical prompt ID where supported.
+
+Codex loaded identity is captured from the loaded package's manifest and its
+package-relative release record. `nativeVersion` is the manifest's declared
+OpenCode pin, not a fresh service probe. Source identity, unavailable metadata and
+old plugins that do not report identity are explicit. A build-record identity
+is provenance evidence, not a fresh integrity hash or security attestation.
+
 ## Repository topology (Node 24 and npm workspaces)
 - Root package: opencode-connect, the MCP adapter, HostPlane and OpenCode session facade (src/).
 - Workspace package: packages/codex-plugin, the native OpenCode V2 plugin, direct Codex ACP backend and read-only App Server quota reader. It is not another MCP server.
@@ -13,10 +76,12 @@ There are two runtime components and one source/install lock. This repository is
 - src/fileLock.ts owns kernel-managed exclusive ownership for Events persistence and deployment mutations. Each owner holds a dedicated SQLite connection for its whole critical section and never unlinks the lock file.
 - src/buildInfo.ts owns the strict release record and package-relative runtime identity. src/deployment.ts owns canonical source staging, installed integrity and release lifecycle validation; there is no cwd identity fallback or old-record adapter.
 - src/opencode.ts is the public WorkerPlane facade: admission, wait/act orchestration, runtime routing and query envelopes.
+- src/runtime/capabilities.ts describes connector API context and restrictions; it does not duplicate live native model/agent/tool catalogs.
 - src/runtime/query.ts owns the native query union and exhaustive resolution, reading native catalogs directly.
 - src/runtime/result.ts owns the inspection contract and bounded, fingerprint-pinned assistant selection. It imports only projections/bounds/continuations, never the facade.
 - src/runtime/projection.ts owns pure native projections and outcome-evidence shapes. Callers import helpers from their owning modules; the facade does not re-export them.
 - src/codex.ts validates the connector-facing RPC boundary; src/codexRpc.ts owns the importable connector declaration. It never executes plugin code or Codex turns directly.
+- packages/codex-plugin/src/identity.js captures package-relative loaded implementation metadata; build-record evidence is distinct from release integrity verification.
 - packages/codex-plugin/src/index.js registers the plugin; direct.js owns native sessions/RPC; codex.js owns the ACP backend; app-server.js owns the read-only App Server JSON-RPC transport; usage.js owns quota read authorization and projection; stdio.js owns shared child-process lifetime and bounded stderr handling. The two protocol transports depend on stdio.js, not on each other.
 - Local plugin configuration names packages/codex-plugin/src, whose index.js is resolved by the pinned native directory loader. npm package exports also resolve to src/index.js; there is no package-root directory wrapper.
 
@@ -27,7 +92,7 @@ The pinned native package declarations and OpenCode V2 [API](https://opencode.ai
 [client](https://opencode.ai/v2/docs/build/client), and
 [RPC](https://opencode.ai/v2/docs/build/plugins/rpc) contracts own this integration.
 V1 server examples do not define V2 selection, message or plugin behavior.
-For Codex: the connector calls the codex-sessions RPC, registered by the workspace plugin in the OpenCode service. Direct Codex uses ACP sessions. The plugin does not intercept OpenCode's native subagent tool. Quota reads call the installed Codex App Server with a short-lived read-only client.
+For Codex: the connector calls the codex-sessions RPC, registered by the workspace plugin in the OpenCode service. Direct Codex uses ACP sessions. This control path depends on the OpenCode service; plugin disposal closes supervised Codex children. The plugin does not intercept OpenCode's native subagent tool. Quota reads call the installed Codex App Server with a short-lived read-only client.
 
 For optional browser operations: the existing MCP handler shares one connector-owned
 `src/browser/backend.ts` across requests. It supervises `src/browser/worker.py` over
@@ -65,6 +130,8 @@ Do not replace checkout node_modules or rebuild its dist beneath an active conso
 Only an authorized operator may prepare/activate/rollback a release or change/reload OpenCode plugin configuration.
 
 Connector deployment stages the workspace but manages only opencode-connect.service. It does not update global plugin configuration or reload the independent OpenCode service. /health proves connector identity/native connectivity, not loaded plugin identity or quota functionality. Switching current alone must not be treated as a plugin reload.
+
+Inspect active OpenCode sessions, supervised Codex children and dependent consoles before a native plugin reload. Reload/disposal is a worker lifecycle event; do not infer independent availability from runtime-context separation.
 
 For each coordinated deployment, record the old plugin configuration and connector build, validate the source gates, then separately authorize preparation, plugin loading and connector activation. Use the explicit immutable builds/<buildId>/packages/codex-plugin/src path to make the loaded version auditable. Preserve existing plugin options. Verify the native plugin inventory, RPC capabilities, direct-session behavior and read-only quota at their owning runtime after the authorized load.
 
