@@ -35,13 +35,13 @@ test("unsupported runtime and Codex field combinations reject in discovery and b
   const f = await fixture();
   const nativeOnly: [string, Record<string, unknown>][] = [
     ["sessionDiff", { sessionId: "s" }], ["inbox", { sessionId: "s" }],
-    ["skill", { skillId: "skill" }], ["tools", { sessionId: "s", messageId: "m" }],
-    ["tool", { sessionId: "s", messageId: "m", toolId: "t", field: "input" }],
+    ["skill", { skillId: "skill" }], ["toolCalls", { sessionId: "s", messageId: "m" }],
+    ["toolCall", { sessionId: "s", messageId: "m", toolId: "t", field: "input" }],
     ["models", {}], ["agents", {}], ["agent", { agentId: "a" }],
     ["savedApprovals", { sessionId: "s" }], ["skills", {}], ["providers", {}], ["usage", {}],
     ["steer", { sessionId: "s", instruction: "task" }],
     ["cancelInbox", { sessionId: "s", inboxId: "i" }], ["updateInbox", { sessionId: "s", inboxId: "i", delivery: "queue" }],
-    ["compact", { sessionId: "s" }], ["command", { sessionId: "s", name: "test", text: "" }],
+    ["compact", { sessionId: "s" }], ["invokeCommand", { sessionId: "s", name: "test", text: "" }],
     ["invokeSkill", { sessionId: "s", skillId: "skill" }], ["respondForm", { sessionId: "s", formId: "f", answer: {} }],
     ["cancelForm", { sessionId: "s", formId: "f" }], ["revertStage", { sessionId: "s", messageId: "m" }],
     ["revertClear", { sessionId: "s" }], ["revertCommit", { sessionId: "s" }],
@@ -80,13 +80,12 @@ test("unsupported runtime and Codex field combinations reject in discovery and b
 test("a failed focused query signals MCP failure and preserves its sanitized typed evidence", async () => {
   const f = await fixture(() => Response.json({ _tag: "ServiceUnavailableError", message: "PRIVATE-UPSTREAM" }, { status: 503 }));
   try {
-    for (const [name, type] of [["opencode.models", "models"], ["codex.quota", "usage"]]) {
+    for (const name of ["opencode.models", "opencode.codexQuota"]) {
       const response = await f.client.callTool({ name, arguments: {} });
       assert.equal(response.isError, true);
       const content = response.structuredContent as any;
-      assert.equal(content.results.length, 1);
-      assert.equal(content.results[0].type, type);
-      assert.equal(typeof content.results[0].error, "string");
+      assert.equal("results" in content, false);
+      assert.equal(typeof content.error, "string");
       assert.equal(JSON.stringify(response).includes("PRIVATE-UPSTREAM"), false);
       assert.equal(f.validate(name, content, "outputSchema"), true);
     }
@@ -94,21 +93,33 @@ test("a failed focused query signals MCP failure and preserves its sanitized typ
   } finally { await f.close(); }
 });
 
-test("focused query outputs reject wrong identities, cardinality and indexes while preserving native objects", async () => {
+test("focused query outputs validate direct fields, owning continuations and native extensions", async () => {
   const f = await fixture();
   try {
-    const entry = { index: 0, type: "models", result: { arbitraryNativeField: { retained: true } } };
-    assert.equal(f.validate("opencode.models", { results: [entry] }, "outputSchema"), true);
-    for (const results of [[], [entry, entry], [{ ...entry, index: 7 }], [{ ...entry, type: "session" }]]) {
-      assert.equal(f.validate("opencode.models", { results }, "outputSchema"), false);
-    }
+    const model = { id: "provider/model", enabled: true, cost: [{ input: 1, output: 2, cache: { read: 0, write: 0 }, context: { min: 0, max: 1000 } }], modalities: ["text"], variants: ["high"], arbitraryNativeField: { retained: true } };
+    const page = { location: { directory: "/tmp" }, view: "compact", data: [model], offset: 0, nextOffset: null, total: 1, fingerprint: "native-fingerprint", nextCall: null, arbitraryNativePageField: { retained: true } };
+    assert.equal(f.validate("opencode.models", page, "outputSchema"), true);
+    assert.equal(f.validate("opencode.models", { ...page, nextOffset: 1, nextCall: { tool: "opencode.models", arguments: { offset: 1, fingerprint: "native-fingerprint" } } }, "outputSchema"), true);
+    for (const malformed of [
+      { results: [{ index: 0, type: "models", result: page }] },
+      { results: [] },
+      { ...page, view: "other" },
+      { ...page, data: {} },
+      { ...page, data: [{ ...model, id: undefined }] },
+      { ...page, data: [{ ...model, enabled: "yes" }] },
+      { ...page, data: [{ ...model, cost: { input: 1, output: 2, cache: { read: 0, write: 0 } } }] },
+      { ...page, data: [{ ...model, cost: [{ ...model.cost[0], input: "free" }] }] },
+      { ...page, total: -1 },
+      { ...page, nextCall: { tool: "opencode.session", arguments: { sessionId: "s" } } },
+    ]) assert.equal(f.validate("opencode.models", malformed, "outputSchema"), false);
+    assert.equal(f.validate("opencode.models", { error: "native operation failed", errorCode: "NATIVE_OPERATION_FAILED" }, "outputSchema"), true);
     const activity = {
       session: { sessionId: "s", cwd: "/tmp", status: "idle", executionOutcome: null, outcome: "unknown", outcomeBasis: "selectedAssistantMessage", model: null, modelVariant: null, agent: null },
       retry: null, outcomeEvidence: {}, nextCall: null, textNextCall: null,
       currentActivity: null, recentMessages: [], pendingActions: [],
     };
-    assert.equal(f.validate("opencode.inspectActivity", activity, "outputSchema"), true);
-    assert.equal(f.validate("opencode.inspectResult", activity, "outputSchema"), false);
+    assert.equal(f.validate("opencode.activity", activity, "outputSchema"), true);
+    assert.equal(f.validate("opencode.result", activity, "outputSchema"), false);
     const result = { session: activity.session, result: {
       outcomeBasis: "selectedAssistantMessage", outcome: "unknown", messageId: null, assistantMessageId: null,
       selectionComplete: true, selectionCursor: null, selectionFingerprint: "f", candidateAssistantMessageId: null,
@@ -116,33 +127,46 @@ test("focused query outputs reject wrong identities, cardinality and indexes whi
       text: "", textPaging: { offset: 0, nextOffset: null, size: 0, cursorUnit: "utf16CodeUnits", fingerprint: "f" },
       truncated: false, nextCall: null, textNextCall: null, completedAtMs: null, finish: null, error: null,
     } };
-    assert.equal(f.validate("opencode.inspectResult", result, "outputSchema"), true);
-    assert.equal(f.validate("opencode.inspectActivity", result, "outputSchema"), false);
+    assert.equal(f.validate("opencode.result", result, "outputSchema"), true);
+    assert.equal(f.validate("opencode.activity", result, "outputSchema"), false);
   } finally { await f.close(); }
 });
 
-test("ordinary reads and persistent observation have disjoint identities and lifecycle annotations", async () => {
+test("shell and terminal reads have disjoint identities, cursors and lifecycle annotations", async () => {
   const f = await fixture();
   const handle = { cwd: "/tmp", id: "p" };
   try {
-    assert.equal(f.validate("command.read", { ...handle, kind: "shell" }), true);
-    assert.equal(f.validate("command.read", { ...handle, kind: "pty" }), true);
-    assert.equal(f.validate("command.observePersistentPty", handle), true);
-    for (const [name, args] of [
-      ["command.read", { ...handle, kind: "persistentPty" }],
-      ["command.observePersistentPty", { ...handle, kind: "persistentPty" }],
-      ["codex.quota", { runtime: "codex" }],
-    ] as const) {
-      assert.equal(f.validate(name, args), false);
-      assert.equal((await f.client.callTool({ name, arguments: args })).isError, true);
+    for (const name of ["command.read", "terminal.read", "terminal.observePersistent"]) {
+      assert.equal(f.validate(name, handle), true, name);
+      for (const kind of ["shell", "pty", "persistentPty"]) {
+        const input = { ...handle, kind };
+        assert.equal(f.validate(name, input), false, name + " rejects kind");
+        assert.equal((await f.client.callTool({ name, arguments: input })).isError, true);
+      }
     }
-    const output = { ...handle, kind: "pty", location: { directory: "/tmp" }, status: "exited", pid: 1, exitCode: 0, retention: "fixture", cursor: 0, cursorUnit: "utf16CodeUnits", output: "", drained: false };
-    assert.equal(f.validate("command.read", output, "outputSchema"), true);
-    assert.equal(f.validate("command.observePersistentPty", output, "outputSchema"), false);
-    const persistent = { ...output, kind: "persistentPty", cursorUnit: "bytes" };
-    assert.equal(f.validate("command.observePersistentPty", persistent, "outputSchema"), true);
-    assert.equal(f.validate("command.read", persistent, "outputSchema"), false);
-    assert.equal(f.validate("codex.quota", {}), true);
+    assert.equal(f.validate("opencode.codexQuota", { runtime: "codex" }), false);
+    assert.equal((await f.client.callTool({ name: "opencode.codexQuota", arguments: { runtime: "codex" } })).isError, true);
+    const base = { ...handle, location: { directory: "/tmp" }, status: "exited", pid: 1, exitCode: 0, retention: "fixture", cursor: 0, output: "", drained: false };
+    const outputs = [
+      ["command.read", { ...base, kind: "shell", cursorUnit: "bytes", nextCall: null }],
+      ["terminal.read", { ...base, kind: "pty", cursorUnit: "utf16CodeUnits" }],
+      ["terminal.observePersistent", { ...base, kind: "persistentPty", cursorUnit: "bytes" }],
+    ] as const;
+    for (const [name, output] of outputs) {
+      for (const [other] of outputs) assert.equal(f.validate(other, output, "outputSchema"), name === other, other + " vs " + output.kind);
+      assert.equal(f.validate(name, { ...output, cursorUnit: output.cursorUnit === "bytes" ? "utf16CodeUnits" : "bytes" }, "outputSchema"), false, name + " rejects wrong cursor unit");
+    }
+    const { tools } = await f.client.listTools();
+    for (const name of ["command.read", "terminal.read"]) {
+      assert.equal(tools.find(tool => tool.name === name)!.annotations!.readOnlyHint, true);
+      assert.equal(tools.find(tool => tool.name === name)!.annotations!.destructiveHint, false);
+      assert.equal(tools.find(tool => tool.name === name)!.annotations!.idempotentHint, true);
+    }
+    const persistent = tools.find(tool => tool.name === "terminal.observePersistent")!;
+    assert.equal(persistent.annotations!.readOnlyHint, false);
+    assert.equal(persistent.annotations!.destructiveHint, true);
+    assert.equal(persistent.annotations!.idempotentHint, false);
+    assert.equal(f.validate("opencode.codexQuota", {}), true);
     assert.equal(f.connections(), 0);
   } finally { await f.close(); }
 });
@@ -193,6 +217,7 @@ test("consolidated browser gestures preserve key constraints, bounded axes and e
     assert.equal(browserInputs.workflow.safeParse({ leaseId: "lease", authorized: true, steps: [invalidStep] }).success, false);
     assert.equal(f.validate("browser.workflow", { leaseId: "lease", authorized: true, steps: [invalidStep] }), false);
     const { tools } = await f.client.listTools();
+    assert.equal(tools.length, 99, "74 core tools and 25 optional browser tools");
     assert.equal(tools.some(tool => ["browser.key_combo", "browser.scroll_xy"].includes(tool.name)), false);
   } finally { await f.close(); }
 });

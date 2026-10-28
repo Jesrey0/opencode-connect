@@ -32,7 +32,27 @@ API projection, Codex ACP/plugin supervision and a separate browser adapter.
 For deterministic work, `command.run` composes native shell admission and bounded
 observation without allocating an AI worker or a second process registry. A
 worker's foreground shell is a separate agent interface. No public session-free
-agent-tool invocation is assumed. Native start/read/control remain available.
+agent-tool invocation is assumed. `waitMs: 0` selects shell admission without
+foreground observation. Terminals retain distinct start/read/control operations.
+
+### Public catalog ownership
+
+Resource names select HostPlane work: `file.*` for files, `git.*` for repositories
+and worktrees, `command.*` for noninteractive shells, `terminal.*` for PTYs and
+rendered screens, and `browser.*` for Chrome. `connector.readiness` reports the
+connector and native-service availability.
+
+`opencode.*` remains the unified worker control surface for native OpenCode and
+the Codex plugin. Codex is hosted through OpenCode's plugin lifecycle and RPC;
+its distinct execution context does not create a peer MCP control plane.
+`opencode.codexQuota` is the plugin's read-only quota operation. Shared lifecycle
+operations use the runtime selector and enforce each runtime's supported inputs.
+
+The public boundary returns purpose-specific typed read results directly.
+Internal query envelopes and native operation selectors remain backend details.
+Continuations use public names and exact caller-owned identities; they never
+replay mutations. Catalog names, argument routing and response migrations are
+documented in [Catalog migration](catalog-migration.md).
 
 ### Runtime capability evidence
 
@@ -75,7 +95,7 @@ There are two runtime components and one source/install lock. This repository is
 - src/http.ts owns the Node/Express application and Fetch MCP entry, with one request-body budget. src/mcp.ts owns the SDK tool-input complexity budget. The SDK creates a fresh MCP server per request; shared backends retain native supervision state without sharing protocol exchanges.
 - src/fileLock.ts owns kernel-managed exclusive ownership for Events persistence and deployment mutations. Each owner holds a dedicated SQLite connection for its whole critical section and never unlinks the lock file.
 - src/buildInfo.ts owns the strict release record and package-relative runtime identity. src/deployment.ts owns canonical source staging, installed integrity and release lifecycle validation; there is no cwd identity fallback or old-record adapter.
-- src/opencode.ts is the public WorkerPlane facade: admission, wait/act orchestration, runtime routing and query envelopes.
+- src/opencode.ts is the WorkerPlane facade: admission, wait/act orchestration, runtime routing and private query envelopes. src/mcp.ts unwraps and validates purpose-specific public read results against src/results.ts. src/continuation.ts owns current public continuation names.
 - src/runtime/capabilities.ts describes connector API context and restrictions; it does not duplicate live native model/agent/tool catalogs.
 - src/runtime/query.ts owns the native query union and exhaustive resolution, reading native catalogs directly.
 - src/runtime/result.ts owns the inspection contract and bounded, fingerprint-pinned assistant selection. It imports only projections/bounds/continuations, never the facade.
@@ -133,9 +153,11 @@ Connector deployment stages the workspace but manages only opencode-connect.serv
 
 Inspect active OpenCode sessions, supervised Codex children and dependent consoles before a native plugin reload. Reload/disposal is a worker lifecycle event; do not infer independent availability from runtime-context separation.
 
-For each coordinated deployment, record the old plugin configuration and connector build, validate the source gates, then separately authorize preparation, plugin loading and connector activation. Use the explicit immutable builds/<buildId>/packages/codex-plugin/src path to make the loaded version auditable. Preserve existing plugin options. Verify the native plugin inventory, RPC capabilities, direct-session behavior and read-only quota at their owning runtime after the authorized load.
+For each deployment, record the current connector build, exact configured plugin path/options and loaded plugin identity, then validate the source and sealed release gates. The prepared release always includes the complete plugin workspace. If the candidate and loaded implementation have byte-identical plugin runtime inputs and package manifest, unchanged pinned native client/plugin dependencies, and verified loaded identity/RPC compatibility, activate the connector without reloading OpenCode or the plugin. Preserve the immutable configured plugin path and report its loaded build separately from the new connector build.
 
-Rollback automation swaps connector current/previous only. Restore the corresponding immutable plugin path/configuration and verify its native reload separately. Treat the recorded pre-cutover connector build and plugin path as the rollback pair for that deployment; no historical release is a permanent default baseline. A rollback candidate is valid only if it contains the complete workspace, a sealed release record and passes integrity/integration/identity checks. Unsealed historical records and connector-only releases are outside the supported release invariant; independently prepare and accept rollback candidates before cutover. See [release lifecycle](release-cutover.md) for the coordinated acceptance and recovery gates; re-inspect runtime identity before acting.
+If that equivalence cannot be established or plugin behavior must change, use a coordinated native plugin load and connector activation within the principal's authorization. Use the explicit immutable builds/<buildId>/packages/codex-plugin/src path to make the loaded version auditable. Preserve existing plugin options, unrelated configuration and permissions. Verify native inventory, RPC capabilities, direct-session behavior and read-only quota at their owning runtime after loading; configuration presence alone is not loading evidence.
+
+Rollback automation swaps connector current/previous only. A connector-only activation leaves plugin configuration and loaded identity unchanged. After a coordinated plugin change, restore the recorded immutable plugin path/configuration and verify its native reload separately. Treat the recorded pre-cutover connector build and plugin path as the rollback pair for that deployment; no historical release is a permanent default baseline. A rollback candidate is valid only if it contains the complete workspace, a sealed release record and passes integrity/integration/identity checks. Unsealed historical records and connector-only releases are outside the supported release invariant; independently prepare and accept rollback candidates before cutover. See [release lifecycle](release-cutover.md) for the acceptance and recovery gates; re-inspect runtime identity before acting. After activation, server discovery and actual ChatGPT client exposure remain separate checks. Refresh a stale connector connection/catalog and verify the current names before accepting PlatformPlane operation.
 
 ## Live console
 

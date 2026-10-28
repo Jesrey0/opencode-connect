@@ -112,9 +112,9 @@ only after current ingress grant validation. The private
 forwarded `x-host-ingress-auth-context` and later checks the stored opaque grant
 context; callback credentials and grant contexts are stored only in the private
 state file. Events do not replay missed history; consumers should deduplicate by
-stable `eventId` and reconcile with `opencode.inspectResult`.
+stable `eventId` and reconcile with `opencode.result`.
 
-Event lifecycle diagnostics are available in the authenticated `status.recovery`
+Event lifecycle diagnostics are available in the authenticated `opencode.recovery`
 tool's `events` field and at local `GET /observe` under `events`; shared ingress
 exposes only `/mcp`, not this observation endpoint. Diagnostics include sanitized
 subscription IDs, exact session/message IDs, expiration/verification-cache times,
@@ -149,22 +149,42 @@ a gated test worker. A native wait, backend restart or webhook `2xx` is not
 post-turn chat acceptance. See the
 [official MCP Events contract](https://developers.openai.com/plugins/build/mcp-events).
 
+## Catalog organization
+
+The 0.17.0 public catalog groups host work by resource: `file.*`, `git.*`,
+`command.*`, `terminal.*` and `browser.*`. `connector.readiness` reports connector
+and native-service availability. `opencode.*` is the unified worker control
+surface, including the Codex plugin and `opencode.codexQuota`; the runtime selector
+preserves each backend's identity and capability constraints. Plane boundaries
+describe ownership and environment, rather than tool prefixes.
+
+Public tool names select operations. Internal query/action discriminators and
+backend query envelopes are not public dispatch APIs. Runtime-specific requirements
+remain explicit in the published fields and constraints. Continuations name the
+current public operation and carry caller-owned arguments. No legacy public
+aliases are retained; see [Catalog migration](catalog-migration.md).
+
 ## HostPlane
 
 | Tool | Native surface |
 | --- | --- |
-| `host.list`, `host.read`, `host.find`, `host.vcs`, `host.vcsStatus`, `host.vcsBranch`, `host.vcsDiff`, `host.commands`, `host.terminalScreen`, `host.terminalSnapshot` | One purpose-specific native host read each |
-| `host.write` | Native bounded UTF-8/base64 file write, explicit overwrite/fingerprint, persisted readback |
-| `host.worktreeList`, `host.worktreeCreate`, `host.worktreeRemove`, `host.worktreeRefresh` | One purpose-specific native project worktree operation each |
+| `file.list`, `file.read`, `file.find`, `git.repository`, `git.status`, `git.branches`, `git.diff`, `command.list`, `terminal.list`, `terminal.screen`, `terminal.snapshot` | One purpose-specific native host read each |
+| `file.write` | Native bounded UTF-8/base64 file write, explicit overwrite/fingerprint, persisted readback |
+| `git.worktrees`, `git.createWorktree`, `git.removeWorktree`, `git.refreshWorktrees` | One purpose-specific native project worktree operation each |
 | `command.run` | Admit one native shell and observe bounded foreground output; preserve the handle and return read-only continuation |
-| `command.startShell`, `command.startPty`, `command.startPersistentPty` | Start one native command kind without foreground observation |
-| `command.read` | Read-only shell/ordinary PTY replay; native handle + canonical cwd/location + saved cursor |
-| `command.observePersistentPty` | Persistent replay with native observer exit cleanup; can remove the exited handle |
-| `command.remove`, `command.resize`, `command.input`, `command.interrupt`, `command.ctrlD` | One purpose-specific native command control each |
+| `terminal.start`, `terminal.startPersistent` | Start an ordinary or session-bound persistent PTY using an executable and separate arguments |
+| `command.read` | Read-only shell status/output; native handle + canonical cwd/location + saved byte cursor |
+| `terminal.read` | Read-only ordinary PTY replay using its UTF-16 cursor |
+| `terminal.observePersistent` | Persistent replay with native observer exit cleanup; can remove the exited handle |
+| `command.remove` | Terminate and forget one shell handle |
+| `terminal.remove`, `terminal.resize`, `terminal.input`, `terminal.interrupt`, `terminal.sendCtrlD` | One purpose-specific ordinary/persistent PTY control each |
 
 Each operation supplies an absolute `cwd`; responses return the native canonical
-`location` and `cwd` where applicable. Save `kind`, `id`, canonical location,
-and cursor together. Shell commands are strings interpreted by OpenCode's
+`location` and `cwd` where applicable. Save native `id`, canonical location and
+cursor together. Shell read/removal inputs omit `kind`; the tool supplies it.
+Terminal controls require `kind: "pty"|"persistentPty"`; save the admission kind
+for those calls. Ordinary and persistent terminal reads have distinct tools and
+omit the selector. Shell commands are strings interpreted by OpenCode's
 selected native shell. PTY commands are executables with separate `args`.
 Persistent PTY admission additionally requires a native `sessionId` whose
 canonical location matches `cwd`. No command environment/configuration or
@@ -174,12 +194,13 @@ Operator-chosen file contents and command output still require secret hygiene.
 
 Host and command operations are distinct purpose-specific tools; no generic
 operation-selector executor or compatibility alias is exposed. For example,
-`host.list` accepts `{"cwd":"/workspace"}` and `host.read` accepts
+`file.list` accepts `{"cwd":"/workspace"}` and `file.read` accepts
 `{"cwd":"/workspace","path":"README.md","limit":2000}`. Replace
-`/workspace` with the authorized absolute directory. `command.startShell` starts
-a shell process. Unknown fields remain rejected.
+`/workspace` with the authorized absolute directory. `command.run` starts a shell
+process; `waitMs: 0` selects admission without foreground observation. Unknown
+fields remain rejected.
 
-`find` is native filename search, bounded to 50 hits; `possiblyTruncated` is
+`file.find` is native filename search, bounded to 50 hits; `possiblyTruncated` is
 conservative because the API has no continuation. For content search, use a
 native shell command such as `rg --line-number --glob '*.ts' 'pattern' src`.
 For patching, use native shell `git apply --check` followed by `git apply` with
@@ -193,7 +214,7 @@ canonical location, including resolved symlinks. Reads page **bytes** and requir
 the previous fingerprint on continuation. UTF-8 pages return text; invalid or
 split multibyte pages return base64 with encoding metadata, preserving bytes.
 Directory/status/diff inventories page at most 50 entries and 96 KB serialized
-entry data. Their fingerprints reject changed content between pages. `vcsBranch`
+entry data. Their fingerprints reject changed content between pages. `git.branches`
 lists native branch names with an optional native `search` filter; connector
 pages are fingerprinted like other inventories. VCS diff
 inventory omits patches; select `file` to page its full patch with
@@ -201,7 +222,7 @@ inventory omits patches; select `file` to page its full patch with
 files/lists/diffs before this bounded projection; this is a transport bound,
 not a native ranged-read or memory-bound promise.
 
-`host.write` requires `encoding`, `data`, and explicit `overwrite`.
+`file.write` requires `encoding`, `data`, and explicit `overwrite`.
 New files require `overwrite: false` without a fingerprint; existing files require
 `overwrite: true` plus `expectedFingerprint` from a native read. Payloads cap at
 64 KiB decoded bytes (90,000 encoded characters), preserve UTF-8/BOM/Unicode,
@@ -218,19 +239,21 @@ ID must match. List is fingerprint-paged. Create requires an explicit absolute
 canonical destination with an existing parent, and forwards optional native
 branch/name from the selected location. Remove requires an inventoried directory
 owned by that project, rejects its canonical root, and requires explicit `force`.
-Create/remove/refresh read back native inventory. `host.worktreeList` is read-only
+Create/remove/refresh read back native inventory. `git.worktrees` is read-only
 and idempotent. Create/remove are destructive and non-idempotent; refresh changes
 cached inventory without creating/removing worktrees and is idempotent. Native
 failures remain failures; safe error types are retained without raw native bodies.
 
-Images are optional `read` results with `image: true`, limited to **1 MiB** and
+Images are optional `file.read` results with `image: true`, limited to **1 MiB** and
 signature-checked PNG, JPEG, GIF, or WebP. MCP returns one image block plus
 metadata, without duplicate base64 in text or structured data. SVG/HTML and
 oversized images fail. Ordinary object results use MCP `structuredContent` with `content: []`; image
 reads carry one image block. Browser tool errors also include concise sanitized
 standard text so clients that render only content retain the cause and dispatch evidence. Every tool publishes an explicit output schema. Connector errors return structured `error` (and admission
 `recovery` where applicable) with `isError: true`; their existing envelopes are
-included in each advertised output schema. SDK input errors retain SDK formatting;
+included in each advertised output schema. Purpose-specific read successes are
+returned directly, with typed fields at the result root; failures return their
+safe error object at that same boundary. SDK input errors retain SDK formatting;
 strict union errors omit arbitrary unknown field names rather than echoing them.
 The serialized `{ structuredContent }` projection has a repository-policy
 **256 KiB** ceiling, independent of the **1 MiB decoded image** allowance.
@@ -280,8 +303,8 @@ continuation. Process failure or observation error sets MCP `isError: true`
 without discarding structured execution evidence; ordinary wait expiry is not
 classified as process failure.
 
-`command.run` is mutating, destructive/open-world and non-idempotent, like shell
-admission. It is a different bounded workflow from explicit `command.startShell`.
+`command.run` is mutating, destructive/open-world and non-idempotent, including
+when `waitMs: 0` selects admission only. There is one public shell-admission tool.
 A one-call MCP result does not imply a single internal native request or prove
 end-to-end latency improvement.
 
@@ -293,7 +316,12 @@ end-to-end latency improvement.
 | `pty` | JavaScript UTF-16 code units | 2 Mi code units of running replay, max 25 exited metadata entries; attaching after exit is unavailable |
 | `persistentPty` | bytes | Experimental native session-bound daemon, head/tail and replay-loss metadata; an attached observer seeing exit triggers native removal |
 
-Shell `list` contains running commands only. Save exited IDs yourself; there is
+`command.list` contains running shell commands only and takes canonical `cwd`
+plus paging, without a session selector. Save exited shell IDs yourself.
+`terminal.list` lists ordinary PTYs in the canonical location; supply `sessionId`
+to include that session's persistent PTYs. It does not discover persistent PTYs
+across all sessions. Kind/session filtering happens before fingerprinted pagination,
+and each continuation targets its owning inventory tool. There is
 no recovery-by-output-file or connector registry. Removal terminates and forgets
 a command. Location eviction, runtime restart, native eviction, removal, or
 daemon loss can invalidate handles; missing handles fail visibly. The connector
@@ -318,12 +346,13 @@ fails after replay capture, output/cursor/replay metadata survive. Responses set
 `lastConfirmedInfo` from before replay, and never claim drained. A native
 `PtyNotFoundError` confirms `handleAvailable: false`; other readback failures leave
 availability unknown (`null`). Socket detach does not confirm terminal state.
-Persistent observer exit cleanup makes `command.observePersistentPty` destructive
-and non-idempotent. `command.read` accepts only shells and ordinary PTYs and is
-read-only. No retained-exit promise is made for persistent observation.
+Persistent observer exit cleanup makes `terminal.observePersistent` destructive
+and non-idempotent. `command.read` accepts only shell handles; `terminal.read`
+accepts only ordinary PTYs. Both are read-only. No retained-exit promise is made
+for persistent observation.
 
-`host.terminalScreen` uses native session terminal `read` with bounded
-`lines` (1–1,000); `terminalSnapshot` selects a canonical persistent PTY `id`.
+`terminal.screen` uses native session terminal `read` with bounded
+`lines` (1–1,000); `terminal.snapshot` selects a canonical persistent PTY `id`.
 Both validate the owning session against `cwd`, return rendered text with native
 screen cursor/size, and use fingerprinted text pages. Snapshots exclude the native
 binary checkpoint. These are **rendered screen views**, not raw byte replay:
@@ -335,7 +364,7 @@ Socket detach is not process exit. Input returns `inputSent` and
 bounded 250 ms send window helps transport delivery but proves no execution.
 Never retry uncertain input automatically. Persistent input requires native
 controller role; `takeover: true` explicitly requests ownership when needed.
-`ctrlD` sends a terminal character, not pipe EOF. Shells support removal only;
+`terminal.sendCtrlD` sends a terminal character, not pipe EOF. Shells support removal only;
 use PTY input/interrupt/resize for interactive work. Read limits default to 12,000
 and cap at 65,536 bytes/code units; live read waits cap at 2 s, attachment/replay
 at 5 s. Shell timeout defaults to 120 s and caps at 24 hours.
@@ -347,7 +376,7 @@ runtime-specific identities and capability restrictions; it does not forward the
 PlatformPlane tool catalog into those contexts. OpenCode admission and wait
 responses explicitly identify `runtime: "opencode"`; Codex retains its own runtime
 field. Save runtime with sessionId, and OpenCode's canonical user messageId where
-required. `opencode.tools` lists past calls, not effective available tools.
+required. `opencode.toolCalls` lists past calls, not effective available tools.
 
 `opencode.runtime` exposes bounded `diagnostics` with connector capability scope,
 control dependency and correlation/settings support. OpenCode inventory remains
@@ -357,8 +386,8 @@ build records identify the loaded implementation but do not attest current file
 integrity, effective worker tools, activity or OS isolation. See the architecture
 capability matrix for supported runtime differences.
 
-`status.readiness`, `status.recovery`, `opencode.create`, `opencode.continue`,
-`opencode.fork`, `opencode.wait`, `opencode.inspectActivity`, `opencode.inspectResult`, individually
+`connector.readiness`, `opencode.recovery`, `opencode.create`, `opencode.continue`,
+`opencode.fork`, `opencode.wait`, `opencode.activity`, `opencode.result`, individually
 named `opencode.*` query tools, and individually named `opencode.*` session action
 tools retain OpenCode's native worker identities. Actions include `opencode.steer`,
 `opencode.updateInbox`, `opencode.respondPermission`, `opencode.switchModel`, and
@@ -371,14 +400,14 @@ state even when the terminal event was missed. SDK request cancellation or HTTP
 disconnect releases the wait's native read/event observer without interrupting
 the retained worker; use `opencode.interrupt` to stop native execution.
 
-For a quick availability check, use `status.readiness`; use `status.recovery` for
+For a quick availability check, use `connector.readiness`; use `opencode.recovery` for
 active/recent worker inventory and result evidence. These have separate inputs;
 readiness performs no worker inventory reads.
 It returns connector version/build identity and OpenCode readiness without reading
 worker/session history or Codex RPC. Component summaries cover events and the local
 browser supervisor; they do not probe Chrome, validate a lease, or verify the Codex
 plugin or quota. An unavailable OpenCode returns `ready: false` with connector
-identity and a sanitized issue. `status.recovery` accepts an optional runtime to
+identity and a sanitized issue. `opencode.recovery` accepts an optional runtime to
 select that worker inventory and preserves existing result evidence.
 Use `browser.status` for browser endpoint and attachment diagnosis. See the
 [operator acceptance matrix](operator-acceptance.md) for measurement and
@@ -389,7 +418,7 @@ so long Unicode history stays bounded in recovery or action-required responses.
 `opencode.messages` pages likewise return 512-unit previews with canonical message
 IDs, explicit truncation/paging metadata, at most 10 tool summaries per assistant
 entry (`toolCount`/`toolsTruncated` mark the remainder; recover the rest through
-`opencode.tools`), and a lossless read-only `nextCall` per entry. Preview
+`opencode.toolCalls`), and a lossless read-only `nextCall` per entry. Preview
 continuations page the remainder at the full on-demand width; an explicit
 `opencode.message` `textLimit` is preserved instead. Recover complete text through
 `opencode.message`, which defaults to full text on demand. Compaction entries carry
@@ -433,11 +462,14 @@ their canonical user message identity, not a synthetic admission identity.
 Purpose-specific query tools include `opencode.models`, `opencode.agents`,
 `opencode.agent`, `opencode.skills`, `opencode.skill`, `opencode.providers`,
 `opencode.usage`, `opencode.sessions`, `opencode.session`, `opencode.messages`,
-`opencode.message`, `opencode.sessionDiff`, `opencode.inbox`, `opencode.tools`,
-`opencode.tool`, `opencode.permissions`, `opencode.savedApprovals`, and
-`opencode.runtime`, plus the separate `codex.quota` read. There is no batch query executor.
-Each query output has one fixed-identity result entry; errors in that entry also
-set the MCP tool error flag. Catalog/inventory pages use
+`opencode.message`, `opencode.sessionDiff`, `opencode.inbox`, `opencode.toolCalls`,
+`opencode.toolCall`, `opencode.permissions`, `opencode.savedApprovals`, and
+`opencode.runtime`, plus the separate `opencode.codexQuota` read. There is no batch query executor.
+Each query returns its projected result directly in `structuredContent`, with
+operation-specific output fields and read continuations. The backend's private
+`results[{index,type,result}]` envelope is not exposed. A failure returns a safe
+root error object and sets MCP `isError`; agent lookup errors also retain the
+requested `agentId`. Catalog/inventory pages use
 `offset`, `limit`, `fingerprint`; native session/message pages use opaque
 native cursors instead. Agent details include description, system,
 steps, paged permissions, mode, hidden status and model, excluding `request`.
@@ -476,6 +508,14 @@ projection; therefore no context/log query variants are exposed. Provider catalo
 The pinned provider/model catalog provides no reliable sanitized auth/connection
 signal; catalog activation does not imply successful execution.
 
+### Model catalog discovery
+
+`opencode.models` defaults to `view: "compact"`. Compact entries retain canonical
+native IDs, enabled state, pricing including native cost tiers, input modalities
+and variant IDs. `view: "full"` adds native model specifications. Both views retain
+the native catalog's membership, location, paging and fingerprint; compactness is
+a projection choice, not an eligibility or availability filter.
+
 ### Agent catalog introspection
 
 `opencode.agents` defaults to a compact **effective** native catalog, including
@@ -513,8 +553,8 @@ Additional query details:
 - `inbox` pages pending native identities/types/delivery with bounded previews;
   selected `inboxId` pages text. Absence means absent from pending inbox, not
   proof of delivery, cancellation or execution success.
-- `tools` pages an assistant message's independent tool inventory beyond summary
-  limits. `tool` selects exact `sessionId`/`messageId`/`toolId`, with explicit
+- `toolCalls` pages an assistant message's independent tool inventory beyond summary
+  limits. `toolCall` selects exact `sessionId`/`messageId`/`toolId`, with explicit
   `field: input|content|error`, native timing/status and `contentIndex` for outputs.
   Text output and selected input use fingerprinted text pages. Structured input
   omits credential/config/env/request/provider-state keys. Selected file outputs
@@ -590,7 +630,7 @@ cursor, including canonical location when available. If an untargeted bounded
 scan has no user identity yet, continuation reads native message pages to recover
 it rather than guessing a target. These are argument objects, not callbacks or
 automatic replay. Mutations and persistent observer command reads have no
-automatic continuation. `host.worktreeList` continuations remain read-only.
+automatic continuation. `git.worktrees` continuations remain read-only.
 
 `opencode.switchModel` and `opencode.switchAgent` delegate validation to their native
 session endpoints and return persisted session readback. These are separate, **non-atomic**
@@ -643,7 +683,7 @@ success nor failure. The message includes its reason, model when available,
 summary/recent previews and per-request usage. Recover exact summary/recent
 fields through fingerprinted continuations; no timing heuristic or connector
 registry is needed.
-`command` and `invokeSkill` delegate identity validation to their native session
+`invokeCommand` and `invokeSkill` delegate identity validation to their native session
 endpoints. Both upstream operations return `void`, so the connector
 returns submission without inventing user `messageId`/inbox identity or completion.
 `revertStage`, `revertClear`, and `revertCommit` preserve OpenCode's staged revert
@@ -665,7 +705,7 @@ Optional `mode` selects `read-only`, `workspace-write`, `agent`, or
 admission. Retain the runtime and session ID together. Never retry uncertain
 admission automatically; a known session ID remains available for reconciliation.
 
-`opencode.inspectActivity`, `opencode.inspectResult`, and `opencode.wait` accept the same runtime and session ID.
+`opencode.activity`, `opencode.result`, and `opencode.wait` accept the same runtime and session ID.
 They observe the current session turn, not an exact historical prompt. Omit
 `messageId`; `capabilities.exactPromptWait` is false. Results retain the native
 assistant ID when available, bounded text pagination and explicit truncation.
@@ -707,7 +747,7 @@ replay supplies canonical user and assistant IDs. Message inventories page a
 bounded history snapshot with offsets and fingerprints; full text recovery uses
 native message IDs. `historyComplete: false` and `outputTruncated` disclose
 retention limits. Missing exact messages fail without selecting another result.
-Session inventories use the ACP native cursor. `status.recovery` with `runtime: "codex"` reports
+Session inventories use the ACP native cursor. `opencode.recovery` with `runtime: "codex"` reports
 locally supervised sessions; native inventories use `opencode.sessions`.
 
 Codex inherits its own configured model and uses native sandbox and approval

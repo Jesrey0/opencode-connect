@@ -3,14 +3,14 @@ import { McpServer } from "@modelcontextprotocol/server";
 import * as z from "zod/v4";
 import { OpenCodeBackend, type QueryInput } from "./opencode.js";
 import { HostBackend, CommandAdmissionError } from "./host.js";
-import { exposedUnion, variantsOf, withoutFields } from "./schema.js";
+import { exposedUnion, variantsOf, withoutFields, publicInputSchema } from "./schema.js";
 import { VERSION } from "./version.js";
 import { loadBuildInfo } from "./buildInfo.js";
 import { safeError, AdmissionError, ConnectorError, SessionDeleteError } from "./bounds.js";
 import { ProtocolErrorCode, ProtocolError } from "@modelcontextprotocol/server";
 import { Events, EVENT_NAME, eventArgumentsSchema } from "./events.js";
 import type { ServerContext, ContentBlock } from "@modelcontextprotocol/server";
-import { errorOutputSchema, outputSchemas, outputVariant, queryOutputSchema } from "./results.js";
+import { toolErrorSchema, continuationSchema, outputSchemas, outputVariant, queryOutputSchema } from "./results.js";
 import { CODEX_MODES, CODEX_ACTIONS, CODEX_QUERY_TYPES } from "./codex.js";
 import { BrowserBackend } from "./browser/backend.js";
 import { registerBrowserTools } from "./browser/tools.js";
@@ -76,7 +76,7 @@ export const querySchema = exposedUnion("type", [
   z.object({ runtime: runtimeSchema, type: z.literal("skill"), cwd: z.string().min(1).optional(), skillId: z.string().min(1), ...textShape }).strict(),
   z.object({ runtime: runtimeSchema, type: z.literal("tools"), sessionId: z.string().min(1), messageId: z.string().min(1), ...pageShape }).strict(),
   z.object({ runtime: runtimeSchema, type: z.literal("tool"), sessionId: z.string().min(1), messageId: z.string().min(1), toolId: z.string().min(1), field: z.enum(["input", "content", "error"]), contentIndex: z.number().int().min(0).optional(), ...textShape }).strict(),
-  z.object({ runtime: runtimeSchema, type: z.literal("models"), cwd: z.string().min(1).optional(), view: z.enum(["compact", "full"]).optional().describe("Compact retains native IDs, enabled state, pricing, input modalities and variants; full adds model specifications. Defaults to full."), ...pageShape }),
+  z.object({ runtime: runtimeSchema, type: z.literal("models"), cwd: z.string().min(1).optional(), view: z.enum(["compact", "full"]).optional().describe("Compact retains native IDs, enabled state, pricing, input modalities and variants; full adds model specifications. Defaults to compact."), ...pageShape }),
   z.object({ runtime: runtimeSchema, type: z.literal("agents"), cwd: z.string().min(1).optional().describe("Select project context; response returns the native resolved location."), view: z.enum(["compact", "full"]).optional().describe("Defaults to compact catalog; full includes instructions and raw permission pages."), includeHidden: z.boolean().optional().describe("Defaults to false; true includes native internal agents."), ...pageShape }).strict(),
   z.object({ runtime: runtimeSchema, type: z.literal("agent"), cwd: z.string().min(1).optional(), agentId: z.string().min(1), field: z.enum(["system", "description", "permissions"]).optional(), ...textShape, ...pageShape }).strict(),
   z.object({ runtime: runtimeSchema, type: z.literal("messages"), ...pageShape, sessionId: z.string().min(1), cursor: z.string().min(1).optional(), order: z.enum(["asc", "desc"]).optional(), limit: z.number().int().min(1).max(50).optional() }).refine((input) => !input.cursor || !input.order, { message: "native message cursor cannot be combined with order", path: ["order"] }).meta({ not: { required: ["cursor", "order"] } }),
@@ -147,18 +147,24 @@ function queryInputSchema(type: string, schema: z.ZodObject) {
     if (input.runtime !== "codex") return;
     for (const field of forbidden) if (input[field] !== undefined) context.addIssue({ code: "custom", message: `${field} is unsupported by Codex ${type}`, path: [field] });
     if (pendingOnly && input.section !== "pending") context.addIssue({ code: "custom", message: "Codex permissions require section: pending", path: ["section"] });
-  }).meta({ ...schema.meta(), allOf: [{
+  }).meta({ ...schema.meta(),
     if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] },
     then: {
       ...(forbidden.length ? { not: { anyOf: forbidden.map(field => ({ required: [field] })) } } : {}),
       ...(pendingOnly ? { properties: { section: { const: "pending" } }, required: ["section"] } : {}),
     },
-  }] });
+  });
 }
 
 async function queryResult(backend: OpenCodeBackend, input: QueryInput, signal?: AbortSignal) {
   const result = await backend.query([input], signal);
-  return { ...structuredResult(result), ...(result.results.some(entry => "error" in entry) ? { isError: true } : {}) };
+  const entry = result.results[0];
+  if (!entry) throw new ConnectorError("Native query returned no result");
+  if ("error" in entry) return {
+    ...structuredResult({ error: entry.error, ...(entry.errorCode ? { errorCode: entry.errorCode } : {}), ...(entry.agentId ? { agentId: entry.agentId } : {}) }),
+    isError: true,
+  };
+  return structuredResult(entry.result as Record<string, unknown>);
 }
 
 export function createServer(backend = new OpenCodeBackend(), host = new HostBackend(), events?: Events, browser?: BrowserBackend): McpServer {
@@ -168,7 +174,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     // Bounds recursive validation work independently of serialized string size.
     // Full permission/attachment sets and 12-step browser workflows fit this budget.
     maxToolInputElements: 4096,
-      instructions: "PlatformPlane is isolated ChatGPT; HostPlane is MCP/Linux; WorkerPlane is hosted OpenCode/Codex contexts. Use purpose-specific tools: command.run for foreground output; command.startShell/startPty/startPersistentPty for admission. Follow command.read nextCall continuations. Preserve runtime/session/prompt IDs, canonical cwd and handles. Reconcile uncertain mutations without replay. Worker tools differ from this catalog; opencode.runtime describes API capabilities. Termination is not success.",
+      instructions: "PlatformPlane is ChatGPT; HostPlane is MCP/Linux; WorkerPlane is hosted native contexts. OpenCode controls workers, including its Codex plugin; retain runtime/session/prompt IDs. Use purpose-specific tools: file/git for resources, command.run for shells, terminal for PTYs, browser for Chrome. Reads return direct typed results; follow nextCall. Preserve canonical cwd and native handles. Reconcile uncertain mutations without replay. opencode.runtime reports API capabilities; termination is not success.",
   });
   if (events) {
     const authenticated = async (extra: ServerContext) => {
@@ -200,14 +206,14 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   // Keep upstream exception bodies out of MCP errors as well as successful data.
   const register = server.registerTool.bind(server);
   const registerTool = ((name: string, config: unknown, callback: (...args: unknown[]) => Promise<unknown>) => {
-    const definition = config as Record<string, unknown> & { outputSchema: z.ZodType };
-    return register(name, { ...definition, outputSchema: z.union([definition.outputSchema, errorOutputSchema]) } as never, (async (...args: unknown[]) => {
+    const definition = config as Record<string, unknown> & { inputSchema: z.ZodType; outputSchema: z.ZodType };
+    return register(name, { ...definition, inputSchema: publicInputSchema(definition.inputSchema), outputSchema: z.union([definition.outputSchema, toolErrorSchema(name)]) } as never, (async (...args: unknown[]) => {
       try { return await callback(...args); }
       catch (error) { return { ...structuredResult({ error: safeError(error), ...(error instanceof AdmissionError ? { recovery: error.recovery } : {}), ...(error instanceof CommandAdmissionError ? { errorCode: error.code, reason: error.message, mutationMayHaveOccurred: true, commandRecovery: { kind: error.kind, cwd: error.cwd, admission: error.admission } } : {}), ...(error instanceof SessionDeleteError ? { errorCode: error.code, reason: error.reason, mutationMayHaveOccurred: error.mutationMayHaveOccurred } : {}) }), isError: true }; }
     }) as never);
   }) as typeof server.registerTool;
 
-  registerTool("status.readiness", {
+  registerTool("connector.readiness", {
     title: "Check Connector Readiness",
     description: "Check connector identity and OpenCode availability without reading worker history or probing browser readiness. Does not verify the Codex plugin or browser leases.",
     inputSchema: z.object({}).strict(), outputSchema: outputSchemas.readiness,
@@ -230,7 +236,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       },
     }), ...(opencode.ready ? {} : { isError: true }) };
   });
-  registerTool("status.recovery", {
+  registerTool("opencode.recovery", {
     title: "Recover Worker Status",
     description: "Read active/recent native worker inventory and result evidence for the selected runtime. Execution termination does not prove assistant success.",
     inputSchema: z.object({ runtime: runtimeSchema }).strict(), outputSchema: outputSchemas.recovery,
@@ -238,30 +244,31 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   }, async ({ runtime }) => structuredResult({ ...await backend.status(runtime), ...(events ? { events: events.snapshot() } : {}) }));
 
   const hostTools = [
-    ["host.list", "list", "List directory entries beneath canonical cwd. Continue with the returned fingerprint-bound nextCall.", true],
-    ["host.read", "read", "Read bounded file bytes beneath canonical cwd. Offset continuation requires its fingerprint; image mode returns one signature-checked image.", true],
-    ["host.find", "find", "Search native filenames only (not file contents); results cap at 50.", true],
-    ["host.vcs", "vcs", "Read native VCS repository information and base branch.", true],
-    ["host.vcsStatus", "vcsStatus", "Read paginated native VCS status; continue with nextCall.", true],
-    ["host.vcsBranch", "vcsBranch", "List native branch names, optionally filtered; continue with nextCall.", true],
-    ["host.vcsDiff", "vcsDiff", "Read native VCS diff metadata or one file patch; continue with nextCall.", true],
-    ["host.commands", "commands", "List native shell and PTY handles, optionally scoped to a session; continue with nextCall.", true],
-    ["host.terminalScreen", "terminalScreen", "Read a rendered screen owned by the session; this is not byte replay or proof of process success.", true],
-    ["host.terminalSnapshot", "terminalSnapshot", "Read a rendered persistent-PTY snapshot by canonical handle; checkpoint bytes are excluded.", true],
+    ["file.list", "list", "List directory entries beneath canonical cwd. Continue with the returned fingerprint-bound nextCall.", true],
+    ["file.read", "read", "Read bounded file bytes beneath canonical cwd. Offset continuation requires its fingerprint; image mode returns one signature-checked image.", true],
+    ["file.find", "find", "Search native filenames only (not file contents); results cap at 50.", true],
+    ["git.repository", "vcs", "Read native VCS repository information and base branch.", true],
+    ["git.status", "vcsStatus", "Read paginated native VCS status; continue with nextCall.", true],
+    ["git.branches", "vcsBranch", "List native branch names, optionally filtered; continue with nextCall.", true],
+    ["git.diff", "vcsDiff", "Read native VCS diff metadata or one file patch; continue with nextCall.", true],
+    ["command.list", "commands", "List native running shell handles in canonical cwd. Exited shell IDs must be saved by the caller; continue with nextCall.", true],
+    ["terminal.list", "commands", "List ordinary PTYs in canonical cwd and persistent PTYs only for an explicit sessionId. Follow nextCall; omitted sessionId does not list all persistent terminals.", true],
+    ["terminal.screen", "terminalScreen", "Read a rendered screen owned by the session; this is not byte replay or proof of process success.", true],
+    ["terminal.snapshot", "terminalSnapshot", "Read a rendered persistent-PTY snapshot by canonical handle; checkpoint bytes are excluded.", true],
   ] as const;
   for (const [name, type, description] of hostTools) {
     const variant = variantsOf(hostInspectSchema).find((schema) => (schema.shape as any).type.value === type)!;
     registerTool(name, {
       title: `Host ${type} inspection`, description,
-      inputSchema: variant.omit({ type: true } as never), outputSchema: outputVariant(outputSchemas.hostInspect, "type", type),
+      inputSchema: name === "command.list" ? variant.omit({ type: true, sessionId: true } as never) : variant.omit({ type: true } as never), outputSchema: outputVariant(outputSchemas.hostInspect, "type", type).extend({ nextCall: continuationSchema(name) }),
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     }, async (input) => {
-      const result = await host.inspect({ ...input, type } as any);
+      const result = await host.inspect({ ...input, type, ...(type === "commands" ? { scope: name === "command.list" ? "shell" : "terminal" } : {}) } as any);
       if ("image" in result && result.image) { const { image, ...metadata } = result; return structuredResult(metadata, [{ type: "image", mimeType: image.mimeType, data: image.data }]); }
       return structuredResult(result);
     });
   }
-  registerTool("host.write", {
+  registerTool("file.write", {
     title: "Write Native OpenCode Host File",
     description: "Write a native file with explicit overwrite, fingerprint and persisted readback. Preflight is not atomic CAS; never retry uncertain writes automatically.",
     inputSchema: hostWriteSchema,
@@ -269,19 +276,19 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
   }, async (input) => structuredResult(await host.write(input)));
   for (const [name, action, description, readOnly, destructive] of [
-    ["host.worktreeList", "list", "List project worktrees; continue with the returned fingerprint-bound nextCall.", true, false],
-    ["host.worktreeCreate", "create", "Create a native worktree at an explicit absolute destination. Read back the created inventory; do not retry uncertain mutations.", false, true],
-    ["host.worktreeRemove", "remove", "Remove an inventoried project worktree with an explicit force decision. This is destructive; never retry uncertain removal.", false, true],
-    ["host.worktreeRefresh", "refresh", "Refresh native project worktree inventory. This updates cached inventory but does not create or remove worktrees.", false, false],
+    ["git.worktrees", "list", "List project worktrees; continue with the returned fingerprint-bound nextCall.", true, false],
+    ["git.createWorktree", "create", "Create a native worktree at an explicit absolute destination. Read back the created inventory; do not retry uncertain mutations.", false, true],
+    ["git.removeWorktree", "remove", "Remove an inventoried project worktree with an explicit force decision. This is destructive; never retry uncertain removal.", false, true],
+    ["git.refreshWorktrees", "refresh", "Refresh native project worktree inventory. This updates cached inventory but does not create or remove worktrees.", false, false],
   ] as const) {
     const variant = variantsOf(worktreeSchema).find((schema) => (schema.shape as any).action.value === action)!;
-    registerTool(name, { title: `Native worktree ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: action === "list" ? outputSchemas.worktreeList : outputVariant(outputSchemas.hostWorktree, "action", action),
+    registerTool(name, { title: `Native worktree ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: action === "list" ? outputSchemas.worktreeList.extend({ nextCall: continuationSchema(name) }) : outputVariant(outputSchemas.hostWorktree, "action", action),
       annotations: { readOnlyHint: readOnly, destructiveHint: destructive, openWorldHint: false, idempotentHint: readOnly || action === "refresh" },
     }, async (input) => structuredResult(await host.worktree({ ...input, action } as any)));
   }
   registerTool("command.run", {
     title: "Run Native Shell and Observe",
-    description: "Run one native shell command and return bounded foreground output. waitMs bounds observation after admission; timeoutMs independently limits the process. Follow nextCall for running or undrained output. Cancellation stops observation, not execution. Never replay uncertain admission.",
+    description: "Run one native shell command and return bounded foreground output. waitMs bounds observation after admission; timeoutMs independently limits the process. Follow command.read nextCall for running or undrained output. Cancellation stops observation, not execution. Never replay uncertain admission.",
     inputSchema: commandRunSchema, outputSchema: outputSchemas.commandRun,
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
   }, async (input, context) => {
@@ -290,41 +297,57 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     return { ...structuredResult(result), ...(failed ? { isError: true } : {}) };
   });
   for (const [name, kind, description] of [
-    ["command.startShell", "shell", "Run a shell command string with a timeout. Then use command.read with the returned handle and cursor."],
-    ["command.startPty", "pty", "Run an executable with separate args in an ordinary PTY. Replay attachment ends at exit; then use command.read."],
-    ["command.startPersistentPty", "persistentPty", "Start an experimental session-bound PTY. cwd must match the session; use command.observePersistentPty with native retention and observer cleanup."],
+    ["terminal.start", "pty", "Start an ordinary PTY using an executable and separate args. Read replay with terminal.read; attachment ends at exit."],
+    ["terminal.startPersistent", "persistentPty", "Start an experimental session-bound PTY. cwd must match the session; terminal.observePersistent may retire exited native handles."],
   ] as const) {
-    const variant = variantsOf(commandStartSchema).find((schema) => (schema.shape as any).kind.value === kind)!;
-    registerTool(name, { title: `Start ${kind} command`, description, inputSchema: variant.omit({ kind: true } as never), outputSchema: outputSchemas.commandStart.extend({ kind: z.literal(kind) }),
+    const variant = variantsOf(commandStartSchema).find(schema => schema.shape.kind.value === kind)!;
+    registerTool(name, { title: kind === "pty" ? "Start Terminal" : "Start Persistent Terminal", description,
+      inputSchema: variant.omit({ kind: true }), outputSchema: outputSchemas.commandStart.extend({ kind: z.literal(kind), cursorUnit: z.literal(kind === "pty" ? "utf16CodeUnits" : "bytes") }),
       annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
-    }, async (input) => structuredResult(await host.start({ ...input, kind } as any)));
+    }, async input => structuredResult(await host.start({ ...input, kind } as any)));
   }
-  const commandReadShape = { cwd: handleShape.cwd, id: handleShape.id, cursor: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(65536).optional(), waitMs: z.number().int().min(0).max(2000).optional().describe("PTY wait in milliseconds: integer 0..2,000; defaults to 250. Ignored for shell reads.") };
+  const replayShape = { cwd: handleShape.cwd, id: handleShape.id, cursor: z.number().int().min(0).optional(), limit: z.number().int().min(1).max(65536).optional() };
   registerTool("command.read", {
-    title: "Read Native OpenCode Command",
-    description: "Read bounded shell or ordinary PTY replay by saved handle/cursor. Detach or unverified metadata never proves exit or drain. Persistent PTYs require command.observePersistentPty.",
-    inputSchema: z.object({ kind: z.enum(["shell", "pty"]), ...commandReadShape }).strict(),
-    outputSchema: outputSchemas.commandRead.extend({ kind: z.enum(["shell", "pty"]) }),
+    title: "Read Shell Command", description: "Read bounded native shell status and output. Follow nextCall until output is drained; reading never starts or terminates execution.",
+    inputSchema: z.object(replayShape).strict(),
+    outputSchema: outputSchemas.commandRead.extend({ kind: z.literal("shell"), cursorUnit: z.literal("bytes"), nextCall: continuationSchema("command.read") }),
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
-  }, async (input) => structuredResult(await host.read(input)));
-  registerTool("command.observePersistentPty", {
-    title: "Observe Persistent OpenCode Terminal",
-    description: "Read bounded persistent-PTY replay by saved handle/cursor. Native observer cleanup can remove an exited handle; this is destructive and non-idempotent. Detach does not prove exit or drain.",
-    inputSchema: z.object(commandReadShape).strict(),
-    outputSchema: outputSchemas.commandRead.extend({ kind: z.literal("persistentPty") }),
+  }, async input => structuredResult(await host.read({ ...input, kind: "shell" })));
+  const terminalReplayShape = { ...replayShape, waitMs: z.number().int().min(0).max(2000).optional().describe("Replay observation budget, 0..2,000 ms; defaults to 250.") };
+  registerTool("terminal.read", {
+    title: "Read Terminal", description: "Read bounded ordinary-PTY replay. Detach or unverified metadata does not prove exit or drain. Persistent PTYs use terminal.observePersistent.",
+    inputSchema: z.object(terminalReplayShape).strict(),
+    outputSchema: outputSchemas.commandRead.omit({ nextCall: true }).extend({ kind: z.literal("pty"), cursorUnit: z.literal("utf16CodeUnits") }),
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
+  }, async input => structuredResult(await host.read({ ...input, kind: "pty" })));
+  registerTool("terminal.observePersistent", {
+    title: "Observe Persistent Terminal", description: "Read persistent-PTY replay. Native observer cleanup may remove an exited handle; this operation is destructive and non-idempotent. Detach is not exit.",
+    inputSchema: z.object(terminalReplayShape).strict(),
+    outputSchema: outputSchemas.commandRead.omit({ nextCall: true }).extend({ kind: z.literal("persistentPty"), cursorUnit: z.literal("bytes") }),
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: false, idempotentHint: false },
-  }, async (input) => structuredResult(await host.read({ ...input, kind: "persistentPty" })));
+  }, async input => structuredResult(await host.read({ ...input, kind: "persistentPty" })));
+  registerTool("command.remove", {
+    title: "Remove Shell Command", description: "Terminate and forget one native shell handle. Reconcile uncertain removal; never retry automatically.",
+    inputSchema: z.object({ cwd: handleShape.cwd, id: handleShape.id }).strict(),
+    outputSchema: outputVariant(outputSchemas.commandControl, "removed", true).extend({ kind: z.literal("shell") }),
+    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false },
+  }, async input => structuredResult(await host.control({ ...input, kind: "shell", action: "remove" })));
   for (const [name, action, description] of [
-    ["command.remove", "remove", "Terminate and forget a native command handle; removal is destructive and cannot be retried when uncertain."],
-    ["command.resize", "resize", "Set the dimensions of an ordinary or persistent PTY; repeating the same dimensions is safe."],
-    ["command.input", "input", "Send input to a PTY without durable acknowledgement; do not retry uncertain input."],
-    ["command.interrupt", "interrupt", "Send Ctrl-C to a PTY without durable acknowledgement."],
-    ["command.ctrlD", "ctrlD", "Send Ctrl-D as a terminal character; it is not pipe EOF and has no durable acknowledgement."],
+    ["terminal.remove", "remove", "Terminate and forget one ordinary or persistent PTY. Removal is destructive; reconcile uncertainty before another mutation."],
+    ["terminal.resize", "resize", "Set PTY dimensions. Repeating the same dimensions is safe."],
+    ["terminal.input", "input", "Send PTY input without durable acknowledgement; do not retry uncertain input."],
+    ["terminal.interrupt", "interrupt", "Send Ctrl-C to a PTY without durable acknowledgement."],
+    ["terminal.sendCtrlD", "ctrlD", "Send the Ctrl-D terminal character. This is not pipe EOF and has no durable acknowledgement."],
   ] as const) {
-    const variant = variantsOf(commandControlSchema).find((schema) => (schema.shape as any).action.value === action)!;
-    registerTool(name, { title: `Command ${action}`, description, inputSchema: variant.omit({ action: true } as never), outputSchema: action === "remove" ? outputVariant(outputSchemas.commandControl, "removed", true) : action === "resize" ? outputVariant(outputSchemas.commandControl, "resized", true) : outputVariant(outputSchemas.commandControl, "action", action),
-      annotations: { readOnlyHint: false, destructiveHint: action === "remove" || action === "input" || action === "interrupt" || action === "ctrlD", openWorldHint: action !== "resize", idempotentHint: action === "resize" },
-    }, async (input) => structuredResult(await host.control({ ...input, action } as any)));
+    const variant = variantsOf(commandControlSchema).find(schema => schema.shape.action.value === action)!;
+    const output = action === "remove" ? outputVariant(outputSchemas.commandControl, "removed", true)
+      : action === "resize" ? outputVariant(outputSchemas.commandControl, "resized", true)
+      : outputVariant(outputSchemas.commandControl, "action", action);
+    registerTool(name, { title: `Terminal ${action}`, description,
+      inputSchema: variant.omit({ action: true }).extend({ kind: z.enum(["pty", "persistentPty"]) }),
+      outputSchema: output.extend({ kind: z.enum(["pty", "persistentPty"]) }),
+      annotations: { readOnlyHint: false, destructiveHint: action !== "resize", openWorldHint: action !== "resize", idempotentHint: action === "resize" },
+    }, async input => structuredResult(await host.control({ ...input, action } as any)));
   }
 
   const startAnnotations = { readOnlyHint: false, destructiveHint: true, openWorldHint: true, idempotentHint: false } as const;
@@ -345,9 +368,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       if (input.mode !== undefined && input.runtime !== "codex") context.addIssue({ code: "custom", message: "mode is only valid for Codex", path: ["mode"] });
       if (input.runtime === "codex") for (const field of ["model", "agent"] as const) if (input[field] !== undefined) context.addIssue({ code: "custom", message: `${field} is OpenCode-only and is not supported by Codex continuation`, path: [field] });
     })
-    .meta({ allOf: [
-      { if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: [{ required: ["model"] }, { required: ["agent"] }] } }, else: { not: { required: ["mode"] } } },
-    ] });
+    .meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { anyOf: [{ required: ["model"] }, { required: ["agent"] }] } }, else: { not: { required: ["mode"] } } });
   const forkSchema = z.object({ runtime: z.literal("opencode").optional(), ...taskShape, forkFromSessionId: z.string().min(1), beforeMessageId: z.string().min(1).optional(), ...modelShape, ...agentShape, ...attachmentShape }).strict();
   for (const [name, title, description, inputSchema] of [
     ["opencode.create", "Create Native Worker", "Create a fresh OpenCode or Codex worker and submit its first task. Retain runtime, sessionId and the returned prompt identity. OpenCode accepts model/agent; Codex accepts native mode. Reconcile uncertain admission.", createSchema],
@@ -380,12 +401,12 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
   const inspectActivitySchema = z.object({ runtime: runtimeSchema, sessionId: z.string().min(1), messageId: z.string().min(1).optional() }).strict()
     .refine(input => input.runtime !== "codex" || input.messageId === undefined, { message: "Codex exact-prompt inspection is unsupported", path: ["messageId"] })
     .meta({ if: { properties: { runtime: { const: "codex" } }, required: ["runtime"] }, then: { not: { required: ["messageId"] } } });
-  registerTool("opencode.inspectActivity", {
+  registerTool("opencode.activity", {
     title: "Inspect OpenCode Activity", description: "Read current native activity and pending actions, optionally scoped to a canonical OpenCode prompt. Codex observes the current session turn and does not support exact-prompt selection.",
     inputSchema: inspectActivitySchema, outputSchema: outputSchemas.inspectActivity,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async input => structuredResult(await backend.inspect({ ...input, detail: "semantic" })));
-  registerTool("opencode.inspectResult", {
+  registerTool("opencode.result", {
     title: "Inspect OpenCode Result", description: "Select the result for a canonical OpenCode prompt, or observe the current Codex turn. Complete selection before interpreting outcome; continue with returned read-only nextCall.",
     inputSchema: inspectResultSchema, outputSchema: outputSchemas.inspectResult,
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
@@ -395,8 +416,8 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["opencode.sessionDiff", "sessionDiff", "Read a session's native file diff, optionally paged or narrowed to one file patch."],
     ["opencode.inbox", "inbox", "Read pending session inbox entries, or the bounded text of one exact inbox entry."],
     ["opencode.skill", "skill", "Read one canonical skill and its bounded content; cwd selects project context."],
-    ["opencode.tools", "tools", "List executed tool-call evidence from one canonical assistant message. This does not discover the tools available to a worker."],
-    ["opencode.tool", "tool", "Read one exact native tool call's input, error summary, or selected content part."],
+    ["opencode.toolCalls", "tools", "List executed tool-call evidence from one canonical assistant message. This does not discover the tools available to a worker."],
+    ["opencode.toolCall", "tool", "Read one exact native tool call's input, error summary, or selected content part."],
     ["opencode.models", "models", "List the native model catalog; compact view omits full specifications."],
     ["opencode.agents", "agents", "List the effective native agent catalog. Defaults to compact view and excludes hidden entries."],
     ["opencode.agent", "agent", "Read one canonical agent's description, system instructions, or raw permissions."],
@@ -407,7 +428,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["opencode.runtime", "runtime", "Inspect connector API capabilities and runtime context for cwd. OpenCode includes paged plugin/MCP/command inventory; Codex reads plugin RPC capability and loaded identity evidence. This is not the effective agent-tool catalog or an OS-isolation attestation."],
     ["opencode.skills", "skills", "List canonical native skills, optionally in project context."],
     ["opencode.providers", "providers", "List native provider identities and activation state for optional cwd context."],
-    ["opencode.usage", "usage", "Read OpenCode cumulative session token activity. Codex quota windows and reset times are read separately with codex.quota."],
+    ["opencode.usage", "usage", "Read OpenCode cumulative session token activity. Codex quota windows and reset times are read separately with opencode.codexQuota."],
     ["opencode.sessions", "sessions", "List native sessions with native cursor pagination and optional cwd/search filters. Codex supports its narrower cursor inventory."],
     ["opencode.session", "session", "Read one exact native session's canonical projected state."],
   ] as const;
@@ -426,10 +447,10 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
       annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
     }, async (input, context) => queryResult(backend, { ...input, type } as QueryInput, context.mcpReq.signal));
   }
-  registerTool("codex.quota", {
+  registerTool("opencode.codexQuota", {
     title: "Read Codex Quota",
     description: "Read sanitized Codex quota windows and reset times through the native plugin's read-only App Server client. Does not admit a model turn or return OpenCode token totals or ChatGPT Plus message limits.",
-    inputSchema: z.object({}).strict(), outputSchema: queryOutputSchema("usage"),
+    inputSchema: z.object({}).strict(), outputSchema: queryOutputSchema("codexQuota"),
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false, idempotentHint: true },
   }, async (_input, context) => queryResult(backend, { runtime: "codex", type: "usage" }, context.mcpReq.signal));
 
@@ -438,7 +459,7 @@ export function createServer(backend = new OpenCodeBackend(), host = new HostBac
     ["opencode.cancelInbox", "cancelInbox", "Cancel one exact pending inbox item in its owning session. Verify the returned pending status; do not retry uncertain cancellation.", false, true, false, false],
     ["opencode.updateInbox", "updateInbox", "Change delivery for one exact pending inbox item. Reconcile pending state before retrying an uncertain update.", false, false, false, true],
     ["opencode.compact", "compact", "Admit native session compaction using steer or queue delivery. This is not completion; verify the exact returned inbox message.", false, true, true, false],
-    ["opencode.command", "command", "Admit one catalogued native session command with optional prompt attachments. Upstream supplies no message identity; do not retry uncertain submission.", false, true, true, false],
+    ["opencode.invokeCommand", "command", "Admit one catalogued native session command with optional prompt attachments. Upstream supplies no message identity; do not retry uncertain submission.", false, true, true, false],
     ["opencode.invokeSkill", "invokeSkill", "Invoke one canonical native session skill. Upstream supplies no message identity; do not retry uncertain submission.", false, true, true, false],
     ["opencode.interrupt", "interrupt", "Interrupt execution in one exact native session. This preserves the conversation; verify native state rather than retrying uncertainty.", false, true, true, false],
     ["opencode.respondPermission", "respondPermission", "Answer one exact pending permission request. Codex requires an offered optionId; OpenCode requires a decision. Approving may authorize external effects.", false, true, true, false],

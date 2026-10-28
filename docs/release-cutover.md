@@ -9,14 +9,17 @@ never proves the plugin has changed.
 No immutable release is a permanent default baseline. Before every cutover,
 re-inspect the deployed/current and previous connector builds, the exact configured
 native plugin path/options, and the loaded OpenCode inventory. Record the
-pre-cutover connector build plus plugin path as one rollback pair. Historical
+pre-cutover connector build plus exact loaded/configured plugin identity and path
+as one rollback pair. The two build IDs may differ when unchanged plugin code
+remains loaded during a connector-only activation. Historical
 acceptance records are evidence about their date only; they do not replace current
 runtime inspection.
 
 - This repository owns both sources; `packages/codex-plugin` is an npm workspace,
   not a separate MCP server. Its stable package name remains `opencode-codex-subagent`.
-- Installed releases live under `~/.local/lib/opencode-connect/builds/<buildId>/`.
-  Release identity covers connector/plugin source, manifests, and build scripts.
+- The default release store is `~/.local/lib/opencode-connect/builds/<buildId>/`.
+  Inspect the installed unit and deployment configuration for the actual baseDir;
+  pass it explicitly when it differs. Release identity covers connector/plugin source, manifests, and build scripts.
 - `build.json` must have the complete current record, including full source and
   installed runtime checksums. Reuse, activation, rollback and runnable status
   rehash source, `dist` and pruned `node_modules`, rerun the installed integration
@@ -52,7 +55,7 @@ concurrent operations; different ownership protocols cannot coordinate.
    `check:all` includes `verify:release`, which rejects package/lock/runtime/README
    release drift and a stale README native-client pin. This source check does not
    attest the deployed connector, loaded plugin or ChatGPT tool exposure.
-2. With separate operator authorization, use the newly compiled
+2. Within the principal's authorization, use the newly compiled
    `dist/src/deploy.js prepare --source <source-directory>` to prepare an immutable
    release. Preparation does not activate or reload either runtime.
 3. Inspect `build.json`, connector output, plugin source, installed workspace exports,
@@ -65,33 +68,78 @@ concurrent operations; different ownership protocols cannot coordinate.
    protected rollback record. Never log secrets. Validate that the rollback target
    has its complete workspace and independently recoverable plugin configuration.
 
-## Gate B — separately authorized live activation
+## Gate B — live activation
 
-Do not reload while a console or active native sessions depend on the service.
-Obtain the principal's authorization for disruptive changes and inspect the native
-OpenCode owner's actual lifecycle controls; restarting the connector does not
-restart OpenCode.
+Use the principal's existing authorization for the intended cutover. Before a
+disruptive reload, inspect native OpenCode's actual lifecycle controls and all
+dependent consoles, active OpenCode sessions, supervised Codex children and pending
+requests. Do not reload while dependent work remains active. Restarting the
+connector does not restart OpenCode.
 
-1. Load the immutable plugin `src` path, preserving unrelated configuration,
-   options, and permissions. Use the native owner's supported reload mechanism.
+### Connector-only activation
+
+A complete prepared release can update the connector while the existing native
+plugin stays loaded. This path requires evidence before activation:
+
+1. Resolve the loaded plugin implementation from native inventory and
+   `opencode.runtime {cwd,runtime:"codex"}`, including its immutable package/build
+   identity. Record the actual configured path and options. A configured path or
+   expected version alone does not prove which implementation is loaded.
+2. Compare every plugin runtime input under `packages/codex-plugin/src/`, the
+   plugin package manifest and the pinned native client/plugin versions between
+   that implementation and the prepared candidate. Verify byte identity, complete
+   inventories and installed RPC compatibility; the source integration check
+   remains required. Missing loaded identity, unavailable inputs or any changed
+   runtime input disqualifies this path.
+3. Preserve the configured immutable plugin path and loaded OpenCode process.
+   Activate only the prepared connector through the deployment implementation.
+   Verify connector health/readiness and the unchanged loaded plugin identity,
+   native process identity and `codex-sessions` capabilities.
+4. Record both identities separately. The new connector's build ID does not
+   relabel the already loaded plugin. No plugin reload is implied by acceptance.
+
+### Coordinated plugin activation
+
+When plugin equivalence is unproved or runtime inputs change, use this path:
+
+1. Within the principal's authorization, resolve dependent work before loading
+   the new immutable plugin `src` path. Preserve unrelated configuration, plugin
+   options and permissions. Use the native owner's supported reload mechanism.
    Verify loaded inventory and `codex-sessions` capabilities; configuration presence
    alone is not loading evidence.
-2. Activate the matching prepared connector through the repository's deployment
-   implementation. `/health` establishes connector identity/connectivity, not plugin identity.
-3. Independently verify native agent discovery, non-Codex session operations,
-   Codex direct mode/approval behavior with harmless tasks, read-only quota, and
-   ChatGPT-to-MCP `status.readiness`, `opencode.runtime` and representative focused tools. Record release and native process identities.
-4. Accept only after both runtimes and representative end-to-end operations pass.
-   Refresh the ChatGPT connector only if its connection/catalog is actually stale.
+2. Activate the prepared connector through the repository's deployment
+   implementation. `/health` establishes connector identity/connectivity, not
+   plugin identity.
+3. Verify native agent discovery, non-Codex session operations, Codex direct
+   mode/approval behavior with harmless tasks and read-only quota at their owning
+   runtime. Record release and native process identities.
+
+### Catalog and PlatformPlane acceptance
+
+After either path, inspect deployed MCP discovery and representative focused
+operations. For 0.17.0, verify resource namespaces, unified `opencode.*` worker
+control, direct typed reads, compact model discovery and shell/terminal routing.
+Use [Catalog migration](catalog-migration.md) to update callers and saved
+continuation names.
+
+Refresh the ChatGPT connector after the server cutover when the client still
+exposes the previous catalog. Then verify actual PlatformPlane tool names,
+arguments and representative calls. A successful host-side tools/list or local
+HTTP probe proves the server catalog; it does not prove that an existing ChatGPT
+conversation has refreshed. Record server deployment and client acceptance
+separately. Accept completion only for the layers actually verified.
 
 ## Recovery
 
 - Stop at a failed gate; do not delete the prior or prepared release.
-- Restore the recorded immutable plugin path/options and reload its native owner;
-  verify native RPC and quota independently.
+- For connector-only activation, retain the unchanged plugin path/options and
+  loaded identity. No native reload is needed to restore the recorded pair.
+- If plugin configuration/loading changed, restore the recorded immutable plugin
+  path/options and reload its native owner after resolving dependent work;
+  verify native identity, RPC and quota independently.
 - Roll back the connector only if activation occurred. Rollback swaps current/previous
   and remains reversible to the recorded pre-cutover connector build. Restore the
-  matching plugin path separately, then verify health and MCP behavior; report partial
+  recorded plugin state separately when it changed, then verify health and MCP behavior; report partial
   recovery if any check cannot complete.
 - Automatic connector rollback cannot restore native plugin configuration.
 

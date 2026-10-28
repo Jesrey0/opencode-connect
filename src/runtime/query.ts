@@ -120,7 +120,7 @@ export async function resolveNativeQuery(client: Client, query: NativeQueryInput
   }
   if (query.type === "models") {
     const response = await client.model.list(query.cwd ? { location: { directory: query.cwd } } : undefined, { signal });
-    const view = query.view ?? "full";
+    const view = query.view ?? "compact";
     const data = response.data.map((model) => ({
       id: modelKey(model),
       enabled: model.enabled,

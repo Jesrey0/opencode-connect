@@ -65,7 +65,7 @@ test("file pages are fingerprinted, byte bounded, lossless for split UTF-8, and 
     assert.equal(first.encoding, "base64");
     assert.equal(Buffer.from(String(first.data), "base64").toString("hex"), bytes.subarray(0,2).toString("hex"));
     const hash = String(first.fingerprint);
-    assert.equal(first.nextCall?.tool, "host.read");
+    assert.equal(first.nextCall?.tool, "file.read");
     assert.deepEqual(first.nextCall?.arguments, { cwd, path: `${cwd}/file`, limit: 2, offset: 2, fingerprint: hash });
     const next = await host.inspect({ type: "read", ...first.nextCall!.arguments } as Parameters<typeof host.inspect>[0]);
     assert.equal(next.offset, 2);
@@ -90,7 +90,7 @@ test("native VCS diffs page metadata separately from complete patch text; change
   assert.equal("patch" in (inventory.data as object[])[0], false);
   const first = await host.inspect({ type: "vcsDiff", cwd: "/tmp", file: "a" });
   assert.equal(first.text?.length, 12000);
-  assert.equal(first.nextCall?.tool, "host.vcsDiff");
+  assert.equal(first.nextCall?.tool, "git.diff");
   const second = await host.inspect({ type: "vcsDiff", ...first.nextCall!.arguments } as Parameters<typeof host.inspect>[0]);
   assert.equal(second.text?.length, 8000);
   patch = "changed";

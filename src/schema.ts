@@ -51,3 +51,12 @@ export function exposedUnion<K extends string, O extends readonly [z.ZodObject, 
   unionVariants.set(exposed, [...variants]);
   return exposed;
 }
+
+// Preserve strict input validation without echoing arbitrary caller keys.
+export function publicInputSchema<T extends z.ZodType>(schema: T): T {
+  if (!(schema instanceof z.ZodObject)) return schema;
+  const original = schema.def.error as z.core.$ZodErrorMap | undefined;
+  return schema.clone({ ...schema.def, error: (issue: z.core.$ZodRawIssue) =>
+    issue.code === "unrecognized_keys" ? "Unrecognized field(s); use only this tool's documented fields" : original?.(issue)
+  }).meta(schema.meta() ?? {}) as T;
+}

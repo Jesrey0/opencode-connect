@@ -16,7 +16,7 @@ export type HostInspectInput = { cwd: string } & (
   | ({ type: "vcsStatus" } & PageInput)
   | ({ type: "vcsBranch"; search?: string } & PageInput)
   | ({ type: "vcsDiff"; mode?: "working" | "branch" | "committed"; base?: string; file?: string; textOffset?: number; textLimit?: number; textFingerprint?: string } & PageInput)
-  | ({ type: "commands"; sessionId?: string } & PageInput)
+  | ({ type: "commands"; sessionId?: string; scope?: "shell" | "terminal" } & PageInput)
   | { type: "terminalScreen"; sessionId: string; lines?: number; textOffset?: number; textLimit?: number; textFingerprint?: string }
   | { type: "terminalSnapshot"; id: string; textOffset?: number; textLimit?: number; textFingerprint?: string }
 );
@@ -100,9 +100,9 @@ export class HostBackend {
   }
   async inspect(input: HostInspectInput) {
     const result = await this.inspectNative(input);
-    const tool = ({ list: "host.list", read: "host.read", find: "host.find", vcs: "host.vcs", vcsStatus: "host.vcsStatus", vcsBranch: "host.vcsBranch", vcsDiff: "host.vcsDiff", commands: "host.commands", terminalScreen: "host.terminalScreen", terminalSnapshot: "host.terminalSnapshot" } as const)[input.type];
+    const tool = input.type === "commands" && input.scope === "terminal" ? "terminal.list" : ({ list: "file.list", read: "file.read", find: "file.find", vcs: "git.repository", vcsStatus: "git.status", vcsBranch: "git.branches", vcsDiff: "git.diff", commands: "command.list", terminalScreen: "terminal.screen", terminalSnapshot: "terminal.snapshot" } as const)[input.type];
     const call = pageNextCall(tool, input, result);
-    if (call) { const { type: _type, ...args } = call.arguments; return { ...result, nextCall: { ...call, arguments: args } }; }
+    if (call) { const { type: _type, scope: _scope, ...args } = call.arguments; return { ...result, nextCall: { ...call, arguments: args } }; }
     return { ...result, nextCall: null };
   }
   private async inspectNative(input: HostInspectInput) {
@@ -178,12 +178,12 @@ export class HostBackend {
       const session = await client.session.get({ sessionID: input.sessionId });
       if (session.location.directory !== location.directory) throw new Error("command session does not belong to this canonical location");
     }
-    const [shells, ptys, persistent] = await Promise.all([client.shell.list({ location }), client.pty.list({ location }), input.sessionId ? client.experimental.persistentPty.list({ sessionID: input.sessionId }) : Promise.resolve([])]);
+    const [shells, ptys, persistent] = await Promise.all([input.scope === "terminal" ? Promise.resolve({ data: [] }) : client.shell.list({ location }), input.scope === "shell" ? Promise.resolve({ data: [] }) : client.pty.list({ location }), input.scope !== "shell" && input.sessionId ? client.experimental.persistentPty.list({ sessionID: input.sessionId }) : Promise.resolve([])]);
     return { location, type: input.type, ...page([
       ...shells.data.map((info) => ({ kind: "shell", ...projectShell(info), retention: retention.shell })),
       ...ptys.data.map((info) => ({ kind: "pty", ...projectPty(info), retention: retention.pty })),
       ...persistent.map((info) => ({ kind: "persistentPty", ...projectPty(info), retention: retention.persistentPty })),
-    ], input), shellListScope: "running only; retained exited shell IDs must be saved by the caller" };
+    ], input), ...(input.scope === "terminal" ? { terminalListScope: input.sessionId ? "ordinary PTYs: canonical location; persistent PTYs: selected session only" : "ordinary PTYs: canonical location; persistent PTYs: not requested (supply sessionId)" } : { shellListScope: "running only; retained exited shell IDs must be saved by the caller" }) };
   }
   async write(input: HostWriteInput) {
     const { client } = await this.connect();
@@ -221,7 +221,7 @@ export class HostBackend {
     const list = await client.worktree.list({ projectID: projectId });
     if (input.action === "list") {
       const result = { projectId, location: { directory: location.directory }, ...page(list, input) };
-      const call = pageNextCall("host.worktreeList", { ...input, cwd: location.directory, projectId }, result);
+      const call = pageNextCall("git.worktrees", { ...input, cwd: location.directory, projectId }, result);
       if (call) { const { action: _action, ...args } = call.arguments; return { ...result, nextCall: { ...call, arguments: args } }; }
       return { ...result, nextCall: null };
     }
@@ -329,7 +329,7 @@ export class HostBackend {
       cursorUnit: "bytes" as const, encoding: "nativeUtf8" as const, decodingLimit: shellDecodingLimit,
       drained, retention: retention.shell, metadataSource, metadataVerified,
       observation: { reason, stage, error: observationError },
-      nextCall: drained ? null : { tool: "command.read" as const, arguments: { kind: "shell" as const, cwd: admitted.data.cwd, id, cursor, limit: Math.min(limit, 32_000) } },
+      nextCall: drained ? null : { tool: "command.read" as const, arguments: { cwd: admitted.data.cwd, id, cursor, limit: Math.min(limit, 32_000) } },
     };
   }
   async start(input: CommandStartInput) {
@@ -374,7 +374,7 @@ export class HostBackend {
       const result = await client.shell.output({ location, id: input.id, cursor, limit });
       const drained = info.status !== "running" && result.data.cursor >= result.data.size;
       return { kind: input.kind, location: result.location, ...projectShell(info as ShellInfo1), ...result.data, encoding: "nativeUtf8", decodingLimit: shellDecodingLimit, cursorUnit: "bytes", drained, retention: retention.shell,
-        nextCall: drained ? null : { tool: "command.read" as const, arguments: { kind: "shell" as const, cwd: result.location.directory, id: input.id, cursor: result.data.cursor, limit: Math.min(limit, 32_000) } } };
+        nextCall: drained ? null : { tool: "command.read" as const, arguments: { cwd: result.location.directory, id: input.id, cursor: result.data.cursor, limit: Math.min(limit, 32_000) } } };
     }
     if (input.kind === "pty" && info.status === "exited") return { kind: input.kind, location, ...projectPty(info as Pty), cursor, cursorUnit: "utf16CodeUnits", output: "", replayAvailable: false, drained: false, retention: retention.pty };
     const result = await terminalSocket(connection, { ...input, kind: input.kind, cwd: location.directory, cursor, limit, waitMs: integer(input.waitMs, 250, 2000) }, this.sockets);

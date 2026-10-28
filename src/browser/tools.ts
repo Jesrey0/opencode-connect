@@ -1,8 +1,9 @@
+import { publicInputSchema } from "../schema.js";
 import type { McpServer, ServerContext } from "@modelcontextprotocol/server";
 import { createHash } from "node:crypto";
 import { BrowserBackend, BrowserError } from "./backend.js";
 import { browserInputs, browserActionInputs, browserOutputs, browserErrorSchema, type BrowserMethod } from "./schemas.js";
-import { errorOutputSchema } from "../results.js";
+import { toolErrorSchema } from "../results.js";
 import * as z from "zod/v4";
 import type { Events } from "../events.js";
 
@@ -49,8 +50,8 @@ export function registerBrowserTools(server: McpServer, backend: BrowserBackend,
     server.registerTool(name, {
       title: spec.title,
       description: spec.description,
-      inputSchema,
-      outputSchema: z.union([outputSchema, browserErrorSchema, errorOutputSchema]),
+      inputSchema: publicInputSchema(inputSchema),
+      outputSchema: z.union([outputSchema, browserErrorSchema, toolErrorSchema(name)]),
       // Taking a new accessibility snapshot invalidates prior element refs.
       annotations: { readOnlyHint: spec.readOnly, destructiveHint: spec.destructive, openWorldHint: spec.openWorld, idempotentHint: spec.readOnly && !["browser.snapshot", "browser.media", "browser.media_download"].includes(name) },
     } as never, (async (input: unknown, context: ServerContext) => {

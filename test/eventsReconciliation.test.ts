@@ -17,7 +17,7 @@ test("terminal reconciliation carries native selection across bounded passes bef
     const page = Number(input.selectionCursor ?? 0);
     return { session: { executionOutcome: "succeeded" }, result: {
       terminal: true, selectionComplete: page === 5, outcome: "completed", completedAtMs: 1234,
-      nextCall: page === 5 ? null : { tool: "opencode.inspectResult", arguments: { ...target, selectionCursor: String(page + 1), selectionFingerprint: "native-fingerprint", candidateAssistantMessageId: "assistant" } },
+      nextCall: page === 5 ? null : { tool: "opencode.result", arguments: { ...target, selectionCursor: String(page + 1), selectionFingerprint: "native-fingerprint", candidateAssistantMessageId: "assistant" } },
     } };
   }, [target]);
   await reconciler.reconcile();
@@ -35,7 +35,7 @@ test("reconciliation refuses active or cross-prompt continuations and clears wat
   const dynamic = new EventReconciler({ inspect: async (input: Parameters<OpenCodeBackend["inspect"]>[0]) => {
     reads.push(input);
     return { result: { terminal: !active, selectionComplete: false, nextCall: {
-      tool: "opencode.inspectResult", arguments: { ...target, messageId: different ? "other" : "u1", selectionCursor: "next", selectionFingerprint: "fingerprint" },
+      tool: "opencode.result", arguments: { ...target, messageId: different ? "other" : "u1", selectionCursor: "next", selectionFingerprint: "fingerprint" },
     } } };
   } } as never, { targets: () => watched ? [target] : [], observe: async (...args: unknown[]) => { queued.push(args); }, lifecycle: { record: () => {} } } as never);
   await dynamic.reconcile(); assert.equal(reads.length, 1);
@@ -58,7 +58,7 @@ test("a stale continuation fails closed, records sanitized evidence, and restart
     }
     return { session: { executionOutcome: "succeeded" }, result: {
       terminal: true, selectionComplete: false, outcome: "unknown",
-      nextCall: { tool: "opencode.inspectResult", arguments: { ...target, selectionCursor: String(page), selectionFingerprint: "fp", candidateAssistantMessageId: "a" } },
+      nextCall: { tool: "opencode.result", arguments: { ...target, selectionCursor: String(page), selectionFingerprint: "fp", candidateAssistantMessageId: "a" } },
     } };
   }, [target]);
   await reconciler.reconcile();
