@@ -49,6 +49,12 @@ filesystem with SQLite locking; never unlink or replace this file. Lock I/O or
 corruption fails closed. Use one accepted deployment-tool version for all
 concurrent operations; different ownership protocols cannot coordinate.
 
+Deployment helpers must run with the selected Node 24 binary directory on their
+own `PATH`, including background and systemd helpers. An absolute Node executable
+in the helper command is insufficient: deployment validators spawn `node` by
+name. Verify Node resolution in that execution environment; an interactive shell's
+version manager does not establish the user service manager's environment.
+
 1. Confirm the independently reviewed commit and Git diff. Run `npm ci --include=dev`,
    `npm run check:all`, `npm run test:all`, `npm run build`, and
    `npm run verify:integration` in an isolated source copy if a console uses the checkout.
@@ -113,6 +119,29 @@ When plugin equivalence is unproved or runtime inputs change, use this path:
 3. Verify native agent discovery, non-Codex session operations, Codex direct
    mode/approval behavior with harmless tasks and read-only quota at their owning
    runtime. Record release and native process identities.
+
+### Native guidance refresh
+
+Connector-only activation does not necessarily update native cached guidance.
+After writing operator guidance, verify persisted file readback and then read its
+canonical native skill content through `opencode.skill`. Follow the live schema's
+page bounds and returned continuations; disk readback alone does not prove that
+workers will receive the new content.
+
+If canonical content remains stale, first look for an exposed scoped refresh
+primitive. The pinned native SDK skill API exposes inventory listing, not a skill
+cache invalidation operation. When no scoped refresh is available, coordinate one
+supported `client.location.reload` after checking active workers, pending actions
+and dependent consoles. Resolve dependent work before reloading: location reload
+disposes plugins, can stop supervised Codex children and may invalidate host
+command handles.
+
+For unchanged plugin inputs, preserve configuration, the immutable plugin path
+and its options. Reloading the same implementation does not relabel its loaded
+build as the connector's newer build. If the reload response is lost or uncertain,
+reconcile through read-only runtime identity and canonical skill-content probes;
+do not issue repeated reloads. After any reload, reverify canonical guidance,
+native plugin identity/RPC compatibility and representative live MCP operations.
 
 ### Catalog and PlatformPlane acceptance
 
