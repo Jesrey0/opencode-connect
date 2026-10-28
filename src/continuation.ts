@@ -1,17 +1,17 @@
 type ReadTool =
-  | "opencode.inspectResult"
-  | "opencode.sessionDiff" | "opencode.inbox" | "opencode.skill" | "opencode.tools" | "opencode.tool"
+  | "opencode.result"
+  | "opencode.sessionDiff" | "opencode.inbox" | "opencode.skill" | "opencode.toolCalls" | "opencode.toolCall"
   | "opencode.models" | "opencode.agents" | "opencode.agent" | "opencode.messages" | "opencode.message"
   | "opencode.permissions" | "opencode.savedApprovals" | "opencode.runtime" | "opencode.skills"
   | "opencode.providers" | "opencode.usage" | "opencode.sessions" | "opencode.session"
-  | "host.list" | "host.read" | "host.find" | "host.vcs" | "host.vcsStatus"
-  | "host.vcsBranch" | "host.vcsDiff" | "host.commands" | "host.terminalScreen"
-  | "host.terminalSnapshot" | "host.worktreeList" | "command.read";
-type QueryTool = Exclude<Extract<ReadTool, `opencode.${string}`>, "opencode.inspectResult">;
+  | "file.list" | "file.read" | "file.find" | "git.repository" | "git.status"
+  | "git.branches" | "git.diff" | "command.list" | "terminal.screen"
+  | "terminal.snapshot" | "git.worktrees" | "terminal.list" | "command.read";
+type QueryTool = Exclude<Extract<ReadTool, `opencode.${string}`>, "opencode.result">;
 
 const queryTools = {
-  sessionDiff: "opencode.sessionDiff", inbox: "opencode.inbox", skill: "opencode.skill", tools: "opencode.tools",
-  tool: "opencode.tool", models: "opencode.models", agents: "opencode.agents", agent: "opencode.agent",
+  sessionDiff: "opencode.sessionDiff", inbox: "opencode.inbox", skill: "opencode.skill", tools: "opencode.toolCalls",
+  tool: "opencode.toolCall", models: "opencode.models", agents: "opencode.agents", agent: "opencode.agent",
   messages: "opencode.messages", message: "opencode.message", permissions: "opencode.permissions",
   savedApprovals: "opencode.savedApprovals", runtime: "opencode.runtime", skills: "opencode.skills",
   providers: "opencode.providers", usage: "opencode.usage", sessions: "opencode.sessions", session: "opencode.session",
@@ -39,7 +39,7 @@ export function pageNextCall(tool: ReadTool, args: Record<string, unknown>, resu
   } else if (typeof value.nextOffset === "number") {
     input.offset = value.nextOffset;
     input.fingerprint = value.fingerprint;
-    if (tool === "host.read" && typeof value.path === "string") input.path = value.path;
+    if (tool === "file.read" && typeof value.path === "string") input.path = value.path;
   } else {
     const cursor = value.cursor as { next?: string | null } | undefined;
     if (typeof cursor?.next !== "string") return null;

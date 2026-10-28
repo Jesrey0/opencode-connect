@@ -53,7 +53,7 @@ test("SDK rejects old sessions, versions, missing metadata, header mismatches an
     const instructions = discovery.reply.result.instructions;
     assert.equal(typeof instructions, "string");
     assert.ok(instructions.length <= 512, "OpenAI recommends important cross-tool guidance in the first 512 characters");
-    for (const guidance of ["purpose-specific tools", "command.startShell", "command.read", "nextCall", "uncertain mutations"]) assert.ok(instructions.includes(guidance), guidance);
+    for (const guidance of ["purpose-specific tools", "OpenCode controls workers", "command.run", "terminal for PTYs", "direct typed results", "nextCall", "uncertain mutations"]) assert.ok(instructions.includes(guidance), guidance);
     assert.equal(discovery.headers.has("mcp-session-id"), false);
     for (const old of ["2025-06-18", "2025-11-25"]) {
       for (const method of ["server/discover", "tools/list", "initialize"]) {
@@ -180,7 +180,7 @@ test("HTTP disconnect cancels the wait observer promptly without interrupting th
     assert.equal(eventSignal?.aborted, true);
     assert.equal(native.requests.every((request) => request.method === "GET"), true);
     assert.equal(native.requests.some((request) => request.path.endsWith("/interrupt")), false);
-    const inspection = await http.send("tools/call", { name: "opencode.inspectActivity", arguments: { sessionId: "s", messageId: "u" } });
+    const inspection = await http.send("tools/call", { name: "opencode.activity", arguments: { sessionId: "s", messageId: "u" } });
     assert.equal(inspection.reply.result.structuredContent.session.status, "inProgress");
   } finally { request.destroy(); await http.close(); }
 });
@@ -266,7 +266,7 @@ test("overlapping HTTP requests with the same JSON-RPC id keep their own results
   });
   const http = await httpFixture(native);
   const send = async (command: string) => {
-    const response = await fetch(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "command.startShell" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { _meta: meta, name: "command.startShell", arguments: { cwd: "/tmp", command } } }) });
+    const response = await fetch(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "command.run" }, body: JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { _meta: meta, name: "command.run", arguments: { cwd: "/tmp", command, waitMs: 0 } } }) });
     return response.json() as Promise<any>;
   };
   try {
@@ -294,10 +294,10 @@ test("HTTP disconnect cancels the Codex quota RPC rather than leaving its reader
     });
   });
   const http = await httpFixture(native);
-  const request = httpRequest(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "codex.quota" } });
+  const request = httpRequest(http.url, { method: "POST", headers: { "content-type": "application/json", accept: "application/json, text/event-stream", "mcp-protocol-version": version, "mcp-method": "tools/call", "mcp-name": "opencode.codexQuota" } });
   request.on("error", () => {});
   try {
-    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: meta, name: "codex.quota", arguments: {} } }));
+    request.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { _meta: meta, name: "opencode.codexQuota", arguments: {} } }));
     await ready;
     request.destroy();
     await stopped;
@@ -341,7 +341,7 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     const listing = await http.send("tools/list");
     assert.equal(listing.status, 200);
     const tools = listing.reply.result.tools as any[];
-    assert.equal(tools.length, 72);
+    assert.equal(tools.length, 74);
     const validators = new AjvJsonSchemaValidator();
     for (const tool of tools) {
       assert.equal(tool.inputSchema.$schema, "https://json-schema.org/draft/2020-12/schema");
@@ -350,18 +350,18 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     }
     assert.equal(tools.find((tool) => tool.name === "opencode.respondPermission").annotations.openWorldHint, true);
     const calls: [string, Record<string, unknown>][] = [
-      ["status.readiness", {}], ["status.recovery", {}], ["host.list", { cwd }],
-      ["host.terminalScreen", { cwd, sessionId: "s" }],
-      ["host.terminalSnapshot", { cwd, id: "pty" }],
-      ["host.write", { cwd, path: "new", encoding: "utf8", data: "written", overwrite: false }],
-      ["host.worktreeList", { cwd }],
-      ["command.startShell", { cwd, command: "fixture" }],
-      ["command.read", { kind: "shell", cwd, id: "shell" }],
-      ["command.remove", { kind: "shell", cwd, id: "shell" }],
+      ["connector.readiness", {}], ["opencode.recovery", {}], ["file.list", { cwd }],
+      ["terminal.screen", { cwd, sessionId: "s" }],
+      ["terminal.snapshot", { cwd, id: "pty" }],
+      ["file.write", { cwd, path: "new", encoding: "utf8", data: "written", overwrite: false }],
+      ["git.worktrees", { cwd }],
+      ["command.run", { cwd, command: "fixture", waitMs: 0 }],
+      ["command.read", { cwd, id: "shell" }],
+      ["command.remove", { cwd, id: "shell" }],
       ["opencode.create", { cwd, model: "openai/a", task: "fixture" }],
       ["opencode.wait", { sessionId: "s", messageId: "u" }],
-      ["opencode.inspectResult", { sessionId: "s", messageId: "u" }],
-      ["opencode.inspectActivity", { sessionId: "s" }],
+      ["opencode.result", { sessionId: "s", messageId: "u" }],
+      ["opencode.activity", { sessionId: "s" }],
       ["opencode.session", { sessionId: "s" }],
       ["opencode.interrupt", { sessionId: "s" }],
     ];
@@ -385,12 +385,12 @@ test("all HTTP tools publish output schemas; existing tools return canonical str
     assert.match(failed.reply.result.structuredContent.error, /readback mismatch/);
     assert.equal(native.requests.filter((request) => request.path === "/api/model").length, 0, "native session admission owns model validation");
     assert.equal(validators.getValidator(tools.find(tool => tool.name === "opencode.create").outputSchema)(failed.reply.result.structuredContent).valid, true);
-    const invalid = await http.send("tools/call", { name: "status.readiness", arguments: { alias: "old" } });
+    const invalid = await http.send("tools/call", { name: "connector.readiness", arguments: { alias: "old" } });
     assert.equal(invalid.reply.result.isError, true);
   } finally { await http.close(); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test("HTTP command.read validates metadata-unavailable success for both PTY kinds", async () => {
+test("HTTP terminal reads validate metadata-unavailable success for both PTY kinds", async () => {
   for (const kind of ["pty", "persistentPty"] as const) {
     let reads = 0;
     const info = { id: "pty", cwd: "/tmp", status: "running", pid: 1, sessionID: "s", size: { rows: 24, cols: 80 }, output: { head: 10, tail: 20 } };
@@ -416,8 +416,8 @@ test("HTTP command.read validates metadata-unavailable success for both PTY kind
     });
     const http = await httpFixture(native, undefined, 20, host);
     try {
-      const name = kind === "persistentPty" ? "command.observePersistentPty" : "command.read";
-      const response = await http.send("tools/call", { name, arguments: { ...(kind === "pty" ? { kind } : {}), cwd: "/tmp", id: "pty", waitMs: 0 } });
+      const name = kind === "persistentPty" ? "terminal.observePersistent" : "terminal.read";
+      const response = await http.send("tools/call", { name, arguments: { cwd: "/tmp", id: "pty", waitMs: 0 } });
       const value = response.reply.result;
       assert.notEqual(value.isError, true, JSON.stringify(value));
       assert.deepEqual(value.content, []);
@@ -464,7 +464,7 @@ test("concurrent HTTP file reads keep responses isolated, including when one nat
   });
   const http = await httpFixture(native);
   try {
-    const readAll = () => Promise.all(files.map(path => http.send("tools/call", { name: "host.read", arguments: { cwd, path } })));
+    const readAll = () => Promise.all(files.map(path => http.send("tools/call", { name: "file.read", arguments: { cwd, path } })));
     const successful = await readAll();
     assert.ok(peak > 1, "native reads actually overlapped");
     for (const [index, response] of successful.entries()) {
@@ -498,7 +498,7 @@ test("HTTP image tool retains its separate 1 MiB media allowance above the struc
   const native = nativeFixture((request) => request.path === "/api/location" ? { directory: cwd } : new Response(bytes));
   const http = await httpFixture(native);
   try {
-    const response = await http.send("tools/call", { name: "host.read", arguments: { cwd, path: "image.png", image: true } });
+    const response = await http.send("tools/call", { name: "file.read", arguments: { cwd, path: "image.png", image: true } });
     const result = response.reply.result;
     assert.notEqual(result.isError, true, JSON.stringify(result));
     assert.equal(result.content.length, 1);
@@ -508,7 +508,7 @@ test("HTTP image tool retains its separate 1 MiB media allowance above the struc
     assert.equal(result.structuredContent.size, bytes.length);
     assert.equal(JSON.stringify(result.structuredContent).includes(result.content[0].data), false);
     bytes = Buffer.concat([bytes, Buffer.alloc(1_048_577 - bytes.length)]);
-    const oversized = await http.send("tools/call", { name: "host.read", arguments: { cwd, path: "image.png", image: true } });
+    const oversized = await http.send("tools/call", { name: "file.read", arguments: { cwd, path: "image.png", image: true } });
     assert.equal(oversized.reply.result.isError, true);
     assert.match(oversized.reply.result.structuredContent.error, /1 MiB/);
   } finally { await http.close(); await rm(cwd, { recursive: true, force: true }); }

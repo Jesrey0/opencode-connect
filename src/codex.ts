@@ -69,7 +69,7 @@ function capabilities(value: unknown) {
   return { continuation: native.continuation === true, exactPromptWait: false, modelSelection: false, permissions: "operator-selected" as const, modes, defaultMode: mode(native.defaultMode), events: false, filesystemClient: false, terminalClient: false, ...(native.usageQuota === "codex-app-server" ? { usageQuota: "codex-app-server" as const } : {}) };
 }
 const packageVersion = z.string().max(128).regex(/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/);
-const pluginIdentitySchema = z.discriminatedUnion("status", [
+export const pluginIdentitySchema = z.discriminatedUnion("status", [
   z.object({ status: z.literal("unavailable"), reason: z.enum(["not-reported", "package-metadata-unavailable"]) }),
   z.object({
     status: z.literal("available"), packageVersion, nativeVersion: packageVersion,
@@ -91,7 +91,7 @@ function pluginIdentity(value: unknown): CodexPluginIdentity {
 // misconfigured installed plugin must not turn a quota read into identity data.
 const quotaLabel = (max: number) => z.string().max(max).nullable();
 const quotaWindow = z.object({ usedPercent: z.number(), resetsAt: z.number().nullable(), windowDurationMins: z.number().nullable() }).nullable();
-const quotaSnapshot = z.object({
+export const quotaSnapshot = z.object({
   source: z.literal("codex-app-server"), scope: z.literal("chatgpt-codex-usage-quota"), readAtMs: z.number(), ordinaryUsageAllowed: z.boolean().nullable(),
   account: z.object({ type: quotaLabel(64), planType: quotaLabel(64), requiresOpenaiAuth: z.boolean().nullable() }),
   buckets: z.array(z.object({
@@ -152,7 +152,7 @@ export type CodexInspectInput = { sessionId: string; messageId?: string; detail?
 function inspection(value: Record<string, any>, input: CodexInspectInput) {
   const session = project(value, input.sessionId);
   const paged = textPage(value.output, input.textOffset, input.textLimit, input.textFingerprint);
-  const result = { ...paged, outcome: session.outcome, outcomeBasis: session.outcomeBasis, messageId: null, assistantMessageId: value.assistantMessageId === null ? null : id(value.assistantMessageId), correlationSupported: false as const, terminal: session.executionKnown && session.status !== "inProgress", finish: typeof value.stopReason === "string" ? value.stopReason.slice(0, 64) : null, completedAtMs: typeof value.completedAtMs === "number" ? value.completedAtMs : null, error: value.error ? { type: errorType(value.error) ?? "unavailable", messageOmitted: true } : null, outputTruncated: value.outputTruncated === true, textNextCall: pageNextCall("opencode.inspectResult", { runtime: "codex", sessionId: input.sessionId, ...(input.textLimit ? { textLimit: input.textLimit } : {}) }, paged) };
+  const result = { ...paged, outcome: session.outcome, outcomeBasis: session.outcomeBasis, messageId: null, assistantMessageId: value.assistantMessageId === null ? null : id(value.assistantMessageId), correlationSupported: false as const, terminal: session.executionKnown && session.status !== "inProgress", finish: typeof value.stopReason === "string" ? value.stopReason.slice(0, 64) : null, completedAtMs: typeof value.completedAtMs === "number" ? value.completedAtMs : null, error: value.error ? { type: errorType(value.error) ?? "unavailable", messageOmitted: true } : null, outputTruncated: value.outputTruncated === true, textNextCall: pageNextCall("opencode.result", { runtime: "codex", sessionId: input.sessionId, ...(input.textLimit ? { textLimit: input.textLimit } : {}) }, paged) };
   return { session, result, pendingActions: pending(value.pendingActions, session.sessionId) };
 }
 export async function codexInspect(client: OpenCodeClient, input: CodexInspectInput, signal?: AbortSignal) {

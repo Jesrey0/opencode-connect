@@ -22,8 +22,8 @@ async function fixture(native: ReturnType<typeof nativeFixture>, events?: Events
   const [a, b] = InMemoryTransport.createLinkedPair();
   await server.connect(a); await client.connect(b);
   const { tools } = await client.listTools();
-  const status = tools.find(tool => tool.name === "status.recovery")!;
-  const readiness = tools.find(tool => tool.name === "status.readiness")!;
+  const status = tools.find(tool => tool.name === "opencode.recovery")!;
+  const readiness = tools.find(tool => tool.name === "connector.readiness")!;
   const provider = new AjvJsonSchemaValidator();
   const validateRecovery = provider.getValidator(status.outputSchema! as JsonSchemaType);
   const validateReadiness = provider.getValidator(readiness.outputSchema! as JsonSchemaType);
@@ -48,7 +48,7 @@ test("MCP readiness reads native info only and reports concise local components"
     for (let attempt = 0; attempt < 3; attempt++) {
       const args = {};
       assert.equal(validateInput(args).valid, true);
-      const response = await f.client.callTool({ name: "status.readiness", arguments: args });
+      const response = await f.client.callTool({ name: "connector.readiness", arguments: args });
       assert.notEqual(response.isError, true);
       assert.deepEqual(response.content, []);
       assert.equal(f.validateReadiness(response.structuredContent).valid, true);
@@ -64,9 +64,9 @@ test("MCP readiness reads native info only and reports concise local components"
       assert.ok(Buffer.byteLength(JSON.stringify(response.structuredContent)) < 1024);
     }
     assert.deepEqual(native.requests.map(request => request.path), ["/api/info", "/api/info", "/api/info"]);
-    const rejected = await f.client.callTool({ name: "status.readiness", arguments: { detail: "light" } });
+    const rejected = await f.client.callTool({ name: "connector.readiness", arguments: { detail: "light" } });
     assert.equal(rejected.isError, true);
-    const wrongScope = await f.client.callTool({ name: "status.readiness", arguments: { runtime: "codex" } });
+    const wrongScope = await f.client.callTool({ name: "connector.readiness", arguments: { runtime: "codex" } });
     assert.equal(wrongScope.isError, true);
     assert.equal(native.requests.length, 3, "invalid readiness inputs are rejected before native access");
   } finally { await f.close(); await events.close(); await rm(directory, { recursive: true, force: true }); }
@@ -76,7 +76,7 @@ test("MCP readiness retains connector identity and sanitizes unavailable OpenCod
   const native = nativeFixture(() => Response.json({ _tag: "UnauthorizedError", message: "PRIVATE-UPSTREAM" }, { status: 401 }));
   const f = await fixture(native);
   try {
-    const response = await f.client.callTool({ name: "status.readiness", arguments: {} });
+    const response = await f.client.callTool({ name: "connector.readiness", arguments: {} });
     assert.equal(response.isError, true);
     assert.deepEqual(response.content, []);
     assert.equal(f.validateReadiness(response.structuredContent).valid, true);
@@ -110,7 +110,7 @@ test("MCP omitted and explicit recovery retain worker result evidence and runtim
   try {
     let defaultResult: unknown;
     for (const args of [{}, { runtime: "opencode" }]) {
-      const response = await f.client.callTool({ name: "status.recovery", arguments: args });
+      const response = await f.client.callTool({ name: "opencode.recovery", arguments: args });
       assert.notEqual(response.isError, true);
       assert.equal(f.validateRecovery(response.structuredContent).valid, true);
       const result = response.structuredContent as any;
@@ -125,7 +125,7 @@ test("MCP omitted and explicit recovery retain worker result evidence and runtim
     }
     assert.ok(native.requests.some(request => request.path.endsWith("/message")));
     const before = native.requests.length;
-    const codex = await f.client.callTool({ name: "status.recovery", arguments: { runtime: "codex" } });
+    const codex = await f.client.callTool({ name: "opencode.recovery", arguments: { runtime: "codex" } });
     assert.notEqual(codex.isError, true);
     assert.equal(f.validateRecovery(codex.structuredContent).valid, true);
     assert.deepEqual((codex.structuredContent as any).workers, []);

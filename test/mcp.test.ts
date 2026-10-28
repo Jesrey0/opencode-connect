@@ -21,31 +21,32 @@ async function mcpFixture(fixture: ReturnType<typeof nativeFixture>, backend = n
   return { client, close: async () => { await client.close(); await server.close(); } };
 }
 
-test("MCP discovery uses host/command groups and canonical worker names with bounded native command composition", async () => {
+test("MCP discovery uses resource groups and unified OpenCode worker names with bounded native command composition", async () => {
   const fixture = await mcpFixture(nativeFixture(() => { throw new Error("discovery must not access runtime"); }));
   try {
     const { tools } = await fixture.client.listTools();
-    const focused = ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.run", "command.startShell", "command.startPty", "command.startPersistentPty", "command.read", "command.observePersistentPty", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD"];
-    const queries = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
-    const actions = ["steer", "cancelInbox", "updateInbox", "compact", "command", "invokeSkill", "interrupt", "respondPermission", "respondForm", "cancelForm", "delete", "revertStage", "revertClear", "revertCommit", "switchModel", "switchAgent", "setPermissions", "removeSavedApproval", "synthetic"].map(action => `opencode.${action}`);
-    assert.deepEqual(tools.map((t) => t.name).sort(), ["status.readiness", "status.recovery", "opencode.create", "opencode.continue", "opencode.fork", "opencode.wait", "opencode.inspectActivity", "opencode.inspectResult", ...queries, ...actions, "codex.quota", "host.write", ...focused].sort());
+    const focused = ["file.list", "file.read", "file.find", "git.repository", "git.status", "git.branches", "git.diff", "command.list", "terminal.list", "terminal.screen", "terminal.snapshot", "git.worktrees", "git.createWorktree", "git.removeWorktree", "git.refreshWorktrees", "command.run", "terminal.start", "terminal.startPersistent", "command.read", "terminal.observePersistent", "terminal.read", "terminal.remove", "command.remove", "terminal.resize", "terminal.input", "terminal.interrupt", "terminal.sendCtrlD"];
+    const queries = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.toolCalls", "opencode.toolCall", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
+    const actions = ["steer", "cancelInbox", "updateInbox", "compact", "command", "invokeSkill", "interrupt", "respondPermission", "respondForm", "cancelForm", "delete", "revertStage", "revertClear", "revertCommit", "switchModel", "switchAgent", "setPermissions", "removeSavedApproval", "synthetic"].map(action => `opencode.${action === "command" ? "invokeCommand" : action}`);
+    assert.equal(tools.length, 74);
+    assert.deepEqual(tools.map((t) => t.name).sort(), ["connector.readiness", "opencode.recovery", "opencode.create", "opencode.continue", "opencode.fork", "opencode.wait", "opencode.activity", "opencode.result", ...queries, ...actions, "opencode.codexQuota", "file.write", ...focused].sort());
     // OpenAI plugin reference/guidelines reviewed 2026-10-15; see
     // docs/chatgpt-mcp-review.md for sources and behavior justifications.
     for (const [name, readOnlyHint, destructiveHint, openWorldHint, idempotentHint] of [
-      ["status.readiness", true, false, false, true], ["status.recovery", true, false, false, true],
-      ["host.write", false, true, false, false],
-      ["command.read", true, false, false, true], ["command.observePersistentPty", false, true, false, false], ["codex.quota", true, false, false, true],
-      ...["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList"].map(name => [name, true, false, false, true] as const),
-      ...["host.worktreeCreate", "host.worktreeRemove", "command.run", "command.startShell", "command.startPty", "command.startPersistentPty", "command.remove", "command.input", "command.interrupt", "command.ctrlD"].map(name => [name, false, true, name.startsWith("command."), false] as const),
-      ...["opencode.steer", "opencode.compact", "opencode.command", "opencode.invokeSkill", "opencode.interrupt", "opencode.respondPermission", "opencode.respondForm", "opencode.revertCommit", "opencode.removeSavedApproval", "opencode.synthetic"].map(name => [name, false, true, ["opencode.steer", "opencode.compact", "opencode.command", "opencode.invokeSkill", "opencode.interrupt", "opencode.respondPermission", "opencode.respondForm", "opencode.revertCommit", "opencode.synthetic"].includes(name), false] as const),
+      ["connector.readiness", true, false, false, true], ["opencode.recovery", true, false, false, true],
+      ["file.write", false, true, false, false],
+      ["command.read", true, false, false, true], ["terminal.read", true, false, false, true], ["terminal.observePersistent", false, true, false, false], ["opencode.codexQuota", true, false, false, true],
+      ...["file.list", "file.read", "file.find", "git.repository", "git.status", "git.branches", "git.diff", "command.list", "terminal.list", "terminal.screen", "terminal.snapshot", "git.worktrees"].map(name => [name, true, false, false, true] as const),
+      ...["git.createWorktree", "git.removeWorktree", "command.run", "terminal.start", "terminal.startPersistent", "command.remove", "terminal.remove", "terminal.input", "terminal.interrupt", "terminal.sendCtrlD"].map(name => [name, false, true, (name.startsWith("command.") || name.startsWith("terminal.")), false] as const),
+      ...["opencode.steer", "opencode.compact", "opencode.invokeCommand", "opencode.invokeSkill", "opencode.interrupt", "opencode.respondPermission", "opencode.respondForm", "opencode.revertCommit", "opencode.removeSavedApproval", "opencode.synthetic"].map(name => [name, false, true, ["opencode.steer", "opencode.compact", "opencode.invokeCommand", "opencode.invokeSkill", "opencode.interrupt", "opencode.respondPermission", "opencode.respondForm", "opencode.revertCommit", "opencode.synthetic"].includes(name), false] as const),
       ...["opencode.updateInbox", "opencode.switchModel", "opencode.switchAgent", "opencode.setPermissions"].map(name => [name, false, false, false, true] as const),
       ...["opencode.cancelInbox", "opencode.cancelForm", "opencode.delete"].map(name => [name, false, true, false, false] as const),
       ["opencode.revertStage", false, false, false, false], ["opencode.revertClear", false, false, false, true],
-      ["host.worktreeRefresh", false, false, false, true],
-      ["command.resize", false, false, false, true],
+      ["git.refreshWorktrees", false, false, false, true],
+      ["terminal.resize", false, false, false, true],
       ...["opencode.create", "opencode.continue", "opencode.fork"].map(name => [name, false, true, true, false] as const),
       ["opencode.wait", true, false, false, true],
-      ["opencode.inspectActivity", true, false, false, true], ["opencode.inspectResult", true, false, false, true],
+      ["opencode.activity", true, false, false, true], ["opencode.result", true, false, false, true],
       ...queries.map(name => [name, true, false, false, true] as const),
     ] as const) {
       const tool = tools.find((t) => t.name === name)!;
@@ -67,8 +68,8 @@ test("focused host and command tools have unique purpose-specific schemas and tr
   try {
     const { tools } = await fixture.client.listTools();
     assert.equal(new Set(tools.map(tool => tool.name)).size, tools.length);
-    const reads = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.tools", "opencode.tool", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
-    for (const name of ["host.list", "host.read", "host.find", "host.vcs", "host.vcsStatus", "host.vcsBranch", "host.vcsDiff", "host.commands", "host.terminalScreen", "host.terminalSnapshot", "host.worktreeList", "host.worktreeCreate", "host.worktreeRemove", "host.worktreeRefresh", "command.startShell", "command.startPty", "command.startPersistentPty", "command.remove", "command.resize", "command.input", "command.interrupt", "command.ctrlD", ...reads]) {
+    const reads = ["opencode.sessionDiff", "opencode.inbox", "opencode.skill", "opencode.toolCalls", "opencode.toolCall", "opencode.models", "opencode.agents", "opencode.agent", "opencode.messages", "opencode.message", "opencode.permissions", "opencode.savedApprovals", "opencode.runtime", "opencode.skills", "opencode.providers", "opencode.usage", "opencode.sessions", "opencode.session"];
+    for (const name of ["file.list", "file.read", "file.find", "git.repository", "git.status", "git.branches", "git.diff", "command.list", "terminal.list", "terminal.screen", "terminal.snapshot", "git.worktrees", "git.createWorktree", "git.removeWorktree", "git.refreshWorktrees", "command.run", "terminal.start", "terminal.startPersistent", "command.remove", "terminal.resize", "terminal.input", "terminal.interrupt", "terminal.sendCtrlD", ...reads]) {
       const tool = tools.find(candidate => candidate.name === name);
       assert.ok(tool, `missing ${name}`);
       assert.ok(tool.description?.trim());
@@ -76,16 +77,16 @@ test("focused host and command tools have unique purpose-specific schemas and tr
       assert.equal(tool.inputSchema.additionalProperties, false);
       assert.ok(tool.outputSchema);
     }
-    for (const [name, absent] of [["host.list", "type"], ["host.worktreeList", "action"], ["command.startShell", "kind"], ["command.remove", "action"], ["opencode.agents", "type"]] as const) {
+    for (const [name, absent] of [["file.list", "type"], ["git.worktrees", "action"], ["command.run", "kind"], ["command.remove", "action"], ["opencode.agents", "type"]] as const) {
       assert.equal(absent in tools.find(tool => tool.name === name)!.inputSchema.properties!, false, `${name} has no selector`);
     }
-    const refresh = tools.find(tool => tool.name === "host.worktreeRefresh")!.annotations!;
+    const refresh = tools.find(tool => tool.name === "git.refreshWorktrees")!.annotations!;
     assert.deepEqual([refresh.readOnlyHint, refresh.destructiveHint, refresh.idempotentHint], [false, false, true]);
-    const resize = tools.find(tool => tool.name === "command.resize")!.annotations!;
+    const resize = tools.find(tool => tool.name === "terminal.resize")!.annotations!;
     assert.deepEqual([resize.readOnlyHint, resize.destructiveHint, resize.idempotentHint], [false, false, true]);
     const read = tools.find(tool => tool.name === "command.read")!.annotations!;
     assert.deepEqual([read.readOnlyHint, read.destructiveHint], [true, false]);
-    const observer = tools.find(tool => tool.name === "command.observePersistentPty")!.annotations!;
+    const observer = tools.find(tool => tool.name === "terminal.observePersistent")!.annotations!;
     assert.deepEqual([observer.readOnlyHint, observer.destructiveHint, observer.idempotentHint], [false, true, false], "persistent observer may remove an exited handle");
     for (const name of ["host.inspect", "host.worktree", "command.start", "command.control", "opencode.query", "opencode.act", "opencode.start", "opencode.inspect", "status"]) assert.equal(tools.some(tool => tool.name === name), false, `${name} compatibility alias absent`);
   } finally { await fixture.close(); }
@@ -95,7 +96,7 @@ test("discovery states text and command wait limits in field descriptions as wel
   const fixture = await mcpFixture(nativeFixture(() => { throw new Error("discovery must not access runtime"); }));
   try {
     const { tools } = await fixture.client.listTools();
-    for (const name of ["opencode.skill", "opencode.message", "opencode.inspectResult"]) {
+    for (const name of ["opencode.skill", "opencode.message", "opencode.result"]) {
       const property = tools.find(tool => tool.name === name)!.inputSchema.properties!.textLimit as { minimum: number; maximum: number; default: number; description: string };
       assert.equal(property.minimum, 1, name);
       assert.equal(property.maximum, 12_000, name);
@@ -103,7 +104,7 @@ test("discovery states text and command wait limits in field descriptions as wel
       assert.match(property.description, /12,?000/);
       assert.match(property.description, /UTF-16/);
     }
-    for (const name of ["command.read", "command.observePersistentPty"]) {
+    for (const name of ["terminal.read", "terminal.observePersistent"]) {
       const property = tools.find(tool => tool.name === name)!.inputSchema.properties!.waitMs as { minimum: number; maximum: number; description: string };
       assert.equal(property.minimum, 0, name);
       assert.equal(property.maximum, 2_000, name);
@@ -122,15 +123,15 @@ test("focused output contracts reject unrelated operation results and retain typ
   const readiness = { detail: "readiness", ready: true, connector: { version: "1", buildId: "source", release: false }, components: { opencode: { ready: true, release: "2", serverPid: 1, error: null }, events: { enabled: false, storageFailed: null }, browser: null } };
   const recovery = { ready: true, opencodeRelease: "2", serverPid: 1, workers: [], pendingActions: [] };
   const cases = [
-    ["status.readiness", readiness, recovery],
-    ["status.recovery", recovery, readiness],
-    ["host.read", { type: "read", location, path: "/workspace/a", size: 0, fingerprint: "f", nextCall: null }, { type: "find", location, data: [], limit: 1, possiblyTruncated: false, search: "a", nextCall: null }],
-    ["host.list", { type: "list", ...page }, { type: "vcsStatus", ...page }],
-    ["host.worktreeList", { projectId: "p", ...page }, { action: "refresh", projectId: "p", persisted: true, data: [], offset: 0, nextOffset: null, total: 0, fingerprint: "f" }],
-    ["host.worktreeCreate", { action: "create", projectId: "p", directory: "/workspace/new", persisted: true }, { action: "remove", projectId: "p", directory: "/workspace/new", persisted: true, removed: true }],
-    ["command.startShell", { ...command, kind: "shell" }, { ...command, kind: "pty" }],
-    ["command.remove", { kind: "pty", location, id: "job", removed: true }, { kind: "pty", location, id: "job", cwd: "/workspace", status: "running", pid: 1, exitCode: null, resized: true }],
-    ["command.interrupt", { kind: "pty", location, id: "job", action: "interrupt", inputSent: true, acknowledged: false, delivery: "unacknowledged" }, { kind: "pty", location, id: "job", action: "ctrlD", inputSent: true, acknowledged: false, delivery: "unacknowledged" }],
+    ["connector.readiness", readiness, recovery],
+    ["opencode.recovery", recovery, readiness],
+    ["file.read", { type: "read", location, path: "/workspace/a", size: 0, fingerprint: "f", nextCall: null }, { type: "find", location, data: [], limit: 1, possiblyTruncated: false, search: "a", nextCall: null }],
+    ["file.list", { type: "list", ...page }, { type: "vcsStatus", ...page }],
+    ["git.worktrees", { projectId: "p", ...page }, { action: "refresh", projectId: "p", persisted: true, data: [], offset: 0, nextOffset: null, total: 0, fingerprint: "f" }],
+    ["git.createWorktree", { action: "create", projectId: "p", directory: "/workspace/new", persisted: true }, { action: "remove", projectId: "p", directory: "/workspace/new", persisted: true, removed: true }],
+    ["terminal.start", { ...command, kind: "pty", cursorUnit: "utf16CodeUnits" }, { ...command, kind: "shell" }],
+    ["command.remove", { kind: "shell", location, id: "job", removed: true }, { kind: "pty", location, id: "job", cwd: "/workspace", status: "running", pid: 1, exitCode: null, resized: true }],
+    ["terminal.interrupt", { kind: "pty", location, id: "job", action: "interrupt", inputSent: true, acknowledged: false, delivery: "unacknowledged" }, { kind: "pty", location, id: "job", action: "ctrlD", inputSent: true, acknowledged: false, delivery: "unacknowledged" }],
     ["opencode.cancelForm", { action: "cancelForm", sessionId: "s", formId: "f", cancelled: true }, { action: "delete", runtime: "opencode", sessionId: "s", deleted: true }],
   ] as const;
   try {
@@ -165,7 +166,7 @@ test("session action tools expose selector-free contracts and dispatch each exac
     ["cancelInbox", "cancelInbox", { sessionId: "s", inboxId: "i" }],
     ["updateInbox", "updateInbox", { sessionId: "s", inboxId: "i", delivery: "queue" }],
     ["compact", "compact", { sessionId: "s" }],
-    ["command", "command", { sessionId: "s", name: "test", text: "" }],
+    ["invokeCommand", "command", { sessionId: "s", name: "test", text: "" }],
     ["invokeSkill", "invokeSkill", { sessionId: "s", skillId: "canonical" }],
     ["interrupt", "interrupt", { sessionId: "s" }],
     ["respondPermission", "respondPermission", { runtime: "codex", sessionId: "s", requestId: "r", optionId: "exact-option" }],
@@ -198,7 +199,7 @@ test("session action tools expose selector-free contracts and dispatch each exac
   } finally { await fixture.close(); }
 });
 
-test("host.read dispatch and fingerprint continuation target the selector-free host.read tool schema", async () => {
+test("file.read dispatch and fingerprint continuation target the selector-free file.read tool schema", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "opencode-focused-read-"));
   try {
     await writeFile(join(cwd, "data.txt"), "abcdef");
@@ -211,12 +212,12 @@ test("host.read dispatch and fingerprint continuation target the selector-free h
     const fixture = await mcpFixture(native);
     try {
       const { tools } = await fixture.client.listTools();
-      const read = tools.find(tool => tool.name === "host.read")!;
+      const read = tools.find(tool => tool.name === "file.read")!;
       const validate = new AjvJsonSchemaValidator().getValidator(read.inputSchema as JsonSchemaType);
-      const first = await fixture.client.callTool({ name: "host.read", arguments: { cwd, path: "data.txt", limit: 2 } });
+      const first = await fixture.client.callTool({ name: "file.read", arguments: { cwd, path: "data.txt", limit: 2 } });
       assert.equal(first.isError, undefined);
       const content = first.structuredContent as { nextCall: { tool: string; arguments: Record<string, unknown> } };
-      assert.deepEqual(content.nextCall, { tool: "host.read", arguments: { cwd, path: join(cwd, "data.txt"), limit: 2, offset: 2, fingerprint: (first.structuredContent as any).fingerprint } });
+      assert.deepEqual(content.nextCall, { tool: "file.read", arguments: { cwd, path: join(cwd, "data.txt"), limit: 2, offset: 2, fingerprint: (first.structuredContent as any).fingerprint } });
       assert.equal(validate(content.nextCall.arguments).valid, true);
       const next = await fixture.client.callTool({ name: content.nextCall.tool, arguments: content.nextCall.arguments });
       assert.equal(next.isError, undefined);
@@ -236,7 +237,7 @@ test("focused query dispatch and fingerprint paging target selector-free opencod
   const fixture = await mcpFixture(native);
   try {
     const { tools } = await fixture.client.listTools();
-    const names = ["sessionDiff", "inbox", "skill", "tools", "tool", "models", "agents", "agent", "messages", "message", "permissions", "savedApprovals", "runtime", "skills", "providers", "usage", "sessions", "session"].map(type => `opencode.${type}`);
+    const names = ["sessionDiff", "inbox", "skill", "tools", "tool", "models", "agents", "agent", "messages", "message", "permissions", "savedApprovals", "runtime", "skills", "providers", "usage", "sessions", "session"].map(type => `opencode.${type === "tools" ? "toolCalls" : type === "tool" ? "toolCall" : type}`);
     for (const name of names) {
       const tool = tools.find(candidate => candidate.name === name)!;
       assert.ok(tool.description?.trim(), name);
@@ -246,17 +247,16 @@ test("focused query dispatch and fingerprint paging target selector-free opencod
     }
     const first = await fixture.client.callTool({ name: "opencode.agents", arguments: { cwd, limit: 1 } });
     assert.equal(first.isError, undefined);
-    const entry = (first.structuredContent as any).results[0];
-    assert.equal(entry.type, "agents");
-    assert.equal(entry.result.data[0].id, "one");
-    const nextCall = entry.result.nextCall;
-    assert.deepEqual(nextCall, { tool: "opencode.agents", arguments: { cwd, limit: 1, offset: 1, fingerprint: entry.result.fingerprint } });
+    const entry = first.structuredContent as any;
+    assert.equal(entry.data[0].id, "one");
+    const nextCall = entry.nextCall;
+    assert.deepEqual(nextCall, { tool: "opencode.agents", arguments: { cwd, limit: 1, offset: 1, fingerprint: entry.fingerprint } });
     assert.equal("type" in nextCall.arguments, false);
     const schema = tools.find(tool => tool.name === nextCall.tool)!.inputSchema as JsonSchemaType;
     assert.equal(new AjvJsonSchemaValidator().getValidator(schema)(nextCall.arguments).valid, true);
     const second = await fixture.client.callTool({ name: nextCall.tool, arguments: nextCall.arguments });
-    assert.equal((second.structuredContent as any).results[0].result.data[0].id, "two");
-    assert.equal((second.structuredContent as any).results[0].result.nextCall, null);
+    assert.equal((second.structuredContent as any).data[0].id, "two");
+    assert.equal((second.structuredContent as any).nextCall, null);
   } finally { await fixture.close(); }
 });
 
@@ -266,7 +266,7 @@ test("MCP image response contains safe metadata and one bounded image block, nev
   const png = Buffer.from([137,80,78,71,13,10,26,10]);
   const fixture = await mcpFixture(nativeFixture((r) => r.path === "/api/location" ? { directory: cwd } : new Response(png)));
   try {
-    const response = await fixture.client.callTool({ name: "host.read", arguments: { cwd, path: "image", image: true } });
+    const response = await fixture.client.callTool({ name: "file.read", arguments: { cwd, path: "image", image: true } });
     assert.equal(response.isError, undefined);
     const content = response.content as {type:string;text?:string;mimeType?:string;data?:string}[];
     assert.equal(content.length, 1); assert.equal(content[0].type, "image"); assert.equal(content[0].mimeType, "image/png");
@@ -282,16 +282,19 @@ test("host discovery publishes purpose-specific examples without operation selec
     const { tools } = await fixture.client.listTools();
     const provider = new AjvJsonSchemaValidator();
     for (const [name, example] of [
-      ["host.list", { cwd: "/workspace" }],
-      ["host.read", { cwd: "/workspace", path: "README.md", limit: 2000 }],
-      ["command.startShell", { cwd: "/workspace", command: "pwd" }],
+      ["file.list", { cwd: "/workspace" }],
+      ["file.read", { cwd: "/workspace", path: "README.md", limit: 2000 }],
+      ["command.run", { cwd: "/workspace", command: "pwd" }],
     ] as const) {
       const tool = tools.find(tool => tool.name === name)!;
       const validate = provider.getValidator(tool.inputSchema as JsonSchemaType);
       assert.ok(tool.description!.trim());
       assert.equal(validate(example).valid, true, `${name} example passes its published contract`);
     }
-    assert.match(tools.find(tool => tool.name === "command.startShell")!.description!, /command.read/);
+    const run = tools.find(tool => tool.name === "command.run")!;
+    assert.match(run.description!, /foreground output/);
+    assert.match(run.description!, /nextCall/);
+    assert.match(JSON.stringify(run.outputSchema), /command\.read/, "Shell continuations name the owning read tool");
     assert.equal(native.requests.length, 0);
   } finally { await fixture.close(); }
 });
@@ -300,15 +303,15 @@ test("strict union errors omit arbitrary unknown keys and reject wrong selectors
   const native = nativeFixture(() => { throw new Error("invalid arguments must not reach runtime"); });
   const fixture = await mcpFixture(native);
   try {
-    for (const [name, args] of [["host.list", { type: "list", cwd: "/workspace" }], ["host.read", { cwd: "/workspace", path: "file", unknownAction: true }]] as const) {
+    for (const [name, args] of [["file.list", { type: "list", cwd: "/workspace" }], ["file.read", { cwd: "/workspace", path: "file", unknownAction: true }]] as const) {
       const result = await fixture.client.callTool({ name, arguments: args });
       assert.equal(result.isError, true);
       assert.match(JSON.stringify(result.content), /Unrecognized field/);
     }
     const keys = Object.fromEntries(Array.from({ length: 100 }, (_, i) => [`PRIVATE-KEY-${i}-${"x".repeat(1000)}`, "PRIVATE-VALUE"]));
     for (const [name, args] of [
-      ["host.list", { cwd: "/workspace", ...keys }],
-      ["command.startShell", { cwd: "/workspace", command: "pwd", args: [], ...keys }],
+      ["file.list", { cwd: "/workspace", ...keys }],
+      ["command.run", { cwd: "/workspace", command: "pwd", args: [], ...keys }],
       ["opencode.agents", { includeHidden: true, ...keys }],
     ] as const) {
       const result = await fixture.client.callTool({ name, arguments: args });
@@ -330,10 +333,10 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
     const provider = new AjvJsonSchemaValidator();
     const schemas = new Map(tools.map((tool) => [tool.name, tool.inputSchema]));
     for (const [name, fields] of [
-      ["host.read", ["cwd", "path", "fingerprint"]],
-      ["host.worktreeRemove", ["cwd", "directory", "force"]],
-      ["command.startShell", ["cwd", "command", "timeoutMs"]],
-      ["command.resize", ["kind", "cwd", "id", "rows", "cols"]],
+      ["file.read", ["cwd", "path", "fingerprint"]],
+      ["git.removeWorktree", ["cwd", "directory", "force"]],
+      ["command.run", ["cwd", "command", "timeoutMs"]],
+      ["terminal.resize", ["kind", "cwd", "id", "rows", "cols"]],
       ["opencode.switchAgent", ["sessionId", "agent"]],
       ["opencode.setPermissions", ["sessionId", "permissions"]],
     ] as const) {
@@ -365,16 +368,16 @@ test("real tools/list exposes object fields and discriminators; JSON Schema and 
     assert.equal(validateStart({ task: "task", cwd: "/tmp", model: "openai/a", agent: [{ name: "build" }] }).valid, false);
     assert.equal(validateStart({ task: "task", cwd: "/tmp", model: "openai/a", agents: ["explore"] }).valid, false);
     const cases: [string, Record<string, unknown>, Record<string, unknown>[]][] = [
-      ["host.read", { cwd: "/tmp", path: "file", limit: 65536 }, [
+      ["file.read", { cwd: "/tmp", path: "file", limit: 65536 }, [
         { cwd: "/tmp", limit: 1 }, { cwd: "/tmp", path: "file", limit: 65537 },
       ]],
-      ["host.worktreeRemove", { cwd: "/tmp", directory: "/tmp/tree", force: false }, [
+      ["git.removeWorktree", { cwd: "/tmp", directory: "/tmp/tree", force: false }, [
         { cwd: "/tmp", directory: "/tmp/tree" }, { cwd: "/tmp", directory: "/tmp/tree", force: true, action: "remove" },
       ]],
-      ["command.startShell", { cwd: "/tmp", command: "true", timeoutMs: 86400000 }, [
+      ["command.run", { cwd: "/tmp", command: "true", timeoutMs: 86400000 }, [
         { cwd: "/tmp", command: "true", args: [] }, { cwd: "/tmp", command: "true", timeoutMs: 86400001 },
       ]],
-      ["command.resize", { kind: "pty", cwd: "/tmp", id: "pty", rows: 1, cols: 1000 }, [
+      ["terminal.resize", { kind: "pty", cwd: "/tmp", id: "pty", rows: 1, cols: 1000 }, [
         { kind: "shell", cwd: "/tmp", id: "shell", rows: 24, cols: 80 }, { kind: "pty", cwd: "/tmp", id: "pty", rows: 0, cols: 80 },
       ]],
       ["opencode.agents", { includeHidden: true, limit: 50 }, [{ includeHidden: true, limit: 51 }, { view: "unknown" }, { limit: 0 }]],
@@ -411,7 +414,7 @@ test("discovered output schemas accept existing safe structured errors, includin
   try {
     const { tools } = await fixture.client.listTools();
     for (const [name, args] of [
-       ["host.vcs", { cwd: "/workspace" }],
+       ["git.repository", { cwd: "/workspace" }],
       ["opencode.create", { cwd: "/workspace", model: "openai/a", task: "test" }],
       ["opencode.delete", { runtime: "opencode", sessionId: "s" }],
     ] as const) {
@@ -427,7 +430,7 @@ test("discovered output schemas accept existing safe structured errors, includin
   } finally { await fixture.close(); }
 });
 
-test("MCP shell example retains separate native create, get and output calls with saved byte cursor", async () => {
+test("Shell admission-only run retains native create, get and output calls with saved byte cursor", async () => {
   const location = { directory: "/workspace" };
   const shell = { id: "native-shell", cwd: location.directory, status: "exited", exit: 0, time: { started: 1, ended: 2 } };
   const native = nativeFixture(r => {
@@ -439,13 +442,13 @@ test("MCP shell example retains separate native create, get and output calls wit
   });
   const fixture = await mcpFixture(native);
   try {
-    const started = await fixture.client.callTool({ name: "command.startShell", arguments: { cwd: location.directory, command: "pwd" } });
+    const started = await fixture.client.callTool({ name: "command.run", arguments: { cwd: location.directory, command: "pwd", waitMs: 0 } });
     assert.notEqual(started.isError, true);
     assert.deepEqual(native.requests.map(r => [r.method, r.path]), [["GET", "/api/location"], ["POST", "/api/shell"]]);
     assert.deepEqual(native.requests[1].body, { cwd: location.directory, command: "pwd", timeout: 120000 });
     const handle = started.structuredContent as any;
     assert.equal(handle.id, shell.id); assert.equal(handle.cursor, 0); assert.equal(handle.cursorUnit, "bytes");
-    const read = await fixture.client.callTool({ name: "command.read", arguments: { kind: handle.kind, cwd: handle.cwd, id: handle.id, cursor: handle.cursor, limit: 3 } });
+    const read = await fixture.client.callTool({ name: "command.read", arguments: { cwd: handle.cwd, id: handle.id, cursor: handle.cursor, limit: 3 } });
     assert.notEqual(read.isError, true);
     assert.deepEqual(native.requests.slice(2).map(r => [r.method, r.path]), [["GET", "/api/location"], ["GET", "/api/shell/native-shell"], ["GET", "/api/shell/native-shell/output"]]);
     assert.equal(native.requests.at(-1)!.query.get("cursor"), "0");
@@ -507,9 +510,9 @@ test("focused start and inspect schemas reject cross-purpose and runtime-invalid
       ["opencode.create", { cwd: "/tmp", task: "create", variant: "high", model: "openai/model" }],
       ["opencode.continue", { sessionId: "s", task: "continue", runtime: "codex", mode: "agent" }],
       ["opencode.fork", { forkFromSessionId: "s", beforeMessageId: "m", task: "fork" }],
-      ["opencode.inspectActivity", { sessionId: "s" }],
-      ["opencode.inspectResult", { sessionId: "s", messageId: "u", selectionCursor: "c", selectionFingerprint: "f", candidateAssistantMessageId: "a" }],
-      ["opencode.inspectResult", { sessionId: "s", runtime: "codex", textLimit: 100 }],
+      ["opencode.activity", { sessionId: "s" }],
+      ["opencode.result", { sessionId: "s", messageId: "u", selectionCursor: "c", selectionFingerprint: "f", candidateAssistantMessageId: "a" }],
+      ["opencode.result", { sessionId: "s", runtime: "codex", textLimit: 100 }],
     ];
     for (const [name, args] of accepted) assert.equal(validator(name, args), true, `${name} ${JSON.stringify(args)}`);
     const rejected: [string, Record<string, unknown>][] = [
@@ -521,11 +524,11 @@ test("focused start and inspect schemas reject cross-purpose and runtime-invalid
       ["opencode.continue", { sessionId: "s", task: "continue", mode: "agent" }],
       ["opencode.continue", { sessionId: "s", task: "continue", runtime: "codex", model: "openai/model" }],
       ["opencode.fork", { forkFromSessionId: "s", task: "fork", runtime: "codex" }],
-      ["opencode.inspectActivity", { sessionId: "s", detail: "result" }],
-      ["opencode.inspectActivity", { sessionId: "s", runtime: "codex", messageId: "u" }],
-      ["opencode.inspectResult", { sessionId: "s", selectionCursor: "c" }],
-      ["opencode.inspectResult", { sessionId: "s", candidateAssistantMessageId: "a" }],
-      ["opencode.inspectResult", { sessionId: "s", runtime: "codex", messageId: "u" }],
+      ["opencode.activity", { sessionId: "s", detail: "result" }],
+      ["opencode.activity", { sessionId: "s", runtime: "codex", messageId: "u" }],
+      ["opencode.result", { sessionId: "s", selectionCursor: "c" }],
+      ["opencode.result", { sessionId: "s", candidateAssistantMessageId: "a" }],
+      ["opencode.result", { sessionId: "s", runtime: "codex", messageId: "u" }],
     ];
     for (const [name, args] of rejected) {
       assert.equal(validator(name, args), false, `${name} schema`);
@@ -623,7 +626,7 @@ test("semantic and action-required recovery stay transport-bounded with long Uni
     return response.structuredContent as any;
   };
   try {
-    const semantic = await call("opencode.inspectActivity", { sessionId: "s" });
+    const semantic = await call("opencode.activity", { sessionId: "s" });
     const waited = await call("opencode.wait", { sessionId: "s", messageId: "u" });
     assert.equal(waited.wakeReason, "actionRequired"); assert.equal(waited.pendingActions.length, 1);
     const preview = semantic.currentActivity;
@@ -631,7 +634,7 @@ test("semantic and action-required recovery stay transport-bounded with long Uni
     let offset = preview.textPaging.nextOffset;
     while (offset !== null) {
       const query = await call("opencode.message", { sessionId: "s", messageId: preview.id, textOffset: offset, textFingerprint: preview.textPaging.fingerprint });
-      const result = query.results[0].result;
+      const result = query;
       recovered += result.text; offset = result.textPaging.nextOffset;
     }
     assert.equal(recovered, text);

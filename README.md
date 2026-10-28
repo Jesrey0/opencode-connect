@@ -3,7 +3,7 @@
 > OpenCode Connect is an independent project and is not affiliated with or
 > endorsed by the OpenCode project or OpenAI.
 
-OpenCode Connect **0.16.0** projects native host operations and runtime-scoped
+OpenCode Connect **0.17.0** projects native host operations and runtime-scoped
 worker execution into MCP for ChatGPT's **0xOperator**.
 It pins `@opencode/client` to **2.0.24**.
 
@@ -11,6 +11,7 @@ The connector provides bounded host files, commands, worktrees and native sessio
 plus optional [Chrome interaction](docs/browser-capability.md). Direct Codex sessions
 run through the native OpenCode plugin in `packages/codex-plugin`, using Codex ACP.
 The plugin and connector share this repository; they have separate runtime lifecycles.
+OpenCode remains the unified control surface for both worker runtimes.
 
 ```text
 ChatGPT / 0xOperator
@@ -72,21 +73,29 @@ recover existing identities before creating replacement work.
 
 | Intent | Starting point | Evidence to retain |
 | --- | --- | --- |
-| Find and read project content | `host.list`, `host.find`, `host.read` | Canonical `cwd`, file path, fingerprint and returned `nextCall` |
-| Search contents or run a check | `command.run`; follow returned `command.read` continuation | `kind`, native handle `id`, canonical `cwd`, cursor, exit/drain evidence |
+| Find and read project content | `file.list`, `file.find`, `file.read` | Canonical `cwd`, file path, fingerprint and returned `nextCall` |
+| Search contents or run a check | `command.run`; follow returned `command.read` continuation | Native handle `id`, canonical `cwd`, cursor, exit/drain evidence |
+| Use an interactive terminal | `terminal.start` or session-bound `terminal.startPersistent` | Native handle, terminal kind, canonical `cwd`, replay cursor and loss metadata |
 | Delegate fresh work | `opencode.create` with `cwd` and `task` | `runtime`, `sessionId`, OpenCode user `messageId` |
 | Continue or fork known work | `opencode.continue`; `opencode.fork` for OpenCode | Existing session identity and returned admission identity |
-| Follow or recover a worker | `opencode.wait`, `opencode.inspectActivity`, `opencode.inspectResult` | Exact prompt identity, outcome evidence and returned continuations |
+| Follow or recover a worker | `opencode.wait`, `opencode.activity`, `opencode.result` | Exact prompt identity, outcome evidence and returned continuations |
 | Inspect runtime context and API capabilities | `opencode.runtime` with the intended runtime | Connector capability scope, native inventory, Codex loaded-plugin identity, supported correlation |
-| Read Codex quota | `codex.quota {}` | Native quota windows and reset timestamps |
+| Read Codex quota | `opencode.codexQuota {}` | Native quota windows and reset timestamps |
 | Operate a browser | `browser.tabs`, exact `browser.attach`, `browser.snapshot` | Target, lease, current element references and application postconditions |
 
-Public tools are purpose-specific. They do not accept internal `type`, `action`
-or command-start `kind` selectors. `command.read` still needs the saved `kind`
-(`shell` or `pty`); `command.observePersistentPty` takes `cwd` and `id` without it.
-Follow returned `nextCall` objects exactly instead of reconstructing cursors.
+The catalog groups host operations by resource: `file.*`, `git.*`, `command.*`,
+`terminal.*` and `browser.*`. Worker operations remain under `opencode.*`, including
+Codex plugin control and `opencode.codexQuota`. `connector.readiness` checks the
+connector and native service without reading worker histories.
 
-For a bounded file read, call `host.read`:
+Shell reads/removal take `cwd` and `id`, without `kind`. Ordinary PTY replay uses
+`terminal.read`; persistent replay uses `terminal.observePersistent`, whose native
+exit cleanup can retire a handle. Terminal controls require the saved `kind`
+(`pty` or `persistentPty`). Follow returned `nextCall` objects exactly instead of
+reconstructing cursors. See [Catalog migration](docs/catalog-migration.md) for all
+0.17.0 name and argument changes; legacy public aliases are not retained.
+
+For a bounded file read, call `file.read`:
 
 ```json
 {"cwd":"/absolute/project","path":"README.md","limit":2000}
@@ -102,8 +111,14 @@ A short command returns output, native exit status and drain evidence in one cal
 If it is still running, output is undrained, or observation failed, retain its
 native handle and follow `nextCall`. `waitMs` bounds observation after admission;
 `timeoutMs` independently limits process execution. Wait expiry or cancellation
-does not kill or restart the command. Use `command.startShell` for explicit
-admission without foreground observation and the existing PTY tools for terminals.
+does not kill or restart the command. Use `waitMs: 0` for admission without
+foreground observation. Interactive terminals use an executable plus separate
+`args` through `terminal.start` or `terminal.startPersistent`.
+
+Catalog reads return directly typed objects. For example, `opencode.models`
+returns its `data`, paging and `nextCall` at the result root. Model discovery
+defaults to compact entries retaining native IDs, enabled state, pricing, input
+modalities and variants; request `view: "full"` for specifications.
 
 For fresh OpenCode work, call `opencode.create`:
 
@@ -115,7 +130,7 @@ OpenCode selects its configured model and agent when omitted. For Codex, add
 `runtime: "codex"`; use the exposed native mode when needed. Retain the returned
 runtime and session together. OpenCode wait requires its canonical user
 `messageId`; Codex returns `messageId: null` and wait/inspection omit that field.
-Do not retry an uncertain admission. Use the retained IDs and `status.recovery`
+Do not retry an uncertain admission. Use the retained IDs and `opencode.recovery`
 when recovery is necessary.
 
 Worker completion is result evidence. Verify the requested artifact or state at
@@ -145,7 +160,7 @@ not create subagents or select the executing agent.
 
 Codex owns execution, sandbox modes, history and native session IDs. The plugin
 owns ACP supervision; the connector calls its RPC. There is no intermediary
-OpenCode model turn or CLI turn. `codex.quota` is a read-only App Server snapshot;
+OpenCode model turn or CLI turn. `opencode.codexQuota` is a read-only App Server snapshot;
 `opencode.usage` is OpenCode token activity. Neither is General Chat message quota.
 Recovered Codex turn outcomes require correlated native history; history alone
 does not establish the earlier mode or objective success.
@@ -161,6 +176,7 @@ is authorized. Direct HostPlane authority is separate from worker permissions.
 | --- | --- |
 | [MCP contract](docs/mcp-contract.md) | OpenAI requirements, transport/auth boundary, focused tools, native projections, bounds, permissions and recovery |
 | [Architecture](docs/architecture.md) | Source ownership, dependencies, console, service lifetime and persistence |
+| [Catalog migration](docs/catalog-migration.md) | 0.17.0 names, shell/terminal routing, direct read results and client refresh |
 | [Browser capability](docs/browser-capability.md) | Setup, Linux/Windows consent, targets, workflows, input, verification and cleanup |
 | [Operator acceptance](docs/operator-acceptance.md) | General Chat prompt-selection cases, complete workflow evidence and reproducible local probes |
 | [Release lifecycle](docs/release-cutover.md) | Immutable builds, connector/plugin acceptance and coordinated rollback |
@@ -191,4 +207,8 @@ Follow the [release runbook](docs/release-cutover.md); preserve installed config
 and the matching connector/plugin rollback pair. `/health` proves connector
 identity and native connectivity. Use `opencode.runtime` with `runtime: "codex"`
 for loaded package/build-record identity and capability evidence; this is separate
-from release integrity verification and quota.
+from release integrity verification and quota. Byte-identical plugin runtime
+inputs can remain loaded during a connector-only activation after compatibility
+and identity verification; the loaded plugin may therefore name an earlier build.
+After activation, refresh stale ChatGPT connections and verify the exposed catalog
+before treating the new tool names as available.

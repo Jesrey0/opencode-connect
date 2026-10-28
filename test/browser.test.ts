@@ -693,7 +693,7 @@ test("real Chrome browser acceptance and recovery", { skip: process.env.OPENCODE
       assert.equal(exposed.filter(item => item.name.startsWith("browser.")).length, 25, "Browser catalog includes managed Linux close and consolidated keyboard/scroll actions");
       assert.equal(exposed.find(item => item.name === "browser.snapshot").inputSchema.properties.scopeRef.type, "string");
       const workflowSchema = exposed.find(item => item.name === "browser.workflow").inputSchema;
-      assert.deepEqual(workflowSchema.properties.steps.items.anyOf[0].properties.target.properties.within.required, ["role", "name"]);
+      assert.deepEqual(workflowSchema.properties.steps.items.properties.target.properties.within.required, ["role", "name"]);
       const reply = await request("browser.attach", { targetId: one.id, controlMode: "observe" });
       assert.ok(reply.result?.structuredContent?.leaseId, JSON.stringify(reply));
       const httpLease = reply.result.structuredContent.leaseId;

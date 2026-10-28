@@ -49,7 +49,7 @@ export class EventReconciler {
             this.continuations.delete(key); break;
           }
           const next = result?.nextCall;
-          if (!result?.terminal || next?.tool !== "opencode.inspectResult" || !this.sameTarget(target, next.arguments)) {
+          if (!result?.terminal || next?.tool !== "opencode.result" || !this.sameTarget(target, next.arguments)) {
             this.continuations.delete(key); break;
           }
           this.continuations.set(key, { ...next.arguments!, detail: "result" });

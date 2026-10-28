@@ -159,11 +159,13 @@ test("installed workspace RPC and connector definitions agree and usage crosses 
   const client = new Client({ name: "workspace-rpc-contract", version: "1" });
   const [a, b] = InMemoryTransport.createLinkedPair(); await server.connect(a); await client.connect(b);
   try {
-    const response = await client.callTool({ name: "codex.quota", arguments: {} });
+    const response = await client.callTool({ name: "opencode.codexQuota", arguments: {} });
     assert.notEqual(response.isError, true);
-    const result = (response.structuredContent as any).results[0];
-    assert.equal(result.result.buckets[0].primary.usedPercent, 7);
-    assert.equal(result.result.nextCall, null);
+    const result = response.structuredContent as any;
+    assert.equal(result.runtime, "codex");
+    assert.equal(result.buckets[0].primary.usedPercent, 7);
+    assert.equal(result.nextCall, null);
+    assert.equal("results" in result, false);
     assert.deepEqual(harness.rpcCalls.map((call: any) => call.method), ["codex-sessions.usage"]);
     assert.deepEqual(harness.nativeCalls, []);
   } finally { await client.close(); await server.close(); }
@@ -221,7 +223,11 @@ test("MCP routes exact Codex options and rejects mixing runtime decision formats
     assert.deepEqual(f.requests.at(-1)?.body, { input: { sessionId: "native-thread", requestId: "native-request", optionId: "native-once" } });
     const inventory = await client.callTool({ name: "opencode.sessions", arguments: { runtime: "codex" } });
     assert.notEqual(inventory.isError, true);
-    assert.equal("error" in (inventory.structuredContent as any).results[0], false);
+    const inventoryPage = inventory.structuredContent as any;
+    assert.equal("error" in inventoryPage, false);
+    assert.equal("results" in inventoryPage, false);
+    assert.equal(inventoryPage.runtime, "codex");
+    assert.deepEqual(inventoryPage.sessions, [], "Native empty inventory remains empty");
     const before = f.requests.length;
     for (const args of [
       { runtime: "codex", sessionId: "native-thread", requestId: "native-request", decision: "once" },

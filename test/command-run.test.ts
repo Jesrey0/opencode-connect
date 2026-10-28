@@ -87,10 +87,10 @@ test("running shell returns read-only continuation when the observation budget e
   assert.equal(result.observation.reason, "waitTimeout");
   assert.equal(result.output, "hello\n");
   assert.equal(result.drained, false);
-  assert.deepEqual(result.nextCall, { tool: "command.read", arguments: { kind: "shell", cwd: "/canonical", id: "native-shell", cursor: 6, limit: 12000 } });
+  assert.deepEqual(result.nextCall, { tool: "command.read", arguments: { cwd: "/canonical", id: "native-shell", cursor: 6, limit: 12000 } });
   f.state.status = "exited";
   f.state.bytes = Buffer.from("hello\nfinished");
-  const resumed = await f.host.read(result.nextCall!.arguments);
+  const resumed = await f.host.read({ ...result.nextCall!.arguments, kind: "shell" });
   assert.equal(resumed.output, "finished");
   assert.equal(resumed.drained, true);
   assertSingleStart(f.requests);
@@ -105,8 +105,8 @@ test("terminal output paging preserves unread bytes and canonical continuation",
   assert.equal(first.size, 8);
   assert.equal(first.drained, false);
   assert.equal(first.nextCall?.tool, "command.read");
-  const second = await f.host.read(first.nextCall!.arguments);
-  const third = await f.host.read({ ...first.nextCall!.arguments, cursor: second.cursor as number });
+  const second = await f.host.read({ ...first.nextCall!.arguments, kind: "shell" });
+  const third = await f.host.read({ ...first.nextCall!.arguments, kind: "shell", cursor: second.cursor as number });
   assert.equal(first.output + second.output + third.output, "abcdefgh");
   assert.equal(third.drained, true);
   assertSingleStart(f.requests);

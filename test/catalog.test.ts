@@ -6,8 +6,8 @@ import { nativeFixture } from "./native-fixture.js";
 const location = { directory: "/tmp/project" };
 const allow = { action: "*", resource: "*", effect: "allow" as const };
 const agent = (id: string, hidden = false) => ({ id, name: id, mode: "primary", hidden, description: `${id} description`, system: "PRIVATE instructions", permissions: [allow], request: { headers: { authorization: "PRIVATE" } } });
-// Query's heterogeneous results have independent projections; these assertions
-// inspect the transport shape just as an MCP caller does.
+// Backend queries retain their private heterogeneous envelope. MCP callers
+// receive each purpose-specific projection directly.
 const result = (value: unknown): any => JSON.parse(JSON.stringify(value)).results[0].result;
 
 test("model catalog retains native enabled state, pricing, variants, ordering, location and paging mode", async () => {
@@ -34,7 +34,10 @@ test("model catalog retains native enabled state, pricing, variants, ordering, l
   assert.equal(second.data[0].enabled, false);
   assert.deepEqual(second.data[0].cost, models[1].cost);
   assert.equal(second.nextCall, null);
-  const full = result(await backend.query([{ type: "models", cwd: location.directory }]));
+  const defaultView = result(await backend.query([{ type: "models", cwd: location.directory }]));
+  assert.equal(defaultView.view, "compact");
+  assert.deepEqual(defaultView.data[0], first.data[0]);
+  const full = result(await backend.query([{ type: "models", cwd: location.directory, view: "full" }]));
   assert.equal(full.view, "full");
   assert.equal(full.data[0].name, "Model a");
   assert.equal(full.data[0].contextWindow, 100000);
