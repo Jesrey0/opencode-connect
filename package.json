@@ -8,6 +8,7 @@
     "browser:setup": "node scripts/setup-browser.mjs",
     "browser:benchmark": "node --import tsx scripts/benchmark-browser.mjs",
     "operator:benchmark": "node --import tsx scripts/benchmark-operator.mjs",
+    "operator:introspect": "node scripts/inspect-ngrok.mjs",
     "test:browser": "node --import tsx --test --test-concurrency=1 test/browser*.test.ts",
     "prebuild": "node scripts/verify-integration.mjs && node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc -p tsconfig.json",

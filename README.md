@@ -178,10 +178,19 @@ is authorized. Direct HostPlane authority is separate from worker permissions.
 | [Architecture](docs/architecture.md) | Source ownership, dependencies, console, service lifetime and persistence |
 | [Catalog migration](docs/catalog-migration.md) | 0.17.0 names, shell/terminal routing, direct read results and client refresh |
 | [Browser capability](docs/browser-capability.md) | Setup, Linux/Windows consent, targets, workflows, input, verification and cleanup |
+| [Operator introspection](docs/operator-introspection.md) | ngrok capture analysis for MCP tool frequency, latency, errors and session sequences |
 | [Operator acceptance](docs/operator-acceptance.md) | General Chat prompt-selection cases, complete workflow evidence and reproducible local probes |
 | [Release lifecycle](docs/release-cutover.md) | Immutable builds, connector/plugin acceptance and coordinated rollback |
 | [Codex plugin](packages/codex-plugin/README.md) | Direct ACP sessions, modes, approvals, history and quota |
 | [Agent guide](AGENTS.md) | Repository engineering boundaries |
+
+## Operator usage reports
+
+Run `npm run operator:introspect` to summarize existing local ngrok captures.
+Use `npm run operator:introspect -- --json` for a machine-readable summary.
+The script reports capture gaps and never changes inspection settings. See
+[operator introspection](docs/operator-introspection.md) for offline input,
+coverage and interpretation.
 
 ## Development and release
 
