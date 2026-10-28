@@ -187,7 +187,9 @@ is authorized. Direct HostPlane authority is separate from worker permissions.
 ## Operator usage reports
 
 Run `npm run operator:introspect` to summarize existing local ngrok captures.
-Use `npm run operator:introspect -- --json` for a machine-readable summary.
+The default captured pathname is the public ingress route `/opencode-connect/mcp`;
+use `--path /mcp` for captures of a direct/proxy backend route.
+Use `npm run --silent operator:introspect -- --json` for a machine-readable summary.
 The script reports capture gaps and never changes inspection settings. See
 [operator introspection](docs/operator-introspection.md) for offline input,
 coverage and interpretation.

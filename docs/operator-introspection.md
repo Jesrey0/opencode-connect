@@ -10,12 +10,15 @@ From the repository root with Node 24 or newer:
 
 ```bash
 npm run operator:introspect
-npm run operator:introspect -- --json
+npm run --silent operator:introspect -- --json
 node scripts/inspect-ngrok.mjs --json > /tmp/opencode-usage-summary.json
 ```
 
 The default source is `http://127.0.0.1:4040/api/`. Only POST requests with
-pathname `/mcp` are analyzed; query parameters are ignored. To select another
+pathname `/opencode-connect/mcp` are analyzed; query parameters are ignored.
+This is the public host-ingress path captured by ngrok before Caddy rewrites it
+to the connector's backend `/mcp` route. For direct/proxy deployments that capture
+that backend route, select it explicitly with `--path /mcp`. To select another
 local Agent API or MCP pathname:
 
 ```bash
@@ -25,8 +28,10 @@ npm run operator:introspect -- --api-url http://127.0.0.1:4041/api/ --path /mcp 
 For an existing JSON response from `GET /api/requests/http`, use offline mode:
 
 ```bash
-npm run operator:introspect -- --input /private/capture.json --json
+npm run --silent operator:introspect -- --input /private/capture.json --json
 ```
+
+Use `--silent` with npm when piping or redirecting JSON to suppress npm banners.
 
 Offline input must be an Agent API object with a `requests` array. Cloud Traffic
 Inspector exports use separate contracts and are not accepted by this script.

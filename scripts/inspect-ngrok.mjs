@@ -271,13 +271,14 @@ async function main() {
   let options;
   try {
     options = parseArgs({ options: { input: { type: "string" }, "api-url": { type: "string" },
-      limit: { type: "string", default: "1000" }, path: { type: "string", default: "/mcp" },
+      limit: { type: "string", default: "1000" }, path: { type: "string", default: "/opencode-connect/mcp" },
       json: { type: "boolean" }, help: { type: "boolean", short: "h" } } }).values;
   } catch { throw new Error("Invalid arguments. Run with --help."); }
   if (options.help) {
-    console.log("Usage: node scripts/inspect-ngrok.mjs [--json] [--limit 1000] [--path /mcp]\n" +
+    console.log("Usage: node scripts/inspect-ngrok.mjs [--json] [--limit 1000] [--path /opencode-connect/mcp]\n" +
       "       [--api-url http://127.0.0.1:4040/api/ | --input capture.json]\n\n" +
       "Reads the ngrok Agent API or a saved GET /api/requests/http JSON response.\n" +
+      "Use --path /mcp for captures of the backend route in direct/proxy deployments.\n" +
       "Prints summaries only; never replays requests, changes capture, or saves payloads.");
     return;
   }
