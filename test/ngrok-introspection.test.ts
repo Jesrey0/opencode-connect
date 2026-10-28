@@ -39,13 +39,13 @@ async function input(data: unknown, args: string[] = []) {
   } finally { await rm(dir, { recursive: true, force: true }); }
 }
 
-function wire(body: string | Buffer, fields: Record<string, string> = {}, response = false) {
+function wire(body: string | Buffer, fields: Record<string, string> = {}, response = false, path = "/opencode-connect/mcp") {
   const bytes = typeof body === "string" ? Buffer.from(body) : body;
   const headers: Record<string, string> = { "Content-Type": "application/json", ...fields };
   if (!Object.keys(headers).some(key => /^(content-length|transfer-encoding)$/i.test(key))) {
     headers["Content-Length"] = String(bytes.length);
   }
-  const start = response ? "HTTP/1.1 200 OK" : "POST /mcp HTTP/1.1";
+  const start = response ? "HTTP/1.1 200 OK" : "POST " + path + " HTTP/1.1";
   return Buffer.concat([Buffer.from(start + "\r\n" + Object.entries(headers)
     .map(([key, value]) => key + ": " + value).join("\r\n") + "\r\n\r\n"), bytes]).toString("base64");
 }
@@ -62,10 +62,11 @@ function capture(id: string, request: unknown, reply: unknown, options: {
   return {
     id, start: options.start ?? "2026-10-28T00:00:00Z", duration: options.duration ?? 1e6,
     tunnel_name: options.tunnel ?? "operator",
-    request: { method: options.method ?? "POST", uri: options.path ?? "/mcp?token=" + secrets[6],
+    request: { method: options.method ?? "POST", uri: options.path ?? "/opencode-connect/mcp?token=" + secrets[6],
       headers: { Authorization: ["Bearer " + secrets[0]],
         ...(options.session === null ? {} : { "Mcp-Session-Id": [options.session ?? secrets[5]] }) },
-      raw: options.requestRaw ?? wire(JSON.stringify(request), { Authorization: "Bearer " + secrets[0] }) },
+      raw: options.requestRaw ?? wire(JSON.stringify(request), { Authorization: "Bearer " + secrets[0] }, false,
+        options.path ?? "/opencode-connect/mcp?token=" + secrets[6]) },
     ...(options.status === null ? {} : { response: {
       status_code: options.status ?? 200, headers: { "Content-Type": ["application/json"] },
       ...(options.responseRaw !== undefined ? { raw: options.responseRaw } :
@@ -105,6 +106,25 @@ async function server<T>(handler: RequestListener, run: (url: string) => Promise
   try { return await run("http://127.0.0.1:" + address.port + "/api/"); }
   finally { await new Promise<void>((resolve, reject) => instance.close(error => error ? reject(error) : resolve())); }
 }
+
+test("ngrok CLI defaults to the public ingress pathname and supports the backend path override", async () => {
+  const rows = [
+    capture("public", call(1, "command.run"), success(1)),
+    capture("backend", call(2, "file.read"), success(2), { path: "/mcp?token=" + secrets[6] }),
+    capture("trailing-slash", call(3, "git.status"), success(3), { path: "/opencode-connect/mcp/" }),
+    capture("other-prefix", call(4, "file.write"), success(4), { path: "/other/opencode-connect/mcp" }),
+  ];
+  const data = report(await input({ requests: rows }, ["--json"]));
+  assert.equal(data.coverage.analyzed, 1);
+  assert.deepEqual(data.tools.map(row => row.name), ["command.run"]);
+  const backend = report(await input({ requests: rows }, ["--path", "/mcp", "--json"]));
+  assert.equal(backend.coverage.analyzed, 1);
+  assert.deepEqual(backend.tools.map(row => row.name), ["file.read"]);
+  const help = await cli(["--help"]);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /\[--path \/opencode-connect\/mcp\]/);
+  assert.match(help.stdout, /Use --path \/mcp for captures of the backend route/);
+});
 
 test("ngrok CLI summarizes frequency, distinct failure layers and transport duration without payloads", async () => {
   const rows = [
